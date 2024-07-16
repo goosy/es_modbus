@@ -334,14 +334,30 @@ export class Modbus_Client extends EventEmitter {
 
 export class Modbus_Server extends EventEmitter {
     initialized = false;
+    unit_ids = null;
+    accept_all_units = true;
 
     constructor(vector, options) {
         super();
         this.vector = vector;
-        this.unit_id = options.unit_id ?? 1;
+        this.set_unit_ids(options.unit_id ?? 0);
         this.host = options.host ?? '0.0.0.0';
         this.port = options.port ?? 502;
         this.sockets = new Set();
+    }
+
+    set_unit_ids(unit_id) {
+        if (Array.isArray(unit_id)) {
+            this.accept_all_units = false;
+            this.unit_ids = new Set(unit_id);
+        } else if (unit_id !== 0) {
+            this.accept_all_units = false;
+            this.unit_ids = new Set([unit_id]);
+        }
+    }
+
+    is_valid_unit_id(unit_id) {
+        return this.accept_all_units || this.unit_ids.has(unit_id);
     }
 
     start() {
@@ -400,6 +416,13 @@ export class Modbus_Server extends EventEmitter {
 
     on_data(data, socket) {
         const unit_id = data[0];
+        if (!this.is_valid_unit_id(unit_id)) {
+            // If the unit_id is invalid, send an error response or ignore the request.
+            // 0x11: Gateway Target Device Failed Response
+            this.send_exception_response(unit_id, data[1], 0x11, socket);
+            return;
+        }
+
         const function_code = data[1];
         const start_address = data.readUInt16BE(2);
         const quantity = data.readUInt16BE(4);
@@ -426,8 +449,8 @@ export class Modbus_Server extends EventEmitter {
             case 16: // Write Multiple Registers
                 response = this.handle_write_multiple_registers(start_address, quantity, data.slice(7), unit_id);
                 break;
-            default:
-                response = this.create_error_response(function_code, 0x01); // Illegal Function
+            default: // 0x01: Illegal Function
+                response = this.create_error_response(unit_id, function_code, 0x01);
         }
 
         if (socket) {
@@ -544,9 +567,21 @@ export class Modbus_Server extends EventEmitter {
         return buffer;
     }
 
-    create_error_response(function_code, exception_code) {
+    send_exception_response(unit_id, function_code, exception_code, socket) {
+        const response = Buffer.alloc(5);
+        response.writeUInt8(unit_id, 0);
+        response.writeUInt8(function_code + 0x80, 1);
+        response.writeUInt8(exception_code, 2);
+        if (socket) {
+            socket.write(response);
+        } else {
+            this.port.write(response);
+        }
+    }
+
+    create_error_response(unit_id, function_code, exception_code) {
         const buffer = Buffer.alloc(5);
-        buffer.writeUInt8(this.unit_id, 0);
+        buffer.writeUInt8(unit_id, 0);
         buffer.writeUInt8(function_code + 0x80, 1);
         buffer.writeUInt8(exception_code, 2);
         return buffer;
