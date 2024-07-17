@@ -1,0 +1,25 @@
+# Logs
+logs
+*.log
+npm-debug.log*
+*.csv
+
+# Dependency directories
+node_modules/
+
+# dotenv environment variables file
+.env
+
+# package
+.npm
+package-lock.json
+.yarn-integrity
+yarn.lock
+.yarn/
+.yarnrc.yml
+.pnp*js
+/*-lock.yaml
+
+# production
+.vscode/
+.vs/
