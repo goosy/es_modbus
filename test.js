@@ -3,17 +3,14 @@ import { Modbus_Client, Modbus_Server } from "./modbus.js";
 const host_buffer = Buffer.alloc(146);
 
 const modbus = new Modbus_Client('127.0.0.1', { port: 503 });
-// modbus.on('transport', console.log);
-modbus.on('connect', () => console.log('connected'));
+modbus.on('transport', console.log);
+modbus.on('connect', () => console.log('modbus connected'));
 modbus.on('error', console.log);
 
 setInterval(async () => {
     const buffer = await modbus.read('40001,73', 78);
     buffer.copy(host_buffer);
-    // console.log('Buffer 长度:', buffer.length);
-    // console.log('Hex 字符串:', buffer.toString('hex'));
 }, 1000);
-
 
 /** 
  * @param {string} host the ip of the TCP Port - required.
@@ -78,9 +75,11 @@ export function createMTServer(host = "0.0.0.0", port = 502, unit_map) {
         },
     }
 
-    console.log(`ModbusTCP listening on modbus://${host}:${port}`);
     const server = new Modbus_Server(vector, { host, port, unit_id: 0 });
-    server.on("socketError", function (err) {
+    server.on("start", () => {
+        console.log(`ModbusTCP server listening on modbus://${host}:${port}`);
+    })
+    server.on("socket_error", function (err) {
         // Handle socket error if needed, can be ignored
         console.error(err);
     });
@@ -88,7 +87,7 @@ export function createMTServer(host = "0.0.0.0", port = 502, unit_map) {
         // Handle socket error if needed, can be ignored
         console.error(err);
     });
-    server.on("close", () => {
+    server.on("stop", () => {
         logger.error("connection closed!");
     });
 

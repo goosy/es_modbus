@@ -1,9 +1,9 @@
 import { Socket, createServer } from 'node:net';
 import { EventEmitter } from 'node:events';
-import { promisify } from 'node:util';
 import { crc16modbus } from 'crc';
 
 const TRANSACTION_START = 8000;
+const DO_NOTHING = () => { };
 
 function parse_address(address_str) {
     const match = address_str.match(/^(\d{5})(,(\d{1,4}))?$/);
@@ -12,7 +12,7 @@ function parse_address(address_str) {
     const address = parseInt(match[1].substr(1), 10);
     if (address <= 0 || address > 65535) return null;
 
-    const length = match[3] ? parseInt(match[3], 10) : 1;
+    const length = match[3] ? parseInt(match[3], 10) : undefined;
 
     const prefix = match[1].substring(0, 1);
     const address_map = {
@@ -48,6 +48,7 @@ function parse_rtu(res_buffer) {
     const func_code = res_buffer.readInt8(1)                 // Function Code
     const byte_count = Math.abs(res_buffer.readInt8(2))      // Byte Count
     const buffer = res_buffer.subarray(3, 3 + byte_count);
+    // @todo crc
     // @todo ecode
     const ecode = null;
     return { tid, unit_id, func_code, byte_count, buffer, ecode };
@@ -61,22 +62,29 @@ function parse_tcp(res_buffer) {
     const func_code = res_buffer.readInt8(7)                    // Function Code
     const byte_count = Math.abs(res_buffer.readInt8(8))         // Byte Count
     const buffer = res_buffer.subarray(9);
-    // @todo crc
     // @todo ecode
     const ecode = null;
     return { tid, pid, length, unit_id, func_code, byte_count, buffer, ecode };
 }
 
 export class Modbus_Client extends EventEmitter {
-    zero_based = false;
+    zero_based;
     #last_tid = TRANSACTION_START;
     is_connected = false;
     packets = [];
 
-    constructor(address, { port = 502, rtu = false } = {}) {
+    constructor(address, options = {}) {
         super();
         this.packets_length = 256;
         this.packets = [];
+
+        const {
+            port = 502,
+            rtu = false,
+            reconnect_time = 10000
+        } = options;
+        this.reconnect_time = reconnect_time;
+        this.zero_based = options.zero_based ?? false;
 
         if (typeof address === 'string') {
             this.set_tcp(address, port);
@@ -85,6 +93,8 @@ export class Modbus_Client extends EventEmitter {
             this.set_serial(address);
             this.protocol = 'rtu';
         }
+
+        if (this.reconnect_time > 0) this._connect();
     }
 
     on_data(buffer) {
@@ -110,12 +120,25 @@ export class Modbus_Client extends EventEmitter {
         this.packets[tid - TRANSACTION_START] = packet;
     }
 
+    send(data) {
+        if (this.is_connected) {
+            this._send(data)
+        } else if (!this._conn_failed) {
+            this._connect(
+                () => this._send(data),
+                () => this.emit('transport', "send failed!")
+            );
+        } else {
+            this.emit('error', 'Attempting to transfer data when a connection could not be established.');
+        }
+    };
+
     read(address_str, unit_id) {
         unit_id ??= 1;
         const address = parse_address(address_str);
         if (!address) throw new Error('Invalid address format');
 
-        const length = address.length;
+        const length = address.length ?? 1;
         const func_code = address.fm_read;
         const start_address = address.address;
         const tid = this.get_tid();
@@ -133,7 +156,6 @@ export class Modbus_Client extends EventEmitter {
 
         return new Promise((resolve, reject) => {
             this.send(buffer);
-            this.emit('transport', 'tx:' + buffer.toString('hex'));
             const packet = this.get_packet(tid);
             packet.promise_resolve = resolve;
             packet.promise_reject = reject;
@@ -145,7 +167,11 @@ export class Modbus_Client extends EventEmitter {
         const address = parse_address(address_str);
         if (!address) throw new Error('Invalid address format');
 
-        const { fm_write, fs_write, address: start_address, length } = address;
+        const {
+            fm_write, fs_write,
+            address: start_address,
+            length = value.length >> 1,
+        } = address;
         const tid = this.get_tid();
         let func_code, buffer;
 
@@ -188,7 +214,6 @@ export class Modbus_Client extends EventEmitter {
 
         return new Promise((resolve, reject) => {
             this.send(buffer);
-            this.emit('transport', 'tx:' + buffer.toString('hex'));
             const packet = this.get_packet(tid);
             packet.promise_resolve = resolve;
             packet.promise_reject = reject;
@@ -246,8 +271,33 @@ export class Modbus_Client extends EventEmitter {
         return rtu_pdu;
     }
 
+    connect() {
+        return new Promise((resolve, reject) => {
+            if (this.is_connected) {
+                resolve();
+            } else if (this._conn_failed) {
+                reject(new Error('ERR_ILLEGAL_STATE'));
+            } else {
+                this._connect(resolve, reject);
+            }
+        });
+    };
+    reconnect() {
+        if (this.reconnect_time > 0) {
+            if (this._conn_failed) return;
+            this._conn_failed = true;
+            setTimeout(() => {
+                this._conn_failed = false;
+                this._connect();
+            }, this.reconnect_time);
+        } else {
+            this._conn_failed = false;
+        }
+    };
+
     /**
-     * Initializes a new SerialPort and sets up the send function.
+     * Initializes a new SerialPort and sets up some function.
+     * @todo not finished
      *
      * @param {SerialPort} serialport - a SerialPort instance.
      * @return {void}
@@ -255,7 +305,8 @@ export class Modbus_Client extends EventEmitter {
     set_serial(serialport) {
         this.stream = serialport;
 
-        this.send = async (data) => {
+        this._send = async (data) => {
+            this.emit('transport', 'tx:' + data.toString('hex'));
             serialport.write(data);
         };
 
@@ -277,35 +328,49 @@ export class Modbus_Client extends EventEmitter {
         this.disconnect = () => serialport.close();
     }
 
+    /**
+     * Initializes a new TCP connection and sets up some function.
+     *
+     * @param {string} ip_address - the IP address of the server to connect to.
+     * @param {number} port - the port number to connect to.
+     * @return {void}
+     */
     set_tcp(ip_address, port) {
-        this.ip_address = ip_address;
-        this.port = port;
-
+        if (this.stream instanceof Socket) this.destroy();
         const stream = new Socket();
         this.stream = stream;
 
-        let is_connecting = false;
-        const connect = promisify(stream.connect.bind(stream));
+        Object.defineProperty(this, 'connecting', {
+            get: function () {
+                return stream.connecting;
+            },
+            configurable: true,
+            enumerable: true,
+        });
 
-        this.send = (data) => {
-            if (this.is_connected) {
-                stream.write(data);
-            } else {
-                this.connect();
-                this.once('connect', () => {
-                    stream.write(data);
-                });
+        this._send = (data) => {
+            stream.write(data);
+            this.emit('transport', 'tx:' + data.toString('hex'));
+        }
+
+        this._connect = (on_connect, on_error) => {
+            on_connect ??= DO_NOTHING;
+            on_error ??= DO_NOTHING;
+            const _on_connect = () => {
+                stream.off('error', _on_error);
+                on_connect();
             }
-        };
-
-        this.connect = () => {
-            if (is_connecting) return new Promise((resolve) => {
-                stream.once('connect', () => resolve());
-            });
-            is_connecting = true;
-            return connect(port, ip_address);
-        };
-        this.disconnect = () => stream.destroy();
+            const _on_error = (error) => {
+                stream.off('connect', _on_connect);
+                on_error(error);
+            }
+            stream.once('connect', _on_connect);
+            stream.once('error', _on_error);
+            if (!this.connecting) {
+                stream.connect(port, ip_address);
+            }
+        }
+        this.disconnect = () => stream.end();
 
         stream.on('data', (data) => {
             this.on_data(data);
@@ -314,19 +379,19 @@ export class Modbus_Client extends EventEmitter {
 
         stream.on('close', () => {
             this.is_connected = false;
-            is_connecting = false;
+            this.reconnect();
             this.emit('disconnect');
         });
 
         stream.on('connect', () => {
             this.is_connected = true;
-            is_connecting = false;
+            this._conn_failed = false;
             this.emit('connect');
         });
 
         stream.on('error', (error) => {
             this.is_connected = false;
-            is_connecting = false;
+            this.reconnect();
             this.emit('error', error);
         });
     }
