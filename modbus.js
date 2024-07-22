@@ -395,37 +395,50 @@ export class Modbus_Server extends EventEmitter {
 
     set_tcp() {
         this.server = createServer();
-
         this.server.on('connection', (socket) => {
+            this.emit('socket_connect', socket);
             this.sockets.add(socket);
             socket.on('data', (data) => this.on_data(data, socket));
-            socket.on('error', (err) => this.emit('socketError', err));
+            socket.on('error', (error) => this.emit('socket_error', error));
             socket.on('close', () => {
                 this.sockets.delete(socket);
-                this.emit('clientDisconnected', socket);
+                this.emit('socket_disconnect', socket);
             });
         });
-        this.server.on('listening', () => {
-            this.emit('started');
-        });
-        this.server.on('error', (err) => this.emit('error', err));
-        this.server.on('close', () => {
-            this.emit('closed');
-        });
+        this.server.on('listening', () => this.emit('start'));
+        this.server.on('error', (error) => this.emit('error', error));
+        this.server.on('close', () => this.emit('stop'));
     }
 
     on_data(data, socket) {
-        const unit_id = data[0];
+        let unit_id, function_code, start_address, quantity;
+        let payload;
+        let transaction_id, protocol_id;
+
+        if (socket) {
+            // Modbus TCP
+            transaction_id = data.readUInt16BE(0);
+            protocol_id = data.readUInt16BE(2);
+            unit_id = data[6];
+            function_code = data[7];
+            start_address = data.readUInt16BE(8);
+            quantity = data.readUInt16BE(10);
+            payload = data.subarray(6); // MBAP header is 6 bytes
+        } else {
+            // Modbus RTU
+            unit_id = data[0];
+            function_code = data[1];
+            start_address = data.readUInt16BE(2);
+            quantity = data.readUInt16BE(4);
+            payload = data;
+        }
+
         if (!this.is_valid_unit_id(unit_id)) {
             // If the unit_id is invalid, send an error response or ignore the request.
             // 0x11: Gateway Target Device Failed Response
-            this.send_exception_response(unit_id, data[1], 0x11, socket);
+            this.send_exception_response(unit_id, function_code, 0x11, socket, transaction_id, protocol_id);
             return;
         }
-
-        const function_code = data[1];
-        const start_address = data.readUInt16BE(2);
-        const quantity = data.readUInt16BE(4);
 
         let response;
         switch (function_code) {
@@ -438,25 +451,40 @@ export class Modbus_Server extends EventEmitter {
                 response = this.handle_read_registers(function_code, start_address, quantity, unit_id);
                 break;
             case 5: // Write Single Coil
-                response = this.handle_write_single_coil(start_address, data.readUInt16BE(4), unit_id);
+                response = this.handle_write_single_coil(start_address, payload.readUInt16BE(4), unit_id);
                 break;
             case 6: // Write Single Register
-                response = this.handle_write_single_register(start_address, data.readUInt16BE(4), unit_id);
+                response = this.handle_write_single_register(start_address, payload.readUInt16BE(4), unit_id);
                 break;
             case 15: // Write Multiple Coils
-                response = this.handle_write_multiple_coils(start_address, quantity, data.slice(7), unit_id);
+                response = this.handle_write_multiple_coils(start_address, quantity, payload.subarray(7), unit_id);
                 break;
             case 16: // Write Multiple Registers
-                response = this.handle_write_multiple_registers(start_address, quantity, data.slice(7), unit_id);
+                response = this.handle_write_multiple_registers(start_address, quantity, payload.subarray(7), unit_id);
                 break;
             default: // 0x01: Illegal Function
                 response = this.create_error_response(unit_id, function_code, 0x01);
         }
 
+        this.send_response(response, socket, transaction_id, protocol_id);
+    }
+
+    send_response(response, socket, transaction_id, protocol_id) {
+        const data_length = response.length;
         if (socket) {
-            socket.write(response);
+            // Modbus TCP: add MBAP header
+            const full_response = Buffer.alloc(data_length + 6);
+            full_response.writeUInt16BE(transaction_id, 0);
+            full_response.writeUInt16BE(protocol_id, 2);
+            full_response.writeUInt16BE(response.length, 4);
+            response.copy(full_response, 6, 0);
+            socket.write(full_response);
         } else {
-            this.port.write(response);
+            // Modbus RTU: add CRC
+            const crc = crc16modbus(response);
+            const full_response = Buffer.alloc(data_length + 2, response);
+            full_response.writeUInt16LE(crc, data_length);
+            this.port.write(full_response);
         }
     }
 
@@ -471,7 +499,7 @@ export class Modbus_Server extends EventEmitter {
         }
 
         const byteCount = Math.ceil(quantity / 8);
-        const buffer = Buffer.alloc(5 + byteCount);
+        const buffer = Buffer.alloc(3 + byteCount);
         buffer.writeUInt8(unit_id, 0);
         buffer.writeUInt8(function_code, 1);
         buffer.writeUInt8(byteCount, 2);
@@ -499,7 +527,7 @@ export class Modbus_Server extends EventEmitter {
             values.push(value);
         }
 
-        const buffer = Buffer.alloc(5 + quantity * 2);
+        const buffer = Buffer.alloc(3 + quantity * 2);
         buffer.writeUInt8(unit_id, 0);
         buffer.writeUInt8(function_code, 1);
         buffer.writeUInt8(quantity * 2, 2);
@@ -514,7 +542,7 @@ export class Modbus_Server extends EventEmitter {
     handle_write_single_coil(address, value, unit_id) {
         this.vector.setCoil(address, value === 0xFF00, unit_id);
 
-        const buffer = Buffer.alloc(8);
+        const buffer = Buffer.alloc(6);
         buffer.writeUInt8(unit_id, 0);
         buffer.writeUInt8(5, 1);
         buffer.writeUInt16BE(address, 2);
@@ -526,7 +554,7 @@ export class Modbus_Server extends EventEmitter {
     handle_write_single_register(address, value, unit_id) {
         this.vector.setRegister(address, value, unit_id);
 
-        const buffer = Buffer.alloc(8);
+        const buffer = Buffer.alloc(6);
         buffer.writeUInt8(unit_id, 0);
         buffer.writeUInt8(6, 1);
         buffer.writeUInt16BE(address, 2);
@@ -543,7 +571,7 @@ export class Modbus_Server extends EventEmitter {
             this.vector.setCoil(start_address + i, value, unit_id);
         }
 
-        const buffer = Buffer.alloc(8);
+        const buffer = Buffer.alloc(6);
         buffer.writeUInt8(unit_id, 0);
         buffer.writeUInt8(15, 1);
         buffer.writeUInt16BE(start_address, 2);
@@ -558,7 +586,7 @@ export class Modbus_Server extends EventEmitter {
             this.vector.setRegister(start_address + i, value, unit_id);
         }
 
-        const buffer = Buffer.alloc(8);
+        const buffer = Buffer.alloc(6);
         buffer.writeUInt8(unit_id, 0);
         buffer.writeUInt8(16, 1);
         buffer.writeUInt16BE(start_address, 2);
@@ -567,20 +595,13 @@ export class Modbus_Server extends EventEmitter {
         return buffer;
     }
 
-    send_exception_response(unit_id, function_code, exception_code, socket) {
-        const response = Buffer.alloc(5);
-        response.writeUInt8(unit_id, 0);
-        response.writeUInt8(function_code + 0x80, 1);
-        response.writeUInt8(exception_code, 2);
-        if (socket) {
-            socket.write(response);
-        } else {
-            this.port.write(response);
-        }
+    send_exception_response(unit_id, function_code, exception_code, socket, transaction_id, protocol_id) {
+        const response = this.create_error_response(unit_id, function_code, exception_code);
+        this.send_response(response, socket, transaction_id, protocol_id);
     }
 
     create_error_response(unit_id, function_code, exception_code) {
-        const buffer = Buffer.alloc(5);
+        const buffer = Buffer.alloc(3);
         buffer.writeUInt8(unit_id, 0);
         buffer.writeUInt8(function_code + 0x80, 1);
         buffer.writeUInt8(exception_code, 2);
