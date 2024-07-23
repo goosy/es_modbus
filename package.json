@@ -1,13 +1,13 @@
 {
   "name": "es_modbus",
-  "version": "0.1.1",
+  "version": "0.1.2",
   "description": "",
   "exports": {
     ".": "./modbus.js"
   },
   "type": "module",
   "scripts": {
-    "test": "echo \"Error: no test specified\" && exit 1"
+    "test": "node ./test.js"
   },
   "keywords": ["modbus", "modbusTCP", "modbusRTU"],
   "author": "",

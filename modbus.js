@@ -41,30 +41,86 @@ function parse_address(address_str) {
     return { ...address_map[prefix], address, length };
 }
 
-
-function parse_rtu(res_buffer) {
+function parse_rtu_response(res_buffer) {
     const tid = TRANSACTION_START;
-    const unit_id = res_buffer.readInt8(0)                   // Unit Id
-    const func_code = res_buffer.readInt8(1)                 // Function Code
-    const byte_count = Math.abs(res_buffer.readInt8(2))      // Byte Count
-    const buffer = res_buffer.subarray(3, 3 + byte_count);
+    const unit_id = res_buffer.readInt8(0);                  // Unit Id
+    const func_code = res_buffer.readInt8(1);                // Function Code
+    const byte_count = Math.abs(res_buffer.readInt8(2));     // Byte Count
+    const data = res_buffer.subarray(3, 3 + byte_count);     // exclude crc
     // @todo crc
     // @todo ecode
     const ecode = null;
-    return { tid, unit_id, func_code, byte_count, buffer, ecode };
+    return [{ tid, unit_id, func_code, byte_count, data, ecode }];
 }
 
-function parse_tcp(res_buffer) {
-    const tid = res_buffer.readUInt16BE(0)                      // Transaction Id
-    const pid = res_buffer.readUInt16BE(2)                      // Protocal Id
-    const length = res_buffer.readUInt16BE(4)                   // Length
-    const unit_id = res_buffer.readInt8(6)                      // Unit Id
-    const func_code = res_buffer.readInt8(7)                    // Function Code
-    const byte_count = Math.abs(res_buffer.readInt8(8))         // Byte Count
-    const buffer = res_buffer.subarray(9);
+function parse_rtu_request(req_buffer) {
+    const tid = TRANSACTION_START;
+    const unit_id = req_buffer.readInt8(0);                  // Unit Id
+    const func_code = req_buffer.readInt8(1);                // Function Code
+    const start_address = req_buffer.readUInt16BE(2);        // Start Address
+    const data = req_buffer.readUInt16BE(4)                  // Byte Count or Data
+    const extra_data = req_buffer.subarray(7);               // Extra Data
+    // @todo crc
     // @todo ecode
     const ecode = null;
-    return { tid, pid, length, unit_id, func_code, byte_count, buffer, ecode };
+    return [{ tid, unit_id, func_code, start_address, data, extra_data, ecode }];
+}
+
+function parse_mt_response(res_buffer) {
+    const tid = res_buffer.readUInt16BE(0);                     // Transaction Id
+    const pid = res_buffer.readUInt16BE(2);                     // Protocal Id
+    const unit_id = res_buffer.readInt8(6);                     // Unit Id
+    const func_code = res_buffer.readInt8(7);                   // Function Code
+    const byte_count = Math.abs(res_buffer.readInt8(8));        // Byte Count
+    const data = res_buffer.subarray(9);                        // No need to exclude crc
+    // @todo ecode
+    const ecode = null;
+    return { tid, pid, unit_id, func_code, byte_count, data, ecode };
+}
+
+function parse_mt_request(req_buffer) {
+    const tid = req_buffer.readUInt16BE(0);                     // Transaction Id
+    const pid = req_buffer.readUInt16BE(2);                     // Protocal Id
+    const unit_id = req_buffer.readInt8(6);                     // Unit Id
+    const func_code = req_buffer.readInt8(7);                   // Function Code
+    const start_address = req_buffer.readUInt16BE(8);           // Start Address
+    const data = req_buffer.readUInt16BE(10);                       // Byte Count or Data
+    const extra_data = req_buffer.subarray(13);                 // Extra Data
+    // @todo ecode
+    const ecode = null;
+    return { tid, pid, unit_id, func_code, start_address, data, extra_data, ecode };
+}
+
+/**
+ * Parses the TCP response buffer and processes it based on the specified type.
+ *
+ * @param {Buffer} receiced_buffer - The response buffer to parse.
+ * @param {string} [type='request'] - The type of response to handle, either 'request' or 'response'.
+ * @return {Array} An array containing the parsed data based on the response type.
+ */
+function parse_tcp(receiced_buffer) {
+    const ret = [];
+    while (receiced_buffer.length >= 6) {// MBAp header is at least 6 bytes
+        const length = receiced_buffer.readUInt16BE(4);
+        const fullLength = length + 6; // MBAp header + PDu
+        if (receiced_buffer.length >= fullLength) {
+            const mt_buffer = receiced_buffer.subarray(0, fullLength);
+            receiced_buffer = receiced_buffer.subarray(fullLength);
+            ret.push(mt_buffer);
+        } else {
+            // data error
+            // @todo throw error
+            break;
+        }
+    }
+    return ret;
+}
+
+function parse_tcp_response(res_buffer) {
+    return parse_tcp(res_buffer).map(parse_mt_response);
+}
+function parse_tcp_request(req_buffer) {
+    return parse_tcp(req_buffer).map(parse_mt_request);
 }
 
 export class Modbus_Client extends EventEmitter {
@@ -85,6 +141,7 @@ export class Modbus_Client extends EventEmitter {
         } = options;
         this.reconnect_time = reconnect_time;
         this.zero_based = options.zero_based ?? false;
+        this.unprocessed_buffer = Buffer.alloc(0);
 
         if (typeof address === 'string') {
             this.set_tcp(address, port);
@@ -100,17 +157,19 @@ export class Modbus_Client extends EventEmitter {
     on_data(buffer) {
         this.emit('transport', 'rx:' + buffer.toString('hex'));
 
-        const response = this.protocol != "tcp"
-            ? parse_rtu(buffer)
-            : parse_tcp(buffer);
+        const responses = this.protocol != "tcp"
+            ? parse_rtu_response(buffer)
+            : parse_tcp_response(buffer);
 
-        const packet = this.get_packet(response.tid);
-        if (response.ecode) {
-            packet.promise_reject('Illegal Data Address');
-        }
+        responses.forEach((response) => {
+            const packet = this.get_packet(response.tid);
+            if (response.ecode) {
+                packet.promise_reject('Illegal Data Address');
+            }
 
-        packet.rx = response;
-        packet.promise_resolve(response.buffer)
+            packet.rx = response;
+            packet.promise_resolve(response.data);
+        });
     }
 
     get_packet(tid) {
@@ -475,63 +534,57 @@ export class Modbus_Server extends EventEmitter {
         this.server.on('close', () => this.emit('stop'));
     }
 
-    on_data(data, socket) {
-        let unit_id, function_code, start_address, quantity;
-        let payload;
-        let transaction_id, protocol_id;
-
-        if (socket) {
-            // Modbus TCP
-            transaction_id = data.readUInt16BE(0);
-            protocol_id = data.readUInt16BE(2);
-            unit_id = data[6];
-            function_code = data[7];
-            start_address = data.readUInt16BE(8);
-            quantity = data.readUInt16BE(10);
-            payload = data.subarray(6); // MBAP header is 6 bytes
-        } else {
-            // Modbus RTU
-            unit_id = data[0];
-            function_code = data[1];
-            start_address = data.readUInt16BE(2);
-            quantity = data.readUInt16BE(4);
-            payload = data;
-        }
+    _on_data(request, socket) {
+        const {
+            tid, pid, unit_id, func_code,
+            start_address, data,
+            extra_data
+        } = request;
 
         if (!this.is_valid_unit_id(unit_id)) {
             // If the unit_id is invalid, send an error response or ignore the request.
             // 0x11: Gateway Target Device Failed Response
-            this.send_exception_response(unit_id, function_code, 0x11, socket, transaction_id, protocol_id);
+            this.send_exception_response(unit_id, func_code, 0x11, socket, tid, pid);
             return;
         }
 
         let response;
-        switch (function_code) {
+        switch (func_code) {
             case 1: // Read Coils
             case 2: // Read Discrete Inputs
-                response = this.handle_read_bits(function_code, start_address, quantity, unit_id);
+                response = this.handle_read_bits(func_code, start_address, data, unit_id);
                 break;
             case 3: // Read Holding Registers
             case 4: // Read Input Registers
-                response = this.handle_read_registers(function_code, start_address, quantity, unit_id);
+                response = this.handle_read_registers(func_code, start_address, data, unit_id);
                 break;
             case 5: // Write Single Coil
-                response = this.handle_write_single_coil(start_address, payload.readUInt16BE(4), unit_id);
+                response = this.handle_write_single_coil(start_address, data, unit_id);
                 break;
             case 6: // Write Single Register
-                response = this.handle_write_single_register(start_address, payload.readUInt16BE(4), unit_id);
+                response = this.handle_write_single_register(start_address, data, unit_id);
                 break;
             case 15: // Write Multiple Coils
-                response = this.handle_write_multiple_coils(start_address, quantity, payload.subarray(7), unit_id);
+                response = this.handle_write_multiple_coils(start_address, data, extra_data, unit_id);
                 break;
             case 16: // Write Multiple Registers
-                response = this.handle_write_multiple_registers(start_address, quantity, payload.subarray(7), unit_id);
+                response = this.handle_write_multiple_registers(start_address, data, extra_data, unit_id);
                 break;
             default: // 0x01: Illegal Function
-                response = this.create_error_response(unit_id, function_code, 0x01);
+                response = this.create_error_response(unit_id, func_code, 0x01);
         }
 
-        this.send_response(response, socket, transaction_id, protocol_id);
+        this.send_response(response, socket, tid, pid);
+    }
+
+    on_data(buffer, socket) {
+        const requests = socket
+            ? parse_tcp_request(buffer)
+            : parse_rtu_request(buffer);
+
+        requests.forEach((request) => {
+            this._on_data(request, socket);
+        });
     }
 
     send_response(response, socket, transaction_id, protocol_id) {
