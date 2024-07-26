@@ -1,0 +1,18 @@
+# source
+src/
+node_modules/
+
+# pack
+.yarn-integrity
+yarn.lock
+.yarn/
+.yarnrc.yml
+
+# editor
+.vscode/
+
+# test & production
+logs/
+example/
+test/
+.pnp*

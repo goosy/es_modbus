@@ -1,6 +1,6 @@
 import { Socket, createServer } from 'node:net';
 import { EventEmitter } from 'node:events';
-import { crc16modbus } from 'crc';
+import { modbus_crc16 } from './modbus_crc16.js';
 
 const TRANSACTION_START = 8000;
 const DO_NOTHING = () => { };
@@ -36,7 +36,7 @@ function parse_address(address_str) {
             fm_read: 4,
             type: 'input_registers',
         },
-    }
+    };
 
     return { ...address_map[prefix], address, length };
 }
@@ -58,7 +58,7 @@ function parse_rtu_request(req_buffer) {
     const unit_id = req_buffer.readInt8(0);                  // Unit Id
     const func_code = req_buffer.readInt8(1);                // Function Code
     const start_address = req_buffer.readUInt16BE(2);        // Start Address
-    const data = req_buffer.readUInt16BE(4)                  // Byte Count or Data
+    const data = req_buffer.readUInt16BE(4);                 // Byte Count or Data
     const extra_data = req_buffer.subarray(7);               // Extra Data
     // @todo crc
     // @todo ecode
@@ -181,7 +181,7 @@ export class Modbus_Client extends EventEmitter {
 
     send(data) {
         if (this.is_connected) {
-            this._send(data)
+            this._send(data);
         } else if (!this._conn_failed) {
             this._connect(
                 () => this._send(data),
@@ -287,16 +287,16 @@ export class Modbus_Client extends EventEmitter {
     }
 
     make_data_packet(trans_id, proto_id, unit_id, func_code, address, data, length) {
-        if (typeof data == "boolean" && data) { data = 1 }
-        if (typeof data == "boolean" && !data) { data = 0 }
+        if (typeof data == "boolean" && data) { data = 1; }
+        if (typeof data == "boolean" && !data) { data = 0; }
         if (!this.zero_based) address = address === 0 ? 0xffff : address - 1;
 
         let dataBytes = 0;
-        if (func_code == 15) { dataBytes = length }
-        if (func_code == 16) { dataBytes = length * 2 }
+        if (func_code == 15) { dataBytes = length; }
+        if (func_code == 16) { dataBytes = length * 2; }
 
         let buffer_length = 12;
-        if (func_code == 15 || func_code == 16) { buffer_length = 13 + dataBytes }
+        if (func_code == 15 || func_code == 16) { buffer_length = 13 + dataBytes; }
         const byte_count = buffer_length - 6;
 
         const tcp_pdu = Buffer.alloc(buffer_length);
@@ -323,7 +323,7 @@ export class Modbus_Client extends EventEmitter {
         if (this.protocol == 'tcp') return tcp_pdu;
 
         const rtu_data = tcp_pdu.subarray(6);
-        const crc = crc16modbus(rtu_data);
+        const crc = modbus_crc16(rtu_data);
         const rtu_pdu = Buffer.alloc(rtu_data.length + 2, rtu_data);
         rtu_pdu.writeUInt16LE(crc, rtu_data.length);
 
@@ -599,7 +599,7 @@ export class Modbus_Server extends EventEmitter {
             socket.write(full_response);
         } else {
             // Modbus RTU: add CRC
-            const crc = crc16modbus(response);
+            const crc = modbus_crc16(response);
             const full_response = Buffer.alloc(data_length + 2, response);
             full_response.writeUInt16LE(crc, data_length);
             this.port.write(full_response);
