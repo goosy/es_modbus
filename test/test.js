@@ -1,22 +1,7 @@
-import { Modbus_Client, Modbus_Server } from "./modbus.js";
+import { Modbus_Client, Modbus_Server } from "../modbus.js";
 
-const host_buffer = Buffer.alloc(146);
-
-const modbus = new Modbus_Client('127.0.0.1', { port: 503 });
-modbus.on('transport', console.log);
-modbus.on('connect', () => console.log('modbus connected'));
-modbus.on('error', console.log);
-
-setInterval(async () => {
-    const buffer = await modbus.read('40001,73', 78);
-    buffer.copy(host_buffer);
-}, 1000);
-
-/** 
- * @param {string} host the ip of the TCP Port - required.
- * @param {number} port the Port number - default 502.
- */
-export function createMTServer(host = "0.0.0.0", port = 502, unit_map) {
+// Modbus_Server usage example
+function createMTServer(host = "0.0.0.0", port = 502, unit_map) {
 
     const vector = {
         getInputRegister: (addr, unit_id) => {
@@ -95,25 +80,40 @@ export function createMTServer(host = "0.0.0.0", port = 502, unit_map) {
 }
 
 // start modbus TCP server
-const server = createMTServer('0.0.0.0', 502, { 78: host_buffer });
+const host_buffer_18 = Buffer.alloc(146);
+const host_buffer_19 = Buffer.alloc(146);
+const host_buffer_12 = Buffer.alloc(146);
+host_buffer_18.writeUInt16BE(8018, 0);
+host_buffer_19.writeUInt16BE(8019, 0);
+host_buffer_12.writeUInt16BE(8012, 0);
+const server = createMTServer('0.0.0.0', 502, {
+    18: host_buffer_18,
+    19: host_buffer_19,
+    12: host_buffer_12,
+});
+server.on('send', (buffer) => {
+    console.log('server tx:' + buffer.toString('hex'));
+});
+server.on('receive', (buffer) => {
+    console.log('server rx:' + buffer.toString('hex'));
+});
 server.start();
 
 
-function generateRandomFloat(min, max, decimalPlaces) {
-    const multiplier = 10 ** decimalPlaces; // Calculate the multiplier for decimal places
-    const minScaled = min * multiplier; // Scale the minimum value
-    const maxScaled = max * multiplier; // Scale the maximum value
+// modbus TCP client  usage example
+const modbus = new Modbus_Client('127.0.0.1', { port: 502 });
+modbus.on('send', (buffer) => {
+    console.log('client tx:' + buffer.toString('hex'));
+});
+modbus.on('receive', (buffer) => {
+    console.log('client rx:' + buffer.toString('hex'));
+});
+modbus.on('connect', () => console.log('modbus connected'));
+modbus.on('error', console.log);
 
-    // Generate a random number within the scaled range
-    const randomScaled = Math.random() * (maxScaled - minScaled) + minScaled;
-
-    // Round down to the nearest integer
-    const randomInt = Math.floor(randomScaled);
-
-    // Convert the integer back to decimal and add decimal places
-    const randomFloat = randomInt / multiplier;
-    const buffer = Buffer.alloc(4);
-    buffer.writeFloatBE(randomFloat);
-
-    return buffer;
-}
+setInterval(async () => {
+    modbus.read('40001,73', 18);
+    modbus.read('40001,73', 19);
+    modbus.read('40001,73', 12);
+    // buffer.copy(host_buffer)
+}, 1000);

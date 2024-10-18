@@ -1,6 +1,6 @@
 {
   "name": "es-modbus",
-  "version": "0.1.4",
+  "version": "0.2.0",
   "description": "",
   "type": "module",
   "exports": {
@@ -14,7 +14,7 @@
   },
   "scripts": {
     "build": "rollup -c",
-    "test": "node ./test.js",
+    "test": "node ./test/test.js",
     "prepare": "pnpm build"
   },
   "keywords": [

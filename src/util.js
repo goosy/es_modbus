@@ -80,71 +80,71 @@ export function parse_address(address_str) {
     return { ...address_map[prefix], address, length };
 }
 
-export function parse_rtu_response(res_buffer) {
+export function parse_rtu_response(buffer) {
     const tid = TRANSACTION_START;
-    const unit_id = res_buffer.readInt8(0);                  // Unit Id
-    const func_code = res_buffer.readInt8(1);                // Function Code
-    const byte_count = Math.abs(res_buffer.readInt8(2));     // Byte Count
-    const data = res_buffer.subarray(3, 3 + byte_count);     // exclude crc
+    const unit_id = buffer.readInt8(0);                  // Unit Id
+    const func_code = buffer.readInt8(1);                // Function Code
+    const byte_count = Math.abs(buffer.readInt8(2));     // Byte Count
+    const data = buffer.subarray(3, 3 + byte_count);     // exclude crc
     // @todo crc
     // @todo ecode
     const ecode = null;
-    return [{ tid, unit_id, func_code, byte_count, data, ecode }];
+    return [{ tid, unit_id, func_code, byte_count, data, ecode, buffer }];
 }
 
-export function parse_rtu_request(req_buffer) {
+export function parse_rtu_request(buffer) {
     const tid = TRANSACTION_START;
-    const unit_id = req_buffer.readInt8(0);                  // Unit Id
-    const func_code = req_buffer.readInt8(1);                // Function Code
-    const start_address = req_buffer.readUInt16BE(2);        // Start Address
-    const data = req_buffer.readUInt16BE(4);                 // Byte Count or Data
-    const extra_data = req_buffer.subarray(7);               // Extra Data
+    const unit_id = buffer.readInt8(0);                  // Unit Id
+    const func_code = buffer.readInt8(1);                // Function Code
+    const start_address = buffer.readUInt16BE(2);        // Start Address
+    const data = buffer.readUInt16BE(4);                 // Byte Count or Data
+    const extra_data = buffer.subarray(7);               // Extra Data
     // @todo crc
     // @todo ecode
     const ecode = null;
-    return [{ tid, unit_id, func_code, start_address, data, extra_data, ecode }];
+    return [{ tid, unit_id, func_code, start_address, data, extra_data, ecode, buffer }];
 }
 
-function parse_mt_response(res_buffer) {
-    const tid = res_buffer.readUInt16BE(0);                     // Transaction Id
-    const pid = res_buffer.readUInt16BE(2);                     // Protocal Id
-    const unit_id = res_buffer.readInt8(6);                     // Unit Id
-    const func_code = res_buffer.readInt8(7);                   // Function Code
-    const byte_count = Math.abs(res_buffer.readInt8(8));        // Byte Count
-    const data = res_buffer.subarray(9);                        // No need to exclude crc
+function parse_mt_response(buffer) {
+    const tid = buffer.readUInt16BE(0);                     // Transaction Id
+    const pid = buffer.readUInt16BE(2);                     // Protocal Id
+    const unit_id = buffer.readInt8(6);                     // Unit Id
+    const func_code = buffer.readInt8(7);                   // Function Code
+    const byte_count = Math.abs(buffer.readInt8(8));        // Byte Count
+    const data = buffer.subarray(9);                        // No need to exclude crc
     // @todo ecode
     const ecode = null;
-    return { tid, pid, unit_id, func_code, byte_count, data, ecode };
+    return { tid, pid, unit_id, func_code, byte_count, data, ecode, buffer };
 }
 
-function parse_mt_request(req_buffer) {
-    const tid = req_buffer.readUInt16BE(0);                     // Transaction Id
-    const pid = req_buffer.readUInt16BE(2);                     // Protocal Id
-    const unit_id = req_buffer.readInt8(6);                     // Unit Id
-    const func_code = req_buffer.readInt8(7);                   // Function Code
-    const start_address = req_buffer.readUInt16BE(8);           // Start Address
-    const data = req_buffer.readUInt16BE(10);                       // Byte Count or Data
-    const extra_data = req_buffer.subarray(13);                 // Extra Data
+function parse_mt_request(buffer) {
+    const tid = buffer.readUInt16BE(0);                     // Transaction Id
+    const pid = buffer.readUInt16BE(2);                     // Protocal Id
+    const unit_id = buffer.readInt8(6);                     // Unit Id
+    const func_code = buffer.readInt8(7);                   // Function Code
+    const start_address = buffer.readUInt16BE(8);           // Start Address
+    const data = buffer.readUInt16BE(10);                       // Byte Count or Data
+    const extra_data = buffer.subarray(13);                 // Extra Data
     // @todo ecode
     const ecode = null;
-    return { tid, pid, unit_id, func_code, start_address, data, extra_data, ecode };
+    return { tid, pid, unit_id, func_code, start_address, data, extra_data, ecode, buffer };
 }
 
 /**
- * Parses the TCP response buffer and processes it based on the specified type.
+ * Parses the TCP combined buffer and processes it based on the specified type.
  *
- * @param {Buffer} receiced_buffer - The response buffer to parse.
- * @param {string} [type='request'] - The type of response to handle, either 'request' or 'response'.
- * @return {Array} An array containing the parsed data based on the response type.
+ * @param {Buffer} combined_buffer - The combined buffer to parse.
+ * @param {string} [type='request'] - The type of buffer to handle, either 'request' or 'response'.
+ * @return {Array} An array containing the parsed data based on the type.
  */
-function parse_tcp(receiced_buffer) {
+function parse_tcp(combined_buffer) {
     const ret = [];
-    while (receiced_buffer.length >= 6) {// MBAp header is at least 6 bytes
-        const length = receiced_buffer.readUInt16BE(4);
+    while (combined_buffer.length >= 6) {// MBAp header is at least 6 bytes
+        const length = combined_buffer.readUInt16BE(4);
         const fullLength = length + 6; // MBAp header + PDu
-        if (receiced_buffer.length >= fullLength) {
-            const mt_buffer = receiced_buffer.subarray(0, fullLength);
-            receiced_buffer = receiced_buffer.subarray(fullLength);
+        if (combined_buffer.length >= fullLength) {
+            const mt_buffer = combined_buffer.subarray(0, fullLength);
+            combined_buffer = combined_buffer.subarray(fullLength);
             ret.push(mt_buffer);
         } else {
             // data error
