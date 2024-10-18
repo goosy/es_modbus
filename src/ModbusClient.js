@@ -37,20 +37,20 @@ export class Modbus_Client extends EventEmitter {
     }
 
     on_data(buffer) {
-        this.emit('transport', 'rx:' + buffer.toString('hex'));
-
         const responses = this.protocol != "tcp"
             ? parse_rtu_response(buffer)
             : parse_tcp_response(buffer);
 
         responses.forEach((response) => {
+            this.emit('receive', response.buffer);
+
             const packet = this.get_packet(response.tid);
             if (response.ecode) {
-                packet.promise_reject('Illegal Data Address');
+                packet.reject('Illegal Data Address');
             }
 
             packet.rx = response;
-            packet.promise_resolve(response.data);
+            packet.resolve(response.data);
         });
     }
 
@@ -67,7 +67,7 @@ export class Modbus_Client extends EventEmitter {
         } else if (!this._conn_failed) {
             this._connect(
                 () => this._send(data),
-                () => this.emit('transport', "send failed!")
+                () => this.emit('error', "send failed!")
             );
         } else {
             this.emit('error', 'Attempting to transfer data when a connection could not be established.');
@@ -85,7 +85,7 @@ export class Modbus_Client extends EventEmitter {
         const tid = this.get_tid();
         const buffer = this.make_data_packet(tid, 0, unit_id, func_code, start_address, null, length);
 
-        this.set_packet(tid, {
+        const packet = {
             tx: {
                 func_code,
                 tid,
@@ -93,13 +93,13 @@ export class Modbus_Client extends EventEmitter {
                 buffer,
             },
             rx: null,
-        });
+        };
+        this.set_packet(tid, packet);
 
         return new Promise((resolve, reject) => {
             this.send(buffer);
-            const packet = this.get_packet(tid);
-            packet.promise_resolve = resolve;
-            packet.promise_reject = reject;
+            packet.resolve = resolve;
+            packet.reject = reject;
         });
     }
 
@@ -143,7 +143,7 @@ export class Modbus_Client extends EventEmitter {
             throw new Error('Write operation not supported for this address type');
         }
 
-        this.set_packet(tid, {
+        const packet = {
             tx: {
                 func_code,
                 tid,
@@ -151,13 +151,13 @@ export class Modbus_Client extends EventEmitter {
                 buffer,
             },
             rx: null,
-        });
+        };
+        this.set_packet(tid, packet);
 
         return new Promise((resolve, reject) => {
             this.send(buffer);
-            const packet = this.get_packet(tid);
-            packet.promise_resolve = resolve;
-            packet.promise_reject = reject;
+            packet.resolve = resolve;
+            packet.reject = reject;
         });
     }
 
@@ -247,8 +247,8 @@ export class Modbus_Client extends EventEmitter {
         this.stream = serialport;
 
         this._send = async (data) => {
-            this.emit('transport', 'tx:' + data.toString('hex'));
             serialport.write(data);
+            this.emit('send', data);
         };
 
         serialport.on('data', (data) => {
@@ -291,7 +291,7 @@ export class Modbus_Client extends EventEmitter {
 
         this._send = (data) => {
             stream.write(data);
-            this.emit('transport', 'tx:' + data.toString('hex'));
+            this.emit('send', data);
         }
 
         this._connect = (on_connect, on_error) => {
@@ -315,7 +315,6 @@ export class Modbus_Client extends EventEmitter {
 
         stream.on('data', (data) => {
             this.on_data(data);
-            this.emit('data');
         });
 
         stream.on('close', () => {

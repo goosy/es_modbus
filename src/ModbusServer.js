@@ -129,6 +129,7 @@ export class Modbus_Server extends EventEmitter {
             : parse_rtu_request(buffer);
 
         requests.forEach((request) => {
+            this.emit('receive', request.buffer);
             this._on_data(request, socket);
         });
     }
@@ -142,12 +143,14 @@ export class Modbus_Server extends EventEmitter {
             full_response.writeUInt16BE(protocol_id, 2);
             full_response.writeUInt16BE(response.length, 4);
             response.copy(full_response, 6, 0);
+            this.emit('send', full_response);
             socket.write(full_response);
         } else {
             // Modbus RTU: add CRC
             const crc = modbus_crc16(response);
             const full_response = Buffer.alloc(data_length + 2, response);
             full_response.writeUInt16LE(crc, data_length);
+            this.emit('send', full_response);
             this.port.write(full_response);
         }
     }
