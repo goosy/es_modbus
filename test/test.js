@@ -112,8 +112,9 @@ modbus.on('connect', () => console.log('modbus connected'));
 modbus.on('error', console.log);
 
 setInterval(async () => {
-    modbus.read('40001,73', 18);
-    modbus.read('40001,73', 19);
-    modbus.read('40001,73', 12);
+    const show = console.info;
+    modbus.read('40001,73', 18).then(show,show);
+    modbus.read('40001,73', 19).then(show,show);
+    modbus.read('40001,73', 12).then(show,show);
     // buffer.copy(host_buffer)
 }, 1000);

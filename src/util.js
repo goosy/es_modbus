@@ -141,7 +141,7 @@ function parse_tcp(combined_buffer) {
     const ret = [];
     while (combined_buffer.length >= 6) {// MBAp header is at least 6 bytes
         const length = combined_buffer.readUInt16BE(4);
-        const fullLength = length + 6; // MBAp header + PDu
+        const fullLength = length + 6; // for MBAp header + PDU
         if (combined_buffer.length >= fullLength) {
             const mt_buffer = combined_buffer.subarray(0, fullLength);
             combined_buffer = combined_buffer.subarray(fullLength);

@@ -7,14 +7,43 @@ import {
 
 export class Modbus_Client extends EventEmitter {
     zero_based;
-    #last_tid = TRANSACTION_START;
     is_connected = false;
-    packets = [];
+
+    #packets = [];
+    get_packet(tid) {
+        return this.#packets[tid - TRANSACTION_START];
+    }
+    set_packet(tid, packet) {
+        this.#packets[tid - TRANSACTION_START] = packet;
+    }
+
+    #last_tid = TRANSACTION_START;
+    get_tid() {
+        if (this.protocol !== 'tcp') return TRANSACTION_START;
+        this.#last_tid++;
+        if (
+            this.#last_tid > this.packets_length + TRANSACTION_START
+            || this.#last_tid < TRANSACTION_START
+        ) {
+            this.#last_tid = TRANSACTION_START;
+        }
+        return this.#last_tid;
+    }
+
+    #trans_count = 0;
+    inc_trans_count() {
+        this.#trans_count++;
+    }
+    dec_trans_count() {
+        this.#trans_count--;
+        if (this.#trans_count < 0) {
+            this.#trans_count = 0;
+        }
+    }
 
     constructor(address, options = {}) {
         super();
         this.packets_length = 256;
-        this.packets = [];
 
         const {
             port = 502,
@@ -24,6 +53,7 @@ export class Modbus_Client extends EventEmitter {
         this.reconnect_time = reconnect_time;
         this.zero_based = options.zero_based ?? false;
         this.unprocessed_buffer = Buffer.alloc(0);
+        this.timeout = options.timeout ?? 2000;
 
         if (typeof address === 'string') {
             this.set_tcp(address, port);
@@ -34,31 +64,6 @@ export class Modbus_Client extends EventEmitter {
         }
 
         if (this.reconnect_time > 0) this._connect();
-    }
-
-    on_data(buffer) {
-        const responses = this.protocol != "tcp"
-            ? parse_rtu_response(buffer)
-            : parse_tcp_response(buffer);
-
-        responses.forEach((response) => {
-            this.emit('receive', response.buffer);
-
-            const packet = this.get_packet(response.tid);
-            if (response.ecode) {
-                packet.reject('Illegal Data Address');
-            }
-
-            packet.rx = response;
-            packet.resolve(response.data);
-        });
-    }
-
-    get_packet(tid) {
-        return this.packets[tid - TRANSACTION_START];
-    }
-    set_packet(tid, packet) {
-        this.packets[tid - TRANSACTION_START] = packet;
     }
 
     send(data) {
@@ -74,6 +79,36 @@ export class Modbus_Client extends EventEmitter {
         }
     };
 
+    process_packet_transaction(packet) {
+        const end_transaction = (status) => {
+            this.dec_trans_count();
+            packet.status = status;
+            packet.resolve = DO_NOTHING;
+            packet.reject = DO_NOTHING;
+            clearTimeout(packet.timeout_id);
+        }
+
+        packet.status = 'pending';
+        this.inc_trans_count();
+        this.send(packet.buffer);
+
+        return new Promise((resolve, reject) => {
+            packet.timeout_id = setTimeout(() => {
+                end_transaction('rejected');
+                this.emit('timeout');
+                reject(`transaction 0x${packet.tid.toString(16)} timeout`);
+            }, this.timeout);
+            packet.resolve = (value) => {
+                end_transaction('fulfilled');
+                resolve(value);
+            };
+            packet.reject = (reason) => {
+                end_transaction('rejected');
+                reject(reason);
+            };
+        });
+    }
+
     read(address_str, unit_id) {
         unit_id ??= 1;
         const address = parse_address(address_str);
@@ -84,23 +119,16 @@ export class Modbus_Client extends EventEmitter {
         const start_address = address.address;
         const tid = this.get_tid();
         const buffer = this.make_data_packet(tid, 0, unit_id, func_code, start_address, null, length);
-
         const packet = {
-            tx: {
-                func_code,
-                tid,
-                address: address.address,
-                buffer,
-            },
-            rx: null,
+            func_code,
+            tid,
+            address: address.address,
+            buffer,
+            status: 'init',
         };
         this.set_packet(tid, packet);
 
-        return new Promise((resolve, reject) => {
-            this.send(buffer);
-            packet.resolve = resolve;
-            packet.reject = reject;
-        });
+        return this.process_packet_transaction(packet);
     }
 
     write(address_str, value, unit_id) {
@@ -144,28 +172,40 @@ export class Modbus_Client extends EventEmitter {
         }
 
         const packet = {
-            tx: {
-                func_code,
-                tid,
-                address: start_address,
-                buffer,
-            },
-            rx: null,
+            func_code,
+            tid,
+            address: start_address,
+            buffer,
+            status: 'init',
         };
         this.set_packet(tid, packet);
 
-        return new Promise((resolve, reject) => {
-            this.send(buffer);
-            packet.resolve = resolve;
-            packet.reject = reject;
-        });
+        return this.process_packet_transaction(packet);
     }
 
-    get_tid() {
-        if (this.protocol !== 'tcp') return TRANSACTION_START;
-        this.#last_tid++;
-        if (this.#last_tid > this.packets_length + TRANSACTION_START) this.#last_tid = TRANSACTION_START;
-        return this.#last_tid;
+    on_data(buffer) {
+        const responses = this.protocol != "tcp"
+            ? parse_rtu_response(buffer)
+            : parse_tcp_response(buffer);
+
+        responses.forEach((response) => {
+            this.emit('receive', response.buffer);
+
+            const packet = this.get_packet(response.tid);
+
+            if (packet == undefined || packet.status !== 'pending') {
+                return;
+            }
+
+            if (response.ecode) {
+                this.emit('error_address');
+                packet.reject('Illegal Data Address');
+                return;
+            }
+
+            this.emit('data', response.data);
+            packet.resolve(response.data);
+        });
     }
 
     make_data_packet(trans_id, proto_id, unit_id, func_code, address, data, length) {
