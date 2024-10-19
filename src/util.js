@@ -81,6 +81,99 @@ export function parse_address(address_str) {
 }
 
 /**
+ * Parses a Modbus RTU request buffer.
+ * 
+ * This function extracts and interprets the various fields of a Modbus RTU request,
+ * including the function-specific data and CRC.
+ * 
+ * @param {Buffer} buffer - The buffer containing the Modbus RTU request.
+ * @returns {Array} An array containing an object with the parsed request data:
+ *   - tid: Transaction ID (always TRANSACTION_START for RTU)
+ *   - unit_id: Unit ID
+ *   - func_code: Function code
+ *   - start_address: Starting address
+ *   - quantity: Quantity of registers/coils (for read/write multiple functions)
+ *   - byte_count: Byte count (for write multiple functions)
+ *   - data: Write data (for write functions)
+ *   - buffer: The original buffer
+ */
+export function parse_rtu_request(buffer) {
+    const PDU_length = buffer.length - 2;          // Length of PDU
+    // PDU length must be between 3-253
+    if (PDU_length < 3 || PDU_length > 253) {
+        return [{ tid, func_code: 0, buffer }];
+    }
+
+    const tid = TRANSACTION_START;                 // Transaction Id
+    const unit_id = buffer.readUInt8(0);           // Unit Id
+    const func_code = buffer.readUInt8(1);         // Function Code
+    const start_address = buffer.readUInt16BE(2);  // Start Address
+    let quantity,                                  // Quantity of registers/coils
+        byte_count = 0,                            // Byte count of the data
+        data;                                      // Data to write
+
+    // Currently,then func_code only support 1, 2, 3, 4, 5, 6, 15, and 16
+    switch (func_code) {
+        case 1:
+        case 2:
+        case 3:
+        case 4:
+            // Read functions
+            // Read Coils, Read Discrete Inputs, Read Holding Registers, Read Input Registers
+            if (PDU_length !== 6) {
+                func_code = 0;  // Invalid packet length
+                break;
+            }
+            quantity = buffer.readUInt16BE(4);
+            break;
+        case 5:
+        case 6:
+            // Single write functions
+            // Write Single Coil, Write Single Register
+            if (PDU_length !== 6) {
+                func_code = 0;  // Invalid packet length
+                break;
+            }
+            data = buffer.readUInt16BE(4);
+            break;
+        case 15:
+        case 16:
+            // Multiple write functions
+            // Write Multiple Coils, Write Multiple Registers
+            if (PDU_length < 7) {
+                func_code = 0;  // Invalid packet length for multiple write request
+                break;
+            }
+            quantity = buffer.readUInt16BE(4);
+            byte_count = buffer.readUInt8(6);
+            if (PDU_length !== 7 + byte_count) {
+                func_code = 0;  // Invalid packet length for multiple write data
+                break;
+            }
+            data = buffer.subarray(7, PDU_length);  // Data to write
+            break;
+        default:
+            func_code = 0;  // Invalid function code
+            break;
+    }
+
+    // Verify CRC
+    if (func_code != 0) {
+        const calculatedCRC = modbus_crc16(buffer.subarray(0, PDU_length));
+        const receivedCRC = buffer.readUInt16LE(PDU_length);
+        if (calculatedCRC !== receivedCRC) {
+            func_code = 0;
+        }
+    }
+
+    return [{
+        tid, unit_id, func_code,
+        start_address, quantity, byte_count,
+        data, buffer
+    }];
+}
+
+/**
  * Parses a Modbus RTU response buffer.
  * 
  * This function extracts and interprets the various fields of a Modbus RTU response,
@@ -99,33 +192,70 @@ export function parse_address(address_str) {
  *   - buffer: The original buffer
  */
 export function parse_rtu_response(buffer) {
-    const tid = TRANSACTION_START;
-    const unit_id = buffer.readUInt8(0);                 // Unit ID
-    const func_code = buffer.readUInt8(1);               // Function Code
-    let start_address, quantity, byte_count, data, exception_code;
+    const PDU_length = buffer.length - 2;
+    if (PDU_length < 3 || PDU_length > 253) {  // PDU length must be between 3-253
+        return [{ tid, func_code: 0, buffer }];
+    }
 
-    if (func_code & 0x80) {
-        // Exception response
-        exception_code = buffer.readUInt8(2);            // Exception Code
-    } else if (func_code <= 4) {
-        // Read function response
-        byte_count = buffer.readUInt8(2);                // Byte Count
-        data = buffer.subarray(3, buffer.length - 2);    // Data (excluding CRC)
-    } else if (func_code === 5 || func_code === 6) {
-        // Single write function response
-        start_address = buffer.readUInt16BE(2);          // Written address
-        data = buffer.readUInt16BE(4);                   // Written value
-    } else if (func_code === 15 || func_code === 16) {
-        // Multiple write function response
-        start_address = buffer.readUInt16BE(2);          // Starting address
-        quantity = buffer.readUInt16BE(4);               // Quantity of registers/coils
+    const tid = TRANSACTION_START;
+    const unit_id = buffer.readUInt8(0);    // Unit ID
+    const func_code = buffer.readUInt8(1);  // Function Code
+    let start_address,                      // Written address
+        quantity,                           // Quantity of registers/coils
+        byte_count = 0,                     // Byte count of the data
+        data,                               // Data to write (excluding CRC)
+        exception_code;                     // Exception code
+
+    switch (func_code) {
+        case 1:
+        case 2:
+        case 3:
+        case 4:
+            // Read function response
+            byte_count = buffer.readUInt8(2);
+            if (PDU_length !== byte_count + 3) {
+                func_code = 0; // Invalid packet length
+                break;
+            }
+            data = buffer.subarray(3, PDU_length);
+            break;
+        case 5:
+        case 6:
+            // Single write function response
+            if (PDU_length !== 6) {
+                func_code = 0; // Invalid packet length
+                break;
+            }
+            start_address = buffer.readUInt16BE(2);
+            data = buffer.readUInt16BE(4);
+            break;
+        case 15:
+        case 16:
+            // Multiple write function response
+            if (PDU_length !== 6) {
+                func_code = 0; // Invalid packet length
+                break;
+            }
+            start_address = buffer.readUInt16BE(2);
+            quantity = buffer.readUInt16BE(4);
+            break;
+        default:
+            if (func_code > 127 && PDU_length === 3) {
+                // Exception response
+                exception_code = buffer.readUInt8(2);
+                break;
+            }
+            func_code = 0; // Invalid packet length
+            break;
     }
 
     // Verify CRC
-    const calculatedCRC = modbus_crc16(buffer.subarray(0, buffer.length - 2));
-    const receivedCRC = buffer.readUInt16LE(buffer.length - 2);
-    if (calculatedCRC !== receivedCRC) {
-        func_code = 0;
+    if (func_code != 0) {
+        const calculatedCRC = modbus_crc16(buffer.subarray(0, PDU_length));
+        const receivedCRC = buffer.readUInt16LE(PDU_length);
+        if (calculatedCRC !== receivedCRC) {
+            func_code = 0;
+        }
     }
 
     return [{
@@ -136,54 +266,91 @@ export function parse_rtu_response(buffer) {
 }
 
 /**
- * Parses a Modbus RTU request buffer.
+ * Parses a Modbus TCP request buffer.
  * 
- * This function extracts and interprets the various fields of a Modbus RTU request,
- * including the function-specific data and CRC.
+ * This function extracts and interprets the various fields of a Modbus TCP request,
+ * including the MBAP header and the function-specific data.
  * 
- * @param {Buffer} buffer - The buffer containing the Modbus RTU request.
- * @returns {Array} An array containing an object with the parsed request data:
- *   - tid: Transaction ID (always TRANSACTION_START for RTU)
+ * @param {Buffer} buffer - The buffer containing the Modbus TCP request.
+ * @returns {Object} An object containing the parsed request data:
+ *   - tid: Transaction ID
+ *   - pid: Protocol ID
+ *   - length: Length of the remaining message
  *   - unit_id: Unit ID
  *   - func_code: Function code
- *   - start_address: Starting address
- *   - quantity: Quantity of registers/coils (for read/write multiple functions)
+ *   - start_address: Starting address (for applicable function codes)
+ *   - quantity: Quantity of registers/coils (for applicable function codes)
  *   - byte_count: Byte count (for write multiple functions)
- *   - data: Write data (for write functions)
+ *   - data: Data to be written (for write functions)
  *   - buffer: The original buffer
  */
-export function parse_rtu_request(buffer) {
-    const tid = TRANSACTION_START;
-    const unit_id = buffer.readUInt8(0);                 // Unit Id
-    const func_code = buffer.readUInt8(1);               // Function Code
-    const start_address = buffer.readUInt16BE(2);        // Start Address
-    let quantity, byte_count, data;
-
-    if (func_code <= 4) {
-        // Read functions
-        quantity = buffer.readUInt16BE(4);               // Quantity of registers/coils
-    } else if (func_code === 5 || func_code === 6) {
-        // Single write functions
-        data = buffer.readUInt16BE(4);                   // Data to write
-    } else if (func_code === 15 || func_code === 16) {
-        // Multiple write functions
-        quantity = buffer.readUInt16BE(4);               // Quantity of registers/coils
-        byte_count = buffer.readUInt8(6);                // Byte count of the data
-        data = buffer.subarray(7, 7 + byte_count);       // Data to write
+function parse_mt_request(buffer) {
+    const PDU_length = buffer.readUInt16BE(4);     // Length of PDU
+    // PDU length must be between 3-253
+    if (PDU_length < 3 || PDU_length > 253) {
+        return [{ tid, func_code: 0, buffer }];
     }
 
-    // Verify CRC
-    const calculatedCRC = modbus_crc16(buffer.subarray(0, buffer.length - 2));
-    const receivedCRC = buffer.readUInt16LE(buffer.length - 2);
-    if (calculatedCRC !== receivedCRC) {
-        func_code = 0;
+    const tid = buffer.readUInt16BE(0);            // Transaction Id
+    const pid = buffer.readUInt16BE(2);            // Protocol Id
+    const unit_id = buffer.readUInt8(6);           // Unit Id
+    const func_code = buffer.readUInt8(7);         // Function Code
+    const start_address = buffer.readUInt16BE(8);  // Start Address
+    let quantity,                                  // Quantity of registers/coils
+        byte_count = 0,                            // Byte count of the data
+        data;                                      // Data to write
+
+    // Currently,then func_code only support 1, 2, 3, 4, 5, 6, 15, and 16
+    switch (func_code) {
+        case 1:
+        case 2:
+        case 3:
+        case 4:
+            // Read function request
+            // Read Coils, Read Discrete Inputs, Read Holding Registers, Read Input Registers
+            if (PDU_length !== 6) {
+                func_code = 0;  // Invalid length for read request
+                break;
+            }
+            quantity = buffer.readUInt16BE(10);
+            break;
+        case 5:
+        case 6:
+            // Single write function request
+            // Write Single Coil, Write Single Register
+            if (PDU_length !== 6) {
+                func_code = 0;  // Invalid length for single write request
+                break;
+            }
+            data = buffer.readUInt16BE(10);
+            break;
+        case 15:
+        case 16:
+            // Multiple write function request
+            // Write Multiple Coils, Write Multiple Registers
+            if (PDU_length < 7) {
+                func_code = 0;  // Invalid length for multiple write request
+                break;
+            }
+            quantity = buffer.readUInt16BE(10);
+            byte_count = buffer.readUInt8(12);
+            if (PDU_length !== 7 + byte_count) {
+                func_code = 0;  // Invalid length for multiple write data
+                break;
+            }
+            data = buffer.subarray(13, 13 + byte_count);  // Data to write
+            break;
+        default:
+            func_code = 0; // Invalid packet length
+            break;
     }
 
-    return [{
-        tid, unit_id, func_code,
+    return {
+        tid, pid,
+        unit_id, func_code,
         start_address, quantity, byte_count,
         data, buffer
-    }];
+    };
 }
 
 /**
@@ -207,32 +374,66 @@ export function parse_rtu_request(buffer) {
  *   - buffer: The original buffer
  */
 function parse_mt_response(buffer) {
-    const tid = buffer.readUInt16BE(0);                     // Transaction Id
-    const pid = buffer.readUInt16BE(2);                     // Protocol Id
-    const length = buffer.readUInt16BE(4);                  // Length
-    const unit_id = buffer.readUInt8(6);                    // Unit Id
-    const func_code = buffer.readInt8(7);                   // Function Code
-    let byte_count, start_address, quantity, data, exception_code;
+    const PDU_length = buffer.readUInt16BE(4);
+    if (PDU_length < 3 || PDU_length > 253) {  // PDU length must be between 3-253
+        return [{ tid, func_code: 0, buffer }];
+    }
 
-    if (func_code & 0x80) {
-        // Exception response
-        exception_code = buffer.readUInt8(8);               // Exception Code
-    } else if (func_code <= 4) {
-        // Read function response
-        byte_count = buffer.readUInt8(8);                   // Byte Count
-        data = buffer.subarray(9);                          // Data
-    } else if (func_code === 5 || func_code === 6) {
-        // Single write function response
-        start_address = buffer.readUInt16BE(8);             // Start Address
-        data = buffer.readUInt16BE(10);                     // Written Data
-    } else if (func_code === 15 || func_code === 16) {
-        // Multiple write function response
-        start_address = buffer.readUInt16BE(8);             // Start Address
-        quantity = buffer.readUInt16BE(10);                 // Quantity of registers/coils written
+    const tid = buffer.readUInt16BE(0);    // Transaction Id
+    const pid = buffer.readUInt16BE(2);    // Protocol Id
+    const unit_id = buffer.readUInt8(6);   // Unit Id
+    const func_code = buffer.readInt8(7);  // Function Code
+    let start_address,                     // Written address
+        quantity,                          // Quantity of registers/coils
+        byte_count = 0,                    // Byte count of the data
+        data,                              // Data to write (excluding CRC)
+        exception_code;                    // Exception code
+
+    switch (func_code) {
+        case 1:
+        case 2:
+        case 3:
+        case 4:
+            // Read function response
+            byte_count = buffer.readUInt8(8);
+            if (PDU_length !== byte_count + 3) {
+                func_code = 0; // Invalid packet length
+                break;
+            }
+            data = buffer.subarray(9, 9 + byte_count);
+            break;
+        case 5:
+        case 6:
+            // Single write function response
+            if (PDU_length !== 6) {
+                func_code = 0; // Invalid packet length
+                break;
+            }
+            start_address = buffer.readUInt16BE(8);
+            data = buffer.readUInt16BE(10);
+            break;
+        case 15:
+        case 16:
+            // Multiple write function response
+            if (PDU_length !== 6) {
+                func_code = 0; // Invalid packet length
+                break;
+            }
+            start_address = buffer.readUInt16BE(8);
+            quantity = buffer.readUInt16BE(10);
+            break;
+        default:
+            if (func_code > 127 && PDU_length === 3) {
+                // Exception response
+                exception_code = buffer.readUInt8(8);
+                break;
+            }
+            func_code = 0; // Invalid packet length
+            break;
     }
 
     return {
-        tid, pid, length,
+        tid, pid,
         unit_id, func_code,
         byte_count, start_address, quantity,
         data, exception_code, buffer
@@ -240,79 +441,35 @@ function parse_mt_response(buffer) {
 }
 
 /**
- * Parses a Modbus TCP request buffer.
- * 
- * This function extracts and interprets the various fields of a Modbus TCP request,
- * including the MBAP header and the function-specific data.
- * 
- * @param {Buffer} buffer - The buffer containing the Modbus TCP request.
- * @returns {Object} An object containing the parsed request data:
- *   - tid: Transaction ID
- *   - pid: Protocol ID
- *   - length: Length of the remaining message
- *   - unit_id: Unit ID
- *   - func_code: Function code
- *   - start_address: Starting address (for applicable function codes)
- *   - quantity: Quantity of registers/coils (for applicable function codes)
- *   - byte_count: Byte count (for write multiple functions)
- *   - data: Data to be written (for write functions)
- *   - buffer: The original buffer
- */
-function parse_mt_request(buffer) {
-    const tid = buffer.readUInt16BE(0);                     // Transaction Id
-    const pid = buffer.readUInt16BE(2);                     // Protocol Id
-    const length = buffer.readUInt16BE(4);                  // Length
-    const unit_id = buffer.readUInt8(6);                    // Unit Id
-    const func_code = buffer.readUInt8(7);                  // Function Code
-    let start_address, quantity, byte_count, data;
-
-    if (func_code <= 4) {
-        // Read function request
-        // Read Coils, Read Discrete Inputs, Read Holding Registers, Read Input Registers
-        start_address = buffer.readUInt16BE(8);             // Start Address
-        quantity = buffer.readUInt16BE(10);                 // Quantity
-    } else if (func_code === 5 || func_code === 6) {
-        // Single write function request
-        // Write Single Coil, Write Single Register
-        start_address = buffer.readUInt16BE(8);             // Start Address
-        data = buffer.readUInt16BE(10);                     // Write Data
-    } else if (func_code === 15 || func_code === 16) {
-        // Multiple write function request
-        // Write Multiple Coils, Write Multiple Registers
-        start_address = buffer.readUInt16BE(8);             // Start Address
-        quantity = buffer.readUInt16BE(10);                 // Quantity
-        byte_count = buffer.readUInt8(12);                  // Byte Count of the data
-        data = buffer.subarray(13, 13 + byte_count);        // Write Data
-    }
-
-    return {
-        tid, pid, length,
-        unit_id, func_code,
-        start_address, quantity, byte_count,
-        data, buffer
-    };
-}
-
-/**
- * Parses the TCP combined buffer and processes it based on the specified type.
+ * Parses the TCP combined buffer and validates Modbus TCP packets.
  *
  * @param {Buffer} combined_buffer - The combined buffer to parse.
- * @param {string} [type='request'] - The type of buffer to handle, either 'request' or 'response'.
- * @return {Array} An array containing the parsed data based on the type.
+ * @return {Array} An array containing valid Modbus TCP packets.
  */
 function parse_tcp(combined_buffer) {
     const ret = [];
-    while (combined_buffer.length >= 6) {// MBAp header is at least 6 bytes
+    while (combined_buffer.length >= 9) { // MBAP header + PDU is at least 6+3 bytes
+        // Check if protocol identifier is 0
+        if (combined_buffer.readUInt16BE(2) !== 0) {
+            break; // non-Modbus TCP packet, stop parsing
+        }
         const length = combined_buffer.readUInt16BE(4);
-        const fullLength = length + 6; // for MBAp header + PDU
+        if (length < 3 || length > 253) { // PDU length must be between 3-253
+            break; // Invalid length, stop parsing
+        }
+        const fullLength = 6 + length; // MBAP header + PDU
         if (combined_buffer.length >= fullLength) {
             const mt_buffer = combined_buffer.subarray(0, fullLength);
+            // Validate PDU
+            const func_code = mt_buffer[7];
+            if (func_code < 1) {
+                combined_buffer = combined_buffer.subarray(fullLength);
+                continue; // Skip invalid function code
+            }
             combined_buffer = combined_buffer.subarray(fullLength);
             ret.push(mt_buffer);
         } else {
-            // data error
-            // @todo throw error
-            break;
+            break; // Empty data or non-Modbus TCP packet, stop parsing
         }
     }
     return ret;
