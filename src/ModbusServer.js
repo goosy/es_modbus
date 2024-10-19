@@ -83,8 +83,8 @@ export class Modbus_Server extends EventEmitter {
     _on_data(request, socket) {
         const {
             tid, pid, unit_id, func_code,
-            start_address, data,
-            extra_data
+            start_address, quantity,
+            data
         } = request;
 
         if (!this.is_valid_unit_id(unit_id)) {
@@ -98,23 +98,23 @@ export class Modbus_Server extends EventEmitter {
         switch (func_code) {
             case 1: // Read Coils
             case 2: // Read Discrete Inputs
-                response = this.handle_read_bits(func_code, start_address, data, unit_id);
+                response = this.handle_read_bits(func_code, start_address, quantity, unit_id);
                 break;
             case 3: // Read Holding Registers
             case 4: // Read Input Registers
-                response = this.handle_read_registers(func_code, start_address, data, unit_id);
+                response = this.handle_read_registers(func_code, start_address, quantity, unit_id);
                 break;
             case 5: // Write Single Coil
-                response = this.handle_write_single_coil(start_address, data, unit_id);
+                response = this.handle_write_single_coil(start_address, quantity, unit_id);
                 break;
             case 6: // Write Single Register
-                response = this.handle_write_single_register(start_address, data, unit_id);
+                response = this.handle_write_single_register(start_address, quantity, unit_id);
                 break;
             case 15: // Write Multiple Coils
-                response = this.handle_write_multiple_coils(start_address, data, extra_data, unit_id);
+                response = this.handle_write_multiple_coils(start_address, quantity, data, unit_id);
                 break;
             case 16: // Write Multiple Registers
-                response = this.handle_write_multiple_registers(start_address, data, extra_data, unit_id);
+                response = this.handle_write_multiple_registers(start_address, quantity, data, unit_id);
                 break;
             default: // 0x01: Illegal Function
                 response = this.create_error_response(unit_id, func_code, 0x01);

@@ -100,10 +100,12 @@ export class Modbus_Client extends EventEmitter {
             }, this.timeout);
             packet.resolve = (value) => {
                 end_transaction('fulfilled');
+                this.emit('data', value);
                 resolve(value);
             };
             packet.reject = (reason) => {
                 end_transaction('rejected');
+                this.emit('data_error');
                 reject(reason);
             };
         });
@@ -111,18 +113,19 @@ export class Modbus_Client extends EventEmitter {
 
     read(address_str, unit_id) {
         unit_id ??= 1;
-        const address = parse_address(address_str);
-        if (!address) throw new Error('Invalid address format');
+        const address_obj = parse_address(address_str);
+        if (!address_obj) throw new Error('Invalid address format');
 
-        const length = address.length ?? 1;
-        const func_code = address.fm_read;
-        const start_address = address.address;
         const tid = this.get_tid();
-        const buffer = this.make_data_packet(tid, 0, unit_id, func_code, start_address, null, length);
+        const func_code = address_obj.fm_read;
+        const address = address_obj.address;
+        const length = address_obj.length ?? 1;
+        const buffer = this.make_data_packet(tid, 0, unit_id, func_code, address, null, length);
         const packet = {
-            func_code,
             tid,
-            address: address.address,
+            unit_id,
+            func_code,
+            address,
             buffer,
             status: 'init',
         };
@@ -133,14 +136,13 @@ export class Modbus_Client extends EventEmitter {
 
     write(address_str, value, unit_id) {
         unit_id ??= 1;
-        const address = parse_address(address_str);
-        if (!address) throw new Error('Invalid address format');
+        const address_obj = parse_address(address_str);
+        if (!address_obj) throw new Error('Invalid address format');
 
         const {
             fm_write, fs_write,
-            address: start_address,
-            length = value.length >> 1,
-        } = address;
+            address, length = value.length >> 1,
+        } = address_obj;
         const tid = this.get_tid();
         let func_code, buffer;
 
@@ -148,7 +150,7 @@ export class Modbus_Client extends EventEmitter {
             // Use single write function code (5 or 6)
             func_code = fs_write;
             const data = Buffer.isBuffer(value) ? value.readUInt16BE(0) : value;
-            buffer = this.make_data_packet(tid, 0, unit_id, func_code, start_address, data);
+            buffer = this.make_data_packet(tid, 0, unit_id, func_code, address, data);
         } else if (fm_write) {
             // Use multiple write function code (15 or 16)
             func_code = fm_write;
@@ -166,15 +168,16 @@ export class Modbus_Client extends EventEmitter {
                     throw new Error('Invalid buffer length for register write');
                 }
             }
-            buffer = this.make_data_packet(tid, 0, unit_id, func_code, start_address, value, length);
+            buffer = this.make_data_packet(tid, 0, unit_id, func_code, address, value, length);
         } else {
             throw new Error('Write operation not supported for this address type');
         }
 
         const packet = {
-            func_code,
             tid,
-            address: start_address,
+            unit_id,
+            func_code,
+            address,
             buffer,
             status: 'init',
         };
@@ -191,19 +194,18 @@ export class Modbus_Client extends EventEmitter {
         responses.forEach((response) => {
             this.emit('receive', response.buffer);
 
-            const packet = this.get_packet(response.tid);
+            if (response.func_code === 0) return; // Invalid data
 
+            const packet = this.get_packet(response.tid);
             if (packet == undefined || packet.status !== 'pending') {
                 return;
             }
 
-            if (response.ecode) {
-                this.emit('error_address');
-                packet.reject('Illegal Data Address');
+            if (response.exception_code) {
+                packet.reject(`response error: ${exception_code}`);
                 return;
             }
 
-            this.emit('data', response.data);
             packet.resolve(response.data);
         });
     }

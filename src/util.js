@@ -80,54 +80,217 @@ export function parse_address(address_str) {
     return { ...address_map[prefix], address, length };
 }
 
+/**
+ * Parses a Modbus RTU response buffer.
+ * 
+ * This function extracts and interprets the various fields of a Modbus RTU response,
+ * including the function-specific data and CRC.
+ * 
+ * @param {Buffer} buffer - The buffer containing the Modbus RTU response.
+ * @returns {Array} An array containing an object with the parsed response data:
+ *   - tid: Transaction ID (always TRANSACTION_START for RTU)
+ *   - unit_id: Unit ID
+ *   - func_code: Function code
+ *   - byte_count: Byte count (for read functions)
+ *   - start_address: Starting address (for write functions)
+ *   - quantity: Quantity of registers/coils (for write multiple functions)
+ *   - data: Read data or written data
+ *   - exception_code: Exception code (if it's an exception response)
+ *   - buffer: The original buffer
+ */
 export function parse_rtu_response(buffer) {
     const tid = TRANSACTION_START;
-    const unit_id = buffer.readInt8(0);                  // Unit Id
-    const func_code = buffer.readInt8(1);                // Function Code
-    const byte_count = Math.abs(buffer.readInt8(2));     // Byte Count
-    const data = buffer.subarray(3, 3 + byte_count);     // exclude crc
-    // @todo crc
-    // @todo ecode
-    const ecode = null;
-    return [{ tid, unit_id, func_code, byte_count, data, ecode, buffer }];
+    const unit_id = buffer.readUInt8(0);                 // Unit ID
+    const func_code = buffer.readUInt8(1);               // Function Code
+    let start_address, quantity, byte_count, data, exception_code;
+
+    if (func_code & 0x80) {
+        // Exception response
+        exception_code = buffer.readUInt8(2);            // Exception Code
+    } else if (func_code <= 4) {
+        // Read function response
+        byte_count = buffer.readUInt8(2);                // Byte Count
+        data = buffer.subarray(3, buffer.length - 2);    // Data (excluding CRC)
+    } else if (func_code === 5 || func_code === 6) {
+        // Single write function response
+        start_address = buffer.readUInt16BE(2);          // Written address
+        data = buffer.readUInt16BE(4);                   // Written value
+    } else if (func_code === 15 || func_code === 16) {
+        // Multiple write function response
+        start_address = buffer.readUInt16BE(2);          // Starting address
+        quantity = buffer.readUInt16BE(4);               // Quantity of registers/coils
+    }
+
+    // Verify CRC
+    const calculatedCRC = modbus_crc16(buffer.subarray(0, buffer.length - 2));
+    const receivedCRC = buffer.readUInt16LE(buffer.length - 2);
+    if (calculatedCRC !== receivedCRC) {
+        func_code = 0;
+    }
+
+    return [{
+        tid, unit_id, func_code,
+        start_address, quantity, byte_count,
+        data, exception_code, buffer
+    }];
 }
 
+/**
+ * Parses a Modbus RTU request buffer.
+ * 
+ * This function extracts and interprets the various fields of a Modbus RTU request,
+ * including the function-specific data and CRC.
+ * 
+ * @param {Buffer} buffer - The buffer containing the Modbus RTU request.
+ * @returns {Array} An array containing an object with the parsed request data:
+ *   - tid: Transaction ID (always TRANSACTION_START for RTU)
+ *   - unit_id: Unit ID
+ *   - func_code: Function code
+ *   - start_address: Starting address
+ *   - quantity: Quantity of registers/coils (for read/write multiple functions)
+ *   - byte_count: Byte count (for write multiple functions)
+ *   - data: Write data (for write functions)
+ *   - buffer: The original buffer
+ */
 export function parse_rtu_request(buffer) {
     const tid = TRANSACTION_START;
-    const unit_id = buffer.readInt8(0);                  // Unit Id
-    const func_code = buffer.readInt8(1);                // Function Code
+    const unit_id = buffer.readUInt8(0);                 // Unit Id
+    const func_code = buffer.readUInt8(1);               // Function Code
     const start_address = buffer.readUInt16BE(2);        // Start Address
-    const data = buffer.readUInt16BE(4);                 // Byte Count or Data
-    const extra_data = buffer.subarray(7);               // Extra Data
-    // @todo crc
-    // @todo ecode
-    const ecode = null;
-    return [{ tid, unit_id, func_code, start_address, data, extra_data, ecode, buffer }];
+    let quantity, byte_count, data;
+
+    if (func_code <= 4) {
+        // Read functions
+        quantity = buffer.readUInt16BE(4);               // Quantity of registers/coils
+    } else if (func_code === 5 || func_code === 6) {
+        // Single write functions
+        data = buffer.readUInt16BE(4);                   // Data to write
+    } else if (func_code === 15 || func_code === 16) {
+        // Multiple write functions
+        quantity = buffer.readUInt16BE(4);               // Quantity of registers/coils
+        byte_count = buffer.readUInt8(6);                // Byte count of the data
+        data = buffer.subarray(7, 7 + byte_count);       // Data to write
+    }
+
+    // Verify CRC
+    const calculatedCRC = modbus_crc16(buffer.subarray(0, buffer.length - 2));
+    const receivedCRC = buffer.readUInt16LE(buffer.length - 2);
+    if (calculatedCRC !== receivedCRC) {
+        func_code = 0;
+    }
+
+    return [{
+        tid, unit_id, func_code,
+        start_address, quantity, byte_count,
+        data, buffer
+    }];
 }
 
+/**
+ * Parses a Modbus TCP response buffer.
+ * 
+ * This function extracts and interprets the various fields of a Modbus TCP response,
+ * including the MBAP header and the function-specific data.
+ * 
+ * @param {Buffer} buffer - The buffer containing the Modbus TCP response.
+ * @returns {Object} An object containing the parsed response data:
+ *   - tid: Transaction ID
+ *   - pid: Protocol ID
+ *   - length: Length of the remaining message
+ *   - unit_id: Unit ID
+ *   - func_code: Function code
+ *   - byte_count: Byte count (for read functions)
+ *   - start_address: Starting address (for write functions)
+ *   - quantity: Quantity of registers/coils (for write multiple functions)
+ *   - data: Read data or written data
+ *   - exception_code: Exception code (if it's an exception response)
+ *   - buffer: The original buffer
+ */
 function parse_mt_response(buffer) {
     const tid = buffer.readUInt16BE(0);                     // Transaction Id
-    const pid = buffer.readUInt16BE(2);                     // Protocal Id
-    const unit_id = buffer.readInt8(6);                     // Unit Id
+    const pid = buffer.readUInt16BE(2);                     // Protocol Id
+    const length = buffer.readUInt16BE(4);                  // Length
+    const unit_id = buffer.readUInt8(6);                    // Unit Id
     const func_code = buffer.readInt8(7);                   // Function Code
-    const byte_count = Math.abs(buffer.readInt8(8));        // Byte Count
-    const data = buffer.subarray(9);                        // No need to exclude crc
-    // @todo ecode
-    const ecode = null;
-    return { tid, pid, unit_id, func_code, byte_count, data, ecode, buffer };
+    let byte_count, start_address, quantity, data, exception_code;
+
+    if (func_code & 0x80) {
+        // Exception response
+        exception_code = buffer.readUInt8(8);               // Exception Code
+    } else if (func_code <= 4) {
+        // Read function response
+        byte_count = buffer.readUInt8(8);                   // Byte Count
+        data = buffer.subarray(9);                          // Data
+    } else if (func_code === 5 || func_code === 6) {
+        // Single write function response
+        start_address = buffer.readUInt16BE(8);             // Start Address
+        data = buffer.readUInt16BE(10);                     // Written Data
+    } else if (func_code === 15 || func_code === 16) {
+        // Multiple write function response
+        start_address = buffer.readUInt16BE(8);             // Start Address
+        quantity = buffer.readUInt16BE(10);                 // Quantity of registers/coils written
+    }
+
+    return {
+        tid, pid, length,
+        unit_id, func_code,
+        byte_count, start_address, quantity,
+        data, exception_code, buffer
+    };
 }
 
+/**
+ * Parses a Modbus TCP request buffer.
+ * 
+ * This function extracts and interprets the various fields of a Modbus TCP request,
+ * including the MBAP header and the function-specific data.
+ * 
+ * @param {Buffer} buffer - The buffer containing the Modbus TCP request.
+ * @returns {Object} An object containing the parsed request data:
+ *   - tid: Transaction ID
+ *   - pid: Protocol ID
+ *   - length: Length of the remaining message
+ *   - unit_id: Unit ID
+ *   - func_code: Function code
+ *   - start_address: Starting address (for applicable function codes)
+ *   - quantity: Quantity of registers/coils (for applicable function codes)
+ *   - byte_count: Byte count (for write multiple functions)
+ *   - data: Data to be written (for write functions)
+ *   - buffer: The original buffer
+ */
 function parse_mt_request(buffer) {
     const tid = buffer.readUInt16BE(0);                     // Transaction Id
-    const pid = buffer.readUInt16BE(2);                     // Protocal Id
-    const unit_id = buffer.readInt8(6);                     // Unit Id
-    const func_code = buffer.readInt8(7);                   // Function Code
-    const start_address = buffer.readUInt16BE(8);           // Start Address
-    const data = buffer.readUInt16BE(10);                       // Byte Count or Data
-    const extra_data = buffer.subarray(13);                 // Extra Data
-    // @todo ecode
-    const ecode = null;
-    return { tid, pid, unit_id, func_code, start_address, data, extra_data, ecode, buffer };
+    const pid = buffer.readUInt16BE(2);                     // Protocol Id
+    const length = buffer.readUInt16BE(4);                  // Length
+    const unit_id = buffer.readUInt8(6);                    // Unit Id
+    const func_code = buffer.readUInt8(7);                  // Function Code
+    let start_address, quantity, byte_count, data;
+
+    if (func_code <= 4) {
+        // Read function request
+        // Read Coils, Read Discrete Inputs, Read Holding Registers, Read Input Registers
+        start_address = buffer.readUInt16BE(8);             // Start Address
+        quantity = buffer.readUInt16BE(10);                 // Quantity
+    } else if (func_code === 5 || func_code === 6) {
+        // Single write function request
+        // Write Single Coil, Write Single Register
+        start_address = buffer.readUInt16BE(8);             // Start Address
+        data = buffer.readUInt16BE(10);                     // Write Data
+    } else if (func_code === 15 || func_code === 16) {
+        // Multiple write function request
+        // Write Multiple Coils, Write Multiple Registers
+        start_address = buffer.readUInt16BE(8);             // Start Address
+        quantity = buffer.readUInt16BE(10);                 // Quantity
+        byte_count = buffer.readUInt8(12);                  // Byte Count of the data
+        data = buffer.subarray(13, 13 + byte_count);        // Write Data
+    }
+
+    return {
+        tid, pid, length,
+        unit_id, func_code,
+        start_address, quantity, byte_count,
+        data, buffer
+    };
 }
 
 /**
