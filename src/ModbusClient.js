@@ -8,6 +8,8 @@ import {
 export class Modbus_Client extends EventEmitter {
     zero_based;
     is_connected = false;
+    timeout; // response timeout
+    delay; // delay between pools
 
     #packets = [];
     get_packet(tid) {
@@ -53,7 +55,8 @@ export class Modbus_Client extends EventEmitter {
         this.reconnect_time = reconnect_time;
         this.zero_based = options.zero_based ?? false;
         this.unprocessed_buffer = Buffer.alloc(0);
-        this.timeout = options.timeout ?? 2000;
+        this.timeout = options.timeout ?? 1000;
+        this.delay = options.delay ?? 20;
 
         if (typeof address === 'string') {
             this.set_tcp(address, port);
@@ -66,18 +69,39 @@ export class Modbus_Client extends EventEmitter {
         if (this.reconnect_time > 0) this._connect();
     }
 
+    send_queue = [];
+    send_queue_size = 256;
     send(data) {
+        this.send_queue.push(data);
+        const overflow = this.send_queue.length - this.send_queue_size;
+        if (overflow > 0) {
+            this.send_queue.splice(0, overflow);
+        }
+        this.sending();
+    };
+
+    #busy = false;
+    sending() {
+        if (this.#busy) return;
         if (this.is_connected) {
-            this._send(data);
+            const buffer = this.send_queue.shift();
+            if (buffer) {
+                this.#busy = true;
+                this._send(buffer);
+                setTimeout(() => {
+                    this.#busy = false;
+                    this.sending();
+                }, this.delay);
+            }
         } else if (!this._conn_failed) {
             this._connect(
-                () => this._send(data),
+                this.sending,
                 () => this.emit('error', "send failed!")
             );
         } else {
             this.emit('error', 'Attempting to transfer data when a connection could not be established.');
         }
-    };
+    }
 
     process_packet_transaction(packet) {
         const end_transaction = (status) => {
