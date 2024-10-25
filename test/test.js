@@ -1,8 +1,7 @@
 import { Modbus_Client, Modbus_Server } from "../modbus.js";
 
 // Modbus_Server usage example
-function createMTServer(host = "0.0.0.0", port = 502, unit_map) {
-
+function createMTServer(unit_map, host = "0.0.0.0", port = 502) {
     const vector = {
         getInputRegister: (addr, unit_id) => {
             const buffer = unit_map[unit_id];
@@ -64,11 +63,11 @@ function createMTServer(host = "0.0.0.0", port = 502, unit_map) {
     server.on("start", () => {
         console.log(`ModbusTCP server listening on modbus://${host}:${port}`);
     })
-    server.on("socket_error", function (err) {
+    server.on("socket_error", (err) => {
         // Handle socket error if needed, can be ignored
         console.error(err);
     });
-    server.on('error', function (err) {
+    server.on('error', (err) => {
         // Handle socket error if needed, can be ignored
         console.error(err);
     });
@@ -86,16 +85,16 @@ const host_buffer_12 = Buffer.alloc(146);
 host_buffer_18.writeUInt16BE(8018, 0);
 host_buffer_19.writeUInt16BE(8019, 0);
 host_buffer_12.writeUInt16BE(8012, 0);
-const server = createMTServer('0.0.0.0', 502, {
+const server = createMTServer({
     18: host_buffer_18,
     19: host_buffer_19,
     12: host_buffer_12,
-});
+}, '0.0.0.0', 502);
 server.on('send', (buffer) => {
-    console.log('server tx:' + buffer.toString('hex'));
+    console.log(`server tx: ${buffer.toString('hex')}`);
 });
 server.on('receive', (buffer) => {
-    console.log('server rx:' + buffer.toString('hex'));
+    console.log(`server rx: ${buffer.toString('hex')}`);
 });
 server.start();
 
@@ -103,18 +102,18 @@ server.start();
 // modbus TCP client  usage example
 const modbus = new Modbus_Client('127.0.0.1', { port: 502 });
 modbus.on('send', (buffer) => {
-    console.log('client tx:' + buffer.toString('hex'));
+    console.log(`client tx: ${buffer.toString('hex')}`);
 });
 modbus.on('receive', (buffer) => {
-    console.log('client rx:' + buffer.toString('hex'));
+    console.log(`client rx: ${buffer.toString('hex')}`);
 });
 modbus.on('connect', () => console.log('modbus connected'));
 modbus.on('error', console.log);
 
 setInterval(async () => {
     const show = console.info;
-    modbus.read('40001,73', 18).then(show,show);
-    modbus.read('40001,73', 19).then(show,show);
-    modbus.read('40001,73', 12).then(show,show);
+    modbus.read('40001,73', 18).then(show, show);
+    modbus.read('40001,73', 19).then(show, show);
+    modbus.read('40001,73', 12).then(show, show);
     // buffer.copy(host_buffer)
 }, 1000);
