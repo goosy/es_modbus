@@ -128,10 +128,10 @@ export class Modbus_Server extends EventEmitter {
             ? parse_tcp_request(buffer)
             : parse_rtu_request(buffer);
 
-        requests.forEach((request) => {
+        for (const request of requests) {
             this.emit('receive', request.buffer);
             this._on_data(request, socket);
-        });
+        }
     }
 
     send_response(response, socket, transaction_id, protocol_id) {

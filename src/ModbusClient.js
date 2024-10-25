@@ -110,9 +110,7 @@ export class Modbus_Client extends EventEmitter {
             };
         });
     }
-
-    read(address_str, unit_id) {
-        unit_id ??= 1;
+    read(address_str, unit_id = 1) {
         const address_obj = parse_address(address_str);
         if (!address_obj) throw new Error('Invalid address format');
 
@@ -134,8 +132,7 @@ export class Modbus_Client extends EventEmitter {
         return this.process_packet_transaction(packet);
     }
 
-    write(address_str, value, unit_id) {
-        unit_id ??= 1;
+    write(address_str, value, unit_id = 1) {
         const address_obj = parse_address(address_str);
         if (!address_obj) throw new Error('Invalid address format');
 
@@ -144,11 +141,16 @@ export class Modbus_Client extends EventEmitter {
             address, length = value.length >> 1,
         } = address_obj;
         const tid = this.get_tid();
-        let func_code, buffer;
+        let func_code;
+        let buffer;
 
         if (fs_write && (length === 1 || Buffer.isBuffer(value) && value.length === 2)) {
             // Use single write function code (5 or 6)
             func_code = fs_write;
+            if (func_code === 5 && typeof value !== 'boolean') {
+                throw new Error('Invalid value for coil write');
+            }
+            // todo: Verify the correctness of the value for func_code === 6
             const data = Buffer.isBuffer(value) ? value.readUInt16BE(0) : value;
             buffer = this.make_data_packet(tid, 0, unit_id, func_code, address, data);
         } else if (fm_write) {
@@ -187,71 +189,81 @@ export class Modbus_Client extends EventEmitter {
     }
 
     on_data(buffer) {
-        const responses = this.protocol != "tcp"
+        const responses = this.protocol !== "tcp"
             ? parse_rtu_response(buffer)
             : parse_tcp_response(buffer);
 
-        responses.forEach((response) => {
+        for (const response of responses) {
             this.emit('receive', response.buffer);
 
-            if (response.func_code === 0) return; // Invalid data
+            if (response.func_code === 0) continue; // Invalid data
 
             const packet = this.get_packet(response.tid);
-            if (packet == undefined || packet.status !== 'pending') {
-                return;
+            if (packet === undefined || packet.status !== 'pending') {
+                continue;
             }
 
             if (response.exception_code) {
-                packet.reject(`response error: ${exception_code}`);
-                return;
+                packet.reject(`response error: ${response.exception_code}`);
+                continue;
             }
 
             packet.resolve(response.data);
-        });
+        }
     }
 
     make_data_packet(trans_id, proto_id, unit_id, func_code, address, data, length) {
-        if (typeof data == "boolean" && data) { data = 1; }
-        if (typeof data == "boolean" && !data) { data = 0; }
-        if (!this.zero_based) address = address === 0 ? 0xffff : address - 1;
+        if (typeof address !== 'number' && typeof address !== 'boolean') return null;
+        const start_address = this.zero_based
+            ? address
+            : address === 0 ? 0xffff : address - 1;
 
         let dataBytes = 0;
-        if (func_code == 15) { dataBytes = length; }
-        if (func_code == 16) { dataBytes = length * 2; }
+        if (func_code === 15) { dataBytes = length; }
+        if (func_code === 16) { dataBytes = length * 2; }
 
         let buffer_length = 12;
-        if (func_code == 15 || func_code == 16) { buffer_length = 13 + dataBytes; }
-        const byte_count = buffer_length - 6;
+        if (func_code === 15 || func_code === 16) { buffer_length = 13 + dataBytes; }
 
-        const tcp_pdu = Buffer.alloc(buffer_length);
-
-        tcp_pdu.writeUInt16BE(trans_id, 0);
-        tcp_pdu.writeUInt16BE(proto_id, 2);
-        tcp_pdu.writeUInt16BE(byte_count, 4);
-        tcp_pdu.writeUInt8(unit_id, 6);
-        tcp_pdu.writeUInt8(func_code, 7);
-        tcp_pdu.writeUInt16BE(address, 8);
-
-        if (func_code == 1 || func_code == 2 || func_code == 3 || func_code == 4) {
-            tcp_pdu.writeUInt16BE(length, 10);
+        const tcp_buffer = Buffer.alloc(buffer_length);
+        tcp_buffer.writeUInt8(unit_id, 6);
+        tcp_buffer.writeUInt8(func_code, 7);
+        tcp_buffer.writeUInt16BE(start_address, 8);
+        switch (func_code) {
+            case 1:
+            case 2:
+            case 3:
+            case 4:
+                tcp_buffer.writeUInt16BE(length, 10);
+                break;
+            case 5:
+                tcp_buffer.writeUInt16BE(data ? 0xFF00 : 0x0000, 10);
+                break;
+            case 6:
+                tcp_buffer.writeInt16BE(data, 10);
+                break;
+            case 15:
+            case 16:
+                tcp_buffer.writeInt16BE(length, 10);
+                tcp_buffer.writeUInt8(dataBytes, 12);
+                data.copy(tcp_buffer, 13, 0, dataBytes);
+                break;
         }
-        if (func_code == 5 || func_code == 6) {
-            tcp_pdu.writeInt16BE(data, 10);
-        }
-        if (func_code == 15 || func_code == 16) {
-            tcp_pdu.writeInt16BE(length, 10);
-            tcp_pdu.writeUInt8(dataBytes, 12);
-            data.copy(tcp_pdu, 13, 0, dataBytes);
+
+        if (this.protocol === 'tcp') {
+            tcp_buffer.writeUInt16BE(trans_id, 0);
+            tcp_buffer.writeUInt16BE(proto_id, 2);
+            tcp_buffer.writeUInt16BE(buffer_length - 6, 4);
+            return tcp_buffer;
         }
 
-        if (this.protocol == 'tcp') return tcp_pdu;
-
-        const rtu_data = tcp_pdu.subarray(6);
+        const rtu_data = tcp_buffer.subarray(6);
+        // rtu_buffer.length = tcp_buffer.lenght -6(MBA) + 2(CRC)
+        const rtu_buffer = Buffer.alloc(buffer_length - 4, rtu_data);
         const crc = modbus_crc16(rtu_data);
-        const rtu_pdu = Buffer.alloc(rtu_data.length + 2, rtu_data);
-        rtu_pdu.writeUInt16LE(crc, rtu_data.length);
-
-        return rtu_pdu;
+        // index_of_crc = rtu_buffer.lenght - 2(CRC)
+        rtu_buffer.writeUInt16LE(crc, buffer_length - 6);
+        return rtu_buffer;
     }
 
     connect() {
@@ -324,9 +336,7 @@ export class Modbus_Client extends EventEmitter {
         this.stream = stream;
 
         Object.defineProperty(this, 'connecting', {
-            get: function () {
-                return stream.connecting;
-            },
+            get: () => stream.connecting,
             configurable: true,
             enumerable: true,
         });
@@ -335,10 +345,7 @@ export class Modbus_Client extends EventEmitter {
             stream.write(data);
             this.emit('send', data);
         }
-
-        this._connect = (on_connect, on_error) => {
-            on_connect ??= DO_NOTHING;
-            on_error ??= DO_NOTHING;
+        this._connect = (on_connect = DO_NOTHING, on_error = DO_NOTHING) => {
             const _on_connect = () => {
                 stream.off('error', _on_error);
                 on_connect();
