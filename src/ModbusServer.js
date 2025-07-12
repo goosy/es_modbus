@@ -1,32 +1,79 @@
 import { createServer } from 'node:net';
 import { EventEmitter } from 'node:events';
+import { SerialPort } from 'serialport';
 import { modbus_crc16, parse_tcp_request, parse_rtu_request } from './util.js';
+
+/**
+ * @typedef {Object} ModbusVector
+ * @property {(addr: number, unit_id: number) => number} get_input_register  Read input register
+ * @property {(addr: number, unit_id: number) => number} get_holding_register  Read holding register
+ * @property {(addr: number, value: number, unit_id: number) => void} set_register  Write register
+ * @property {(addr: number, unit_id: number) => boolean} get_coil  Read coil
+ * @property {(addr: number, value: boolean, unit_id: number) => void} set_coil  Write coil
+ */
 
 export class Modbus_Server extends EventEmitter {
     initialized = false;
+    sockets = null;
+    host = null;
+    port = null;
     unit_ids = null;
     accept_all_units = true;
 
+    /**
+     * Constructor for a Modbus server.
+     * @param {ModbusVector} vector - Modbus request handler functions.
+     * @param {Object} options - Options for the server:
+     * @param {string} [options.host='0.0.0.0'] - The host to listen on (default: '0.0.0.0')
+     * @param {number|string|SerialPort} [options.port=502] - The TCP port to listen on (default: 502) or a serial port path (for RTU mode).
+     * @param {number|number[]} [options.unit_id=[0]] - The Modbus unit ID(s) to accept and respond to (see `set_unit_ids()` for details)
+     */
     constructor(vector, options) {
         super();
         this.vector = vector;
         this.set_unit_ids(options.unit_id ?? 0);
         this.host = options.host ?? '0.0.0.0';
-        this.port = options.port ?? 502;
-        this.sockets = new Set();
+        const port = options.port ?? 502;
+        if (typeof port === 'number' || port instanceof SerialPort) {
+            // a TCP port or a SerialPort instance
+            this.port = port;
+        } else if (typeof port === 'string') {
+            // A serial port path
+            this.port = new SerialPort(port);
+        } else {
+            // Default to TCP port 502
+            this.port = 502;
+        }
+        if (this.is_tcp) this.sockets = new Set();
     }
 
     get is_tcp() {
         return typeof this.port === 'number';
     }
 
+    /**
+     * Configures which Modbus unit IDs (slave addresses) this server will accept and respond to.
+     * @param {number | number[] | null | undefined | 'all' | '*'} unit_id - The unit ID(s) to accept:
+     * - If null, undefined, 'all', '*', or 0: Accept all unit IDs (0-255)
+     * - If a number: Accept only that specific unit ID
+     * - If an array of numbers: Accept all unit IDs specified in the array
+     * @throws {Error} If any specified unit ID is invalid (not an integer between 0 and 255)
+     */
     set_unit_ids(unit_id) {
-        if (Array.isArray(unit_id)) {
-            this.accept_all_units = false;
-            this.unit_ids = new Set(unit_id);
-        } else if (unit_id !== 0) {
-            this.accept_all_units = false;
-            this.unit_ids = new Set([unit_id]);
+        if (unit_id == null || unit_id === 0 || unit_id === 'all' || unit_id === '*') {
+            // Accept all unit IDs
+            this.accept_all_units = true;
+            this.unit_ids = null;
+            return;
+        }
+        const unit_ids = Array.isArray(unit_id) ? unit_id : [unit_id];
+        this.accept_all_units = false;
+        this.unit_ids = new Set();
+        for (const id of unit_ids) {
+            if (!Number.isInteger(id) || id < 0 || id > 255) {
+                throw new Error(`Invalid unit ID: ${id}. Must be an integer between 0 and 255.`);
+            }
+            this.unit_ids.add(id);
         }
     }
 
@@ -163,7 +210,7 @@ export class Modbus_Server extends EventEmitter {
         const values = [];
         for (let i = 0; i < quantity; i++) {
             const addr = start_address + i;
-            const value = this.vector.getCoil(addr, unit_id);
+            const value = this.vector.get_coil(addr, unit_id);
             values.push(value ? 1 : 0);
         }
 
@@ -191,8 +238,8 @@ export class Modbus_Server extends EventEmitter {
         for (let i = 0; i < quantity; i++) {
             const addr = start_address + i;
             const value = function_code === 3
-                ? this.vector.getHoldingRegister(addr, unit_id)
-                : this.vector.getInputRegister(addr, unit_id);
+                ? this.vector.get_holding_register(addr, unit_id)
+                : this.vector.get_input_register(addr, unit_id);
             values.push(value);
         }
 
@@ -209,7 +256,7 @@ export class Modbus_Server extends EventEmitter {
     }
 
     handle_write_single_coil(address, value, unit_id) {
-        this.vector.setCoil(address, value === 0xFF00, unit_id);
+        this.vector.set_coil(address, value === 0xFF00, unit_id);
 
         const buffer = Buffer.alloc(6);
         buffer.writeUInt8(unit_id, 0);
@@ -221,7 +268,7 @@ export class Modbus_Server extends EventEmitter {
     }
 
     handle_write_single_register(address, value, unit_id) {
-        this.vector.setRegister(address, value, unit_id);
+        this.vector.set_register(address, value, unit_id);
 
         const buffer = Buffer.alloc(6);
         buffer.writeUInt8(unit_id, 0);
@@ -237,7 +284,7 @@ export class Modbus_Server extends EventEmitter {
             const byteIndex = Math.floor(i / 8);
             const bitIndex = i % 8;
             const value = (data[byteIndex] & (1 << bitIndex)) !== 0;
-            this.vector.setCoil(start_address + i, value, unit_id);
+            this.vector.set_coil(start_address + i, value, unit_id);
         }
 
         const buffer = Buffer.alloc(6);
@@ -252,7 +299,7 @@ export class Modbus_Server extends EventEmitter {
     handle_write_multiple_registers(start_address, quantity, data, unit_id) {
         for (let i = 0; i < quantity; i++) {
             const value = data.readUInt16BE(i * 2);
-            this.vector.setRegister(start_address + i, value, unit_id);
+            this.vector.set_register(start_address + i, value, unit_id);
         }
 
         const buffer = Buffer.alloc(6);
