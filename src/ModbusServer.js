@@ -16,6 +16,10 @@ export class Modbus_Server extends EventEmitter {
         this.sockets = new Set();
     }
 
+    get is_tcp() {
+        return typeof this.port === 'number';
+    }
+
     set_unit_ids(unit_id) {
         if (Array.isArray(unit_id)) {
             this.accept_all_units = false;
@@ -32,7 +36,7 @@ export class Modbus_Server extends EventEmitter {
 
     start() {
         if (this.initialized) {
-            if (typeof this.port === 'number') {
+            if (this.is_tcp) {
                 if (this.server.listening) this.server.close();
                 this.server.listen(this.port, this.host);
             } else {
@@ -42,7 +46,7 @@ export class Modbus_Server extends EventEmitter {
             return;
         }
 
-        if (typeof this.port === 'number') {
+        if (this.is_tcp) {
             this.set_tcp();
             this.server.listen(this.port, this.host);
         } else {
@@ -159,19 +163,17 @@ export class Modbus_Server extends EventEmitter {
         const values = [];
         for (let i = 0; i < quantity; i++) {
             const addr = start_address + i;
-            const value = function_code === 1
-                ? this.vector.getCoil(addr, unit_id)
-                : this.vector.getInputRegister(addr, unit_id) & 1;
+            const value = this.vector.getCoil(addr, unit_id);
             values.push(value ? 1 : 0);
         }
 
-        const byteCount = Math.ceil(quantity / 8);
-        const buffer = Buffer.alloc(3 + byteCount);
+        const byte_count = Math.ceil(quantity / 8);
+        const buffer = Buffer.alloc(3 + byte_count);
         buffer.writeUInt8(unit_id, 0);
         buffer.writeUInt8(function_code, 1);
-        buffer.writeUInt8(byteCount, 2);
+        buffer.writeUInt8(byte_count, 2);
 
-        for (let i = 0; i < byteCount; i++) {
+        for (let i = 0; i < byte_count; i++) {
             let byte = 0;
             for (let j = 0; j < 8; j++) {
                 if (i * 8 + j < quantity) {
