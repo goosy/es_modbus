@@ -161,10 +161,10 @@ A single routine builds every outgoing frame regardless of transport:
    include RTU-over-TCP once that is served). On a serial bus a broadcast (unit `0`) is never
    answered: if unit `0` is accepted and the function is a write (5, 6, 15, 16) it is served and
    the response discarded, anything else is dropped; a non-accepted unit ID is dropped silently.
-   On TCP unit `0` is ordinary and a non-accepted unit ID gets `0x0B`. Otherwise
-   `serve()` calls `dispatch()`, which switches on `func_code` to the matching `handle_*` method, which calls into
-   `vector` and builds the response PDU. An unsupported function code → exception `0x01` under
-   its own function code (`fc | 0x80`).
+   On TCP unit `0` is ordinary and a non-accepted unit ID gets `0x0B`. Otherwise `serve()` calls
+   `dispatch()`, which switches on `func_code` to the matching `handle_*` method; that method
+   calls into `vector` and builds the response PDU. An unsupported function code → exception
+   `0x01` under its own function code (`fc | 0x80`).
    - Before any `vector` call, `check_request()` validates a supported request as the Modbus
      application protocol does: `0x03` for a quantity outside `1..MAX_QUANTITY[fc]`, a byte count
      that does not match the quantity (FC 15/16) or an FC 5 value other than `0xFF00` /
