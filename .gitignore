@@ -24,3 +24,10 @@ yarn.lock
 .vscode/
 .vs/
 /modbus.js
+
+# AI guidance (local only; canonical rules live in doc/ and the ancestor AGENTS.md)
+/CLAUDE.md
+/AGENTS.md
+
+# local development
+.local
