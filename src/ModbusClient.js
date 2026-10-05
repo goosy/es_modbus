@@ -1,9 +1,21 @@
 import { Socket } from 'node:net';
 import { EventEmitter } from 'node:events';
 import {
-    TRANSACTION_START, DO_NOTHING,
-    parse_address, parse_rtu_response, parse_tcp_response
+    TRANSACTION_START, DO_NOTHING, MAX_QUANTITY,
+    modbus_crc16, parse_address, parse_rtu_response, parse_tcp_response
 } from './util.js';
+
+function check_unit_id(unit_id) {
+    if (!Number.isInteger(unit_id) || unit_id < 0 || unit_id > 255) {
+        throw new Error(`Invalid unit ID: ${unit_id}`);
+    }
+}
+
+function check_quantity(func_code, length) {
+    if (!Number.isInteger(length) || length < 1 || length > MAX_QUANTITY[func_code]) {
+        throw new Error(`Invalid length ${length} for function code ${func_code}`);
+    }
+}
 
 export class Modbus_Client extends EventEmitter {
     zero_based;
@@ -95,7 +107,7 @@ export class Modbus_Client extends EventEmitter {
             }
         } else if (!this._conn_failed) {
             this._connect(
-                this.sending,
+                () => this.sending(),
                 () => this.emit('error', "send failed!")
             );
         } else {
@@ -137,11 +149,14 @@ export class Modbus_Client extends EventEmitter {
     read(address_str, unit_id = 1) {
         const address_obj = parse_address(address_str);
         if (!address_obj) throw new Error('Invalid address format');
+        check_unit_id(unit_id);
 
-        const tid = this.get_tid();
         const func_code = address_obj.fm_read;
         const address = address_obj.address;
         const length = address_obj.length ?? 1;
+        check_quantity(func_code, length);
+
+        const tid = this.get_tid();
         const buffer = this.make_data_packet(tid, 0, unit_id, func_code, address, null, length);
         const packet = {
             tid,
@@ -159,45 +174,63 @@ export class Modbus_Client extends EventEmitter {
     write(address_str, value, unit_id = 1) {
         const address_obj = parse_address(address_str);
         if (!address_obj) throw new Error('Invalid address format');
+        check_unit_id(unit_id);
 
-        const {
-            fm_write, fs_write,
-            address, length = value.length >> 1,
-        } = address_obj;
-        const tid = this.get_tid();
+        const { fs_write, fm_write, address } = address_obj;
+        if (!fs_write || !fm_write) {
+            throw new Error('Write operation not supported for this address type');
+        }
+
         let func_code;
-        let buffer;
-
-        if (fs_write && (length === 1 || Buffer.isBuffer(value) && value.length === 2)) {
-            // Use single write function code (5 or 6)
-            func_code = fs_write;
-            if (func_code === 5 && typeof value !== 'boolean') {
-                throw new Error('Invalid value for coil write');
-            }
-            // todo: Verify the correctness of the value for func_code === 6
-            const data = Buffer.isBuffer(value) ? value.readUInt16BE(0) : value;
-            buffer = this.make_data_packet(tid, 0, unit_id, func_code, address, data);
-        } else if (fm_write) {
-            // Use multiple write function code (15 or 16)
-            func_code = fm_write;
-            if (!Buffer.isBuffer(value)) {
-                throw new Error('Multiple writes require a Buffer value');
-            }
-            if (func_code === 15) {
-                // For coil writes, ensure value has the correct length
+        let length;
+        let data;
+        if (fs_write === 5) {
+            // Coils: a boolean is a single write, a Buffer is a multiple write
+            if (typeof value === 'boolean') {
+                func_code = 5;
+                length = address_obj.length ?? 1;
+                if (length !== 1) throw new Error('Invalid value for coil write');
+                data = value;
+            } else if (Buffer.isBuffer(value)) {
+                func_code = 15;
+                // A bit count cannot be derived from a byte count, so ",N" is required
+                length = address_obj.length;
+                if (length === undefined) {
+                    throw new Error('Coil Buffer write requires a ",N" length');
+                }
                 if (value.length !== Math.ceil(length / 8)) {
                     throw new Error('Invalid buffer length for coil write');
                 }
-            } else if (func_code === 16) {
-                // For register writes, ensure value has the correct length
+                data = value;
+            } else {
+                throw new Error('Invalid value for coil write');
+            }
+        } else {
+            // Holding registers: a number or a 2-byte Buffer of length 1 is a single write
+            const single_buffer = Buffer.isBuffer(value) && value.length === 2
+                && (address_obj.length ?? 1) === 1;
+            if (typeof value === 'number' || single_buffer) {
+                func_code = 6;
+                length = address_obj.length ?? 1;
+                data = Buffer.isBuffer(value) ? value.readUInt16BE(0) : value;
+                if (length !== 1 || !Number.isInteger(data) || data < 0 || data > 0xFFFF) {
+                    throw new Error('Invalid value for register write');
+                }
+            } else if (Buffer.isBuffer(value)) {
+                func_code = 16;
+                length = address_obj.length ?? value.length / 2;
                 if (value.length !== length * 2) {
                     throw new Error('Invalid buffer length for register write');
                 }
+                data = value;
+            } else {
+                throw new Error('Invalid value for register write');
             }
-            buffer = this.make_data_packet(tid, 0, unit_id, func_code, address, value, length);
-        } else {
-            throw new Error('Write operation not supported for this address type');
         }
+        check_quantity(func_code, length);
+
+        const tid = this.get_tid();
+        const buffer = this.make_data_packet(tid, 0, unit_id, func_code, address, data, length);
 
         const packet = {
             tid,
@@ -243,7 +276,7 @@ export class Modbus_Client extends EventEmitter {
             : address === 0 ? 0xffff : address - 1;
 
         let dataBytes = 0;
-        if (func_code === 15) { dataBytes = length; }
+        if (func_code === 15) { dataBytes = Math.ceil(length / 8); }
         if (func_code === 16) { dataBytes = length * 2; }
 
         let buffer_length = 12;
@@ -264,7 +297,7 @@ export class Modbus_Client extends EventEmitter {
                 tcp_buffer.writeUInt16BE(data ? 0xFF00 : 0x0000, 10);
                 break;
             case 6:
-                tcp_buffer.writeInt16BE(data, 10);
+                tcp_buffer.writeUInt16BE(data, 10);
                 break;
             case 15:
             case 16:

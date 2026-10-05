@@ -1,6 +1,12 @@
 export const TRANSACTION_START = 8000;
 export const DO_NOTHING = () => { };
 
+// Maximum quantity per request, by function code (Modbus application protocol limits)
+export const MAX_QUANTITY = {
+    1: 2000, 2: 2000, 3: 125, 4: 125,
+    5: 1, 6: 1, 15: 1968, 16: 123,
+};
+
 const TABLE = new Int32Array([
     0x0000, 0xc0c1, 0xc181, 0x0140, 0xc301, 0x03c0, 0x0280, 0xc241,
     0xc601, 0x06c0, 0x0780, 0xc741, 0x0500, 0xc5c1, 0xc481, 0x0440,
@@ -68,14 +74,18 @@ const MB_prefix_dict = {
 };
 
 export function parse_address(address_str) {
+    if (typeof address_str !== 'string') return null;
     const match = address_str.match(/^(\d{5})(,(\d{1,4}))?$/);
     if (!match) return null;
 
-    const address = Number.parseInt(match[1].substr(1), 10);
+    const MB_object = MB_prefix_dict[match[1].substring(0, 1)];
+    if (!MB_object) return null;
+
+    const address = Number.parseInt(match[1].substring(1), 10);
     if (address <= 0 || address > 65535) return null;
 
     const length = match[3] ? Number.parseInt(match[3], 10) : undefined;
-    const MB_object = MB_prefix_dict[match[1].substring(0, 1)];
+    if (length === 0) return null;
     return { ...MB_object, address, length };
 }
 
@@ -294,7 +304,8 @@ function parse_mt_request(buffer) {
     const pid = buffer.readUInt16BE(2);            // Protocol Id
     const unit_id = buffer.readUInt8(6);           // Unit Id
     let func_code = buffer.readUInt8(7);           // Function Code
-    const start_address = buffer.readUInt16BE(8);  // Start Address
+    // Start Address (absent when the PDU is only a function code)
+    const start_address = PDU_length >= 4 ? buffer.readUInt16BE(8) : undefined;
     let quantity;                                  // Quantity of registers/coils
     let byte_count = 0;                            // Byte count of the data
     let data;                                      // Data to write
@@ -381,7 +392,7 @@ function parse_mt_response(buffer) {
     const tid = buffer.readUInt16BE(0);    // Transaction Id
     const pid = buffer.readUInt16BE(2);    // Protocol Id
     const unit_id = buffer.readUInt8(6);   // Unit Id
-    let func_code = buffer.readInt8(7);    // Function Code
+    let func_code = buffer.readUInt8(7);   // Function Code
     let start_address;                     // Written address
     let quantity;                          // Quantity of registers/coils
     let byte_count = 0;                    // Byte count of the data

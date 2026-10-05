@@ -23,12 +23,13 @@ export class Modbus_Server extends EventEmitter {
     /**
      * Constructor for a Modbus server.
      * @param {ModbusVector} vector - Modbus request handler functions.
-     * @param {Object} options - Options for the server:
+     * @param {Object} [options] - Options for the server:
      * @param {string} [options.host='0.0.0.0'] - The host to listen on (default: '0.0.0.0')
      * @param {number|string|SerialPort} [options.port=502] - The TCP port to listen on (default: 502) or a serial port path (for RTU mode).
-     * @param {number|number[]} [options.unit_id=[0]] - The Modbus unit ID(s) to accept and respond to (see `set_unit_ids()` for details)
+     * @param {number|number[]|'all'|'*'} [options.unit_id] - The Modbus unit ID(s) to accept and respond to;
+     *   every ID when omitted (see `set_unit_ids()` for details)
      */
-    constructor(vector, options) {
+    constructor(vector, options = {}) {
         super();
         this.vector = vector;
         this.set_unit_ids(options.unit_id ?? 0);
@@ -54,8 +55,9 @@ export class Modbus_Server extends EventEmitter {
     /**
      * Configures which Modbus unit IDs (slave addresses) this server will accept and respond to.
      * @param {number | number[] | null | undefined | 'all' | '*'} unit_id - The unit ID(s) to accept:
-     * - If null, undefined, 'all', '*', or 0: Accept all unit IDs (0-255)
-     * - If a number: Accept only that specific unit ID
+     * - If null, undefined, 'all', or '*': Accept all unit IDs (0-255)
+     * - If a number: Accept only that specific unit ID; 0 is the broadcast address
+     *   (the code still treats 0 as "accept all", see doc/design.md gap 27)
      * - If an array of numbers: Accept all unit IDs specified in the array
      * @throws {Error} If any specified unit ID is invalid (not an integer between 0 and 255)
      */
@@ -105,12 +107,12 @@ export class Modbus_Server extends EventEmitter {
 
     set_rtu() {
         this.port.on('open', () => {
-            this.emit('started');
+            this.emit('start');
         });
         this.port.on('data', (data) => this.on_data(data));
         this.port.on('error', (err) => this.emit('error', err));
         this.port.on('close', () => {
-            this.emit('closed');
+            this.emit('stop');
         });
     }
 
@@ -140,8 +142,8 @@ export class Modbus_Server extends EventEmitter {
 
         if (!this.is_valid_unit_id(unit_id)) {
             // If the unit_id is invalid, send an error response or ignore the request.
-            // 0x11: Gateway Target Device Failed Response
-            this.send_exception_response(unit_id, func_code, 0x11, socket, tid, pid);
+            // 0x0B: Gateway Target Device Failed To Respond
+            this.send_exception_response(unit_id, func_code, 0x0B, socket, tid, pid);
             return;
         }
 
@@ -156,10 +158,10 @@ export class Modbus_Server extends EventEmitter {
                 response = this.handle_read_registers(func_code, start_address, quantity, unit_id);
                 break;
             case 5: // Write Single Coil
-                response = this.handle_write_single_coil(start_address, quantity, unit_id);
+                response = this.handle_write_single_coil(start_address, data, unit_id);
                 break;
             case 6: // Write Single Register
-                response = this.handle_write_single_register(start_address, quantity, unit_id);
+                response = this.handle_write_single_register(start_address, data, unit_id);
                 break;
             case 15: // Write Multiple Coils
                 response = this.handle_write_multiple_coils(start_address, quantity, data, unit_id);
@@ -331,7 +333,7 @@ export class Modbus_Server extends EventEmitter {
             }
             this.sockets.clear();
             this.server.close();
-        } else if (this.port) {
+        } else if (!this.is_tcp) {
             this.port.close();
         }
     }

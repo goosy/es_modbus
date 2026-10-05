@@ -3,7 +3,7 @@ import { Modbus_Client, Modbus_Server } from "../modbus.js";
 // Modbus_Server usage example
 function createMTServer(unit_map, host = "0.0.0.0", port = 502) {
     const vector = {
-        getInputRegister: (addr, unit_id) => {
+        get_input_register: (addr, unit_id) => {
             const buffer = unit_map[unit_id];
             const offset = addr * 2;
             if (buffer == null || 0 > offset || offset >= buffer.length) {
@@ -12,7 +12,7 @@ function createMTServer(unit_map, host = "0.0.0.0", port = 502) {
             }
             return buffer.readUInt16BE(offset);
         },
-        getHoldingRegister: (addr, unit_id) => {
+        get_holding_register: (addr, unit_id) => {
             const buffer = unit_map[unit_id];
             const offset = addr * 2;
             if (buffer == null || 0 > offset || offset >= buffer.length) {
@@ -21,7 +21,7 @@ function createMTServer(unit_map, host = "0.0.0.0", port = 502) {
             }
             return buffer.readUInt16BE(offset);
         },
-        setRegister: (addr, value, unit_id) => {
+        set_register: (addr, value, unit_id) => {
             const buffer = unit_map[unit_id];
             const offset = addr * 2;
             if (buffer == null || 0 > offset || offset >= buffer.length) {
@@ -32,7 +32,7 @@ function createMTServer(unit_map, host = "0.0.0.0", port = 502) {
             return;
         },
 
-        getCoil: (addr, unit_id) => {
+        get_coil: (addr, unit_id) => {
             const buffer = unit_map[unit_id];
             const offset = addr >> 3;
             const bit_mask = 1 << (addr & 0x7);
@@ -43,7 +43,7 @@ function createMTServer(unit_map, host = "0.0.0.0", port = 502) {
             return (buffer.readUInt8(offset) & bit_mask) > 0;
         },
 
-        setCoil: (addr, value, unit_id) => {
+        set_coil: (addr, value, unit_id) => {
             const buffer = unit_map[unit_id];
             const offset = addr >> 3;
             const bit_mask = 1 << (addr & 0x7);
@@ -59,7 +59,7 @@ function createMTServer(unit_map, host = "0.0.0.0", port = 502) {
         },
     }
 
-    const server = new Modbus_Server(vector, { host, port, unit_id: 0 });
+    const server = new Modbus_Server(vector, { host, port });
     server.on("start", () => {
         console.log(`ModbusTCP server listening on modbus://${host}:${port}`);
     })
@@ -72,7 +72,7 @@ function createMTServer(unit_map, host = "0.0.0.0", port = 502) {
         console.error(err);
     });
     server.on("stop", () => {
-        logger.error("connection closed!");
+        console.log("server stopped");
     });
 
     return server;
