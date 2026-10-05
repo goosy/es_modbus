@@ -10,6 +10,8 @@
 - [spec-protocol.zh-cn.md](./spec-protocol.zh-cn.md) — Modbus 帧格式、地址表示法、功能码、CRC。
 - [spec-client.zh-cn.md](./spec-client.zh-cn.md) — `Modbus_Client` 的 API、选项、事件、行为约定。
 - [spec-server.zh-cn.md](./spec-server.zh-cn.md) — `Modbus_Server` 的 API、`vector` 处理接口、事件。
+- [spec-test.zh-cn.md](./spec-test.zh-cn.md) — 自动化测试套件：覆盖范围、命令、串口测试环境、
+  已知缺陷的标记约定。
 - [design.zh-cn.md](./design.zh-cn.md) — 如何构建：内部机制、实现现状、已知缺陷与待办事项。
 
 ## 目标
@@ -34,13 +36,13 @@
 - 多单元服务端：单个服务端实例可承载多个单元 ID（unit ID），并按单元 ID 路由。
 - 客户端的事务跟踪、单请求超时、发送节流，以及 TCP 和 RTU-over-TCP 的自动重连。
 - 两个类都提供事件发射器，用于线路跟踪（`send` / `receive`）和生命周期通知。
+- 覆盖编解码、服务端和客户端的自动化测试套件（见 `spec-test.zh-cn.md`）。
 
 ### 范围之外
 
 - 上述列表以外的功能码（诊断 `0x08`、文件记录访问、FIFO、封装传输等）。解析器会拒绝它们。
 - ASCII 传输。
 - 服务端上的任何持久化数据模型 — 存储完全由调用者的 `vector` 负责。
-- 随库提供的自动化测试套件。
 - TypeScript 类型（代码用 JSDoc typedef 描述数据形状）。
 
 ## 工具与依赖
@@ -51,6 +53,9 @@
   （`peerDependencies` + `peerDependenciesMeta.optional`），只用 TCP 的用户无需安装它就能使用本库。
 - **包管理器：** pnpm（必须使用 — 见 `AGENTS.md`）。
 - **打包器：** Rolldown（内置 Node 模块解析、CommonJS 互操作与 JSON 导入，无需插件）。
+- **测试：** Node.js 内置测试运行器（`node:test`）。开发时 `serialport` 由 pnpm 的
+  `auto-install-peers`（默认开启）安装，使串口测试和服务端模块可以加载；它不列在
+  `devDependencies` 中。
 
 ## 构建与目录布局
 
@@ -62,13 +67,15 @@
 | `src/util.js`         | 纯协议编解码（帧解析、CRC、地址解析）。无 I/O。                  |
 | `rolldown.config.js`  | 将 `src/index.js` 打包为 `modbus.js`（ESM）。                    |
 | `modbus.js`           | 构建产物，也是包 `exports` 的入口。已被 git 忽略；由 `pnpm build` / `prepare` 生成。 |
-| `test/test.js`        | 手动 TCP 冒烟脚本。                                              |
+| `test/*.test.js`      | 自动化测试（见 `spec-test.zh-cn.md`）。                          |
+| `test/helpers.js`     | 共享的测试夹具。                                                 |
 
 命令：
 
 - `pnpm install`
 - `pnpm build` — 在导入 `../modbus.js` 的任何操作之前运行。
-- `pnpm test` — 执行 `node ./test/test.js`；绑定 TCP 端口 502 并无限轮询。
+- `pnpm test` — 先构建，再运行自动化测试套件（`node --test`）。
+- `pnpm test:coverage` — 运行测试套件并输出 `src/` 的覆盖率报告。
 
 ## 约定
 

@@ -123,13 +123,6 @@ A single routine builds every outgoing frame regardless of transport:
 3. `send_response(pdu, socket?, tid, pid)` — TCP: prepend a fresh MBAP header and `socket.write`.
    Serial: append CRC-16 (LE) and `port.write`. Emit `send`.
 
-## Manual smoke script (`test/test.js`)
-
-`pnpm test` runs `test/test.js`, which starts a TCP server on port 502 backed by three
-`Buffer`-backed units (18, 19, 12) and a client that polls `40001,73` from each once per second,
-logging hex frames. It is a transport sanity check, not an automated test (gap 3); its `vector`
-uses the `snake_case` accessor names, but the interface contract is `spec-server.md`, not this
-script.
 
 ---
 
@@ -166,7 +159,10 @@ Each item is a defect or missing piece, not intended behavior.
   length implied by the function code and byte count. `on_data` instead passes each received
   chunk straight to `parse_rtu_request`, so a frame split across chunks, or several frames in one
   chunk, are dropped or misparsed. (Inferred from the code; not verified on hardware.)
-- [ ] **Serial path untested.** No test or smoke script exercises it.
+- [ ] **Serial path not verified end to end.** `test/serial.test.js` exercises the RTU server and
+  client over a serial port pair, but on the development machine the com0com pair fails the
+  suite's pre-check and the serial tests are skipped (see `spec-test.md`, "Serial test
+  environment"). The RTU server path is covered only by unit tests with a fake serial port.
 
 ### Dependency
 
@@ -191,8 +187,8 @@ Most gaps were found by auditing the code against the `spec-*` series. Gaps mark
 were reproduced by running the code; the others are derived from reading it. They affect the TCP
 path as well, not only RTU.
 
-- **Gap 3 — No automated tests / no lint config.** `pnpm test` runs a long-lived smoke script
-  that binds port 502.
+- **Gap 3 — No lint config.** The automated test suite exists (`spec-test.md`); a lint
+  configuration does not.
 - **Gap 10 — `write()` resolves with the wrong type.** The spec says `Promise<Buffer>`, but the
   promise resolves with `response.data`: a `number` for FC 5/6 and `undefined` for FC 15/16.
 - **Gap 11 — Server does not drop malformed frames.** `on_data` hands every parsed frame,
@@ -260,6 +256,11 @@ path as well, not only RTU.
   never answered. The code keeps `0` as an alias for "all" (and defaults `options.unit_id` to
   `0`), and answers requests to unit `0` like any other. The JSDoc already describes the spec;
   the code does not yet. This is a breaking change to `set_unit_ids`.
+- **Gap 28 — An odd-length register `Buffer` throws the wrong error *(verified)*.** For
+  `write('40001', Buffer.alloc(3))` the length is derived as `value.length / 2 = 1.5`; the
+  buffer-length check `value.length !== length * 2` passes, and `check_quantity` then throws
+  `Invalid length 1.5 for function code 16`. The spec requires
+  `Invalid buffer length for register write`. It still throws synchronously.
 
 ---
 

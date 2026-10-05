@@ -19,7 +19,8 @@
   },
   "scripts": {
     "build": "rolldown -c",
-    "test": "node ./test/test.js",
+    "test": "pnpm build && node --test \"test/**/*.test.js\"",
+    "test:coverage": "pnpm build && node --test --experimental-test-coverage --test-coverage-include=\"src/**\" \"test/**/*.test.js\"",
     "prepare": "pnpm build"
   },
   "keywords": [

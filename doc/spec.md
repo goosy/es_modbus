@@ -9,6 +9,8 @@ Sub-documents:
 - [spec-protocol.md](./spec-protocol.md) — Modbus framing, address notation, function codes, CRC.
 - [spec-client.md](./spec-client.md) — `Modbus_Client` API, options, events, behavior contract.
 - [spec-server.md](./spec-server.md) — `Modbus_Server` API, the `vector` handler interface, events.
+- [spec-test.md](./spec-test.md) — the automated test suite: coverage, commands, serial test
+  environment, known-gap convention.
 - [design.md](./design.md) — how it is built: internal mechanics, implementation status, known
   gaps and TODOs.
 
@@ -38,6 +40,7 @@ a `string`, or takes a structured PDU address (function code, PDU address and le
 - Client-side transaction tracking, per-request timeout, send pacing, and automatic reconnect
   for TCP and RTU-over-TCP.
 - Event emitters on both classes for wire tracing (`send` / `receive`) and lifecycle.
+- An automated test suite for the codec, the server and the client (see `spec-test.md`).
 
 ### Out of scope
 
@@ -45,7 +48,6 @@ a `string`, or takes a structured PDU address (function code, PDU address and le
   encapsulated transport, etc.). Parsers reject them.
 - ASCII transport.
 - Any persistent data model on the server — storage is entirely the caller's `vector`.
-- A bundled automated test suite.
 - TypeScript types (the code documents shapes with JSDoc typedefs).
 
 ## Tools and dependencies
@@ -57,6 +59,9 @@ a `string`, or takes a structured PDU address (function code, PDU address and le
   the library without installing it.
 - **Package manager:** pnpm (required — see `AGENTS.md`).
 - **Bundler:** Rolldown (built-in node resolution, CommonJS interop and JSON import; no plugins).
+- **Tests:** the Node.js built-in test runner (`node:test`). During development `serialport` is
+  installed by pnpm's `auto-install-peers` (on by default), so the serial tests and the server
+  module can load; it is not listed in `devDependencies`.
 
 ## Build and layout
 
@@ -68,13 +73,15 @@ a `string`, or takes a structured PDU address (function code, PDU address and le
 | `src/util.js`         | Pure protocol codec (frame parsing, CRC, address parsing). No I/O. |
 | `rolldown.config.js`  | Bundles `src/index.js` → `modbus.js` (ESM).                     |
 | `modbus.js`           | Build output and the package `exports` entry. Git-ignored; produced by `pnpm build` / `prepare`. |
-| `test/test.js`        | Manual TCP smoke script.                                        |
+| `test/*.test.js`      | Automated tests (see `spec-test.md`).                           |
+| `test/helpers.js`     | Shared test fixtures.                                           |
 
 Commands:
 
 - `pnpm install`
 - `pnpm build` — run before anything that imports `../modbus.js`.
-- `pnpm test` — executes `node ./test/test.js`; binds TCP port 502 and polls indefinitely.
+- `pnpm test` — builds, then runs the automated test suite (`node --test`).
+- `pnpm test:coverage` — the test suite with a coverage report for `src/`.
 
 ## Conventions
 

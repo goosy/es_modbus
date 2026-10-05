@@ -114,13 +114,6 @@
 3. `send_response(pdu, socket?, tid, pid)` — TCP：前置新的 MBAP 头并 `socket.write`。
    串口：追加 CRC-16（小端）并 `port.write`。发出 `send`。
 
-## 手动冒烟脚本（`test/test.js`）
-
-`pnpm test` 运行 `test/test.js`，它在端口 502 上启动一个 TCP 服务端，由三个以 `Buffer` 为后端的
-单元（18、19、12）支撑，并启动一个客户端，每秒从每个单元轮询一次 `40001,73`，记录十六进制帧。
-它只是传输层的健全性检查，不是自动化测试（缺陷 3）；其 `vector` 使用 `snake_case` 访问器命名，
-但接口约定以 `spec-server.zh-cn.md` 为准，而不是这个脚本。
-
 ---
 
 ## RTU / 串口：未完成的工作
@@ -153,7 +146,9 @@
   时间的静默来界定，RTU-over-TCP 的帧则由功能码和字节数隐含的长度来界定。`on_data` 却把每个收到
   的数据块直接交给 `parse_rtu_request`，因此跨数据块拆分的帧，或一个数据块里的多个帧，会被丢弃
   或误解析。（由代码推断，未在硬件上验证。）
-- [ ] **串口路径未经测试。** 没有任何测试或冒烟脚本覆盖它。
+- [ ] **串口路径未经端到端验证。** `test/serial.test.js` 通过一对串口测试 RTU 服务端和客户端，
+  但在开发机上 com0com 端口对未通过套件的预检，串口测试被跳过（见 `spec-test.zh-cn.md`
+  “串口测试环境”）。RTU 服务端路径目前只由使用伪串口的单元测试覆盖。
 
 ### 依赖
 
@@ -175,8 +170,7 @@ RTU / 串口的缺陷列在上一节，不在此处。缺陷修复后即从本�
 大多数缺陷是把代码对照 `spec-*` 系列审查后发现的。标注*（已验证）*的项已通过实际运行代码复现，
 其余由阅读代码推出。它们同样影响 TCP 路径，而不仅仅是 RTU。
 
-- **缺陷 3 — 没有自动化测试 / 没有 lint 配置。** `pnpm test` 运行的是一个长期存活、绑定 502
-  端口的冒烟脚本。
+- **缺陷 3 — 没有 lint 配置。** 自动化测试套件已经存在（`spec-test.zh-cn.md`）；lint 配置尚无。
 - **缺陷 10 — `write()` 兑现的类型不对。** spec 写的是 `Promise<Buffer>`，但 promise 以
   `response.data` 兑现：FC 5/6 为 `number`，FC 15/16 为 `undefined`。
 - **缺陷 11 — 服务端不丢弃格式错误的帧。** `on_data` 把所有解析出的帧（包括 `func_code: 0` 的，
@@ -229,6 +223,11 @@ RTU / 串口的缺陷列在上一节，不在此处。缺陷修复后即从本�
   写入、忽略读取，且从不应答。代码仍把 `0` 保留为“全部”的别名（并把 `options.unit_id` 默认为
   `0`），对发往单元 `0` 的请求与其他请求一样应答。JSDoc 已按 spec 描述，代码尚未跟上。这是对
   `set_unit_ids` 的破坏性改动。
+- **缺陷 28 — 奇数长度的寄存器 `Buffer` 抛出的错误不对*（已验证）*。** 对
+  `write('40001', Buffer.alloc(3))`，长度按 `value.length / 2 = 1.5` 推出；缓冲区长度检查
+  `value.length !== length * 2` 得以通过，随后 `check_quantity` 抛出
+  `Invalid length 1.5 for function code 16`。spec 要求的是
+  `Invalid buffer length for register write`。它仍然是同步抛出。
 
 ---
 
