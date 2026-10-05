@@ -7,10 +7,7 @@
     ".": "./modbus.js"
   },
   "devDependencies": {
-    "@rollup/plugin-commonjs": "^26.0.3",
-    "@rollup/plugin-json": "^6.1.0",
-    "@rollup/plugin-node-resolve": "^15.3.0",
-    "rollup": "^4.24.0"
+    "rolldown": "^1.2.12"
   },
   "peerDependencies": {
     "serialport": ">=10.0.0"
@@ -21,7 +18,7 @@
     }
   },
   "scripts": {
-    "build": "rollup -c",
+    "build": "rolldown -c",
     "test": "node ./test/test.js",
     "prepare": "pnpm build"
   },

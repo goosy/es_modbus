@@ -158,7 +158,7 @@
 ### 依赖
 
 - [ ] **`serialport` 被无条件导入。** 它已声明为可选 peer 依赖（`peerDependencies` `>=10.0.0` +
-  `peerDependenciesMeta.optional`），并在 `rollup.config.js` 中保持 `external`，但
+  `peerDependenciesMeta.optional`），并在 `rolldown.config.js` 中保持 `external`，但
   `src/ModbusServer.js` 仍在模块顶层执行 `import { SerialPort } from 'serialport'`。因此在未安装
   `serialport` 时导入本包，会对**所有**用户抛出异常，包括只用 TCP 的用户。要做到真正可选，需要
   仅在串口路径上惰性执行 `import('serialport')`（并把 `instanceof SerialPort` 换成鸭子类型判断）。

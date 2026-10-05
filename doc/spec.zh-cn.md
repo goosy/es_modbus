@@ -50,8 +50,7 @@
   `serialport` 由用户自行提供：它是可选的 peer 依赖
   （`peerDependencies` + `peerDependenciesMeta.optional`），只用 TCP 的用户无需安装它就能使用本库。
 - **包管理器：** pnpm（必须使用 — 见 `AGENTS.md`）。
-- **打包器：** Rollup，搭配 `@rollup/plugin-node-resolve`、`@rollup/plugin-commonjs`、
-  `@rollup/plugin-json`。
+- **打包器：** Rolldown（内置 Node 模块解析、CommonJS 互操作与 JSON 导入，无需插件）。
 
 ## 构建与目录布局
 
@@ -61,7 +60,7 @@
 | `src/ModbusClient.js` | 客户端类。                                                       |
 | `src/ModbusServer.js` | 服务端类。                                                       |
 | `src/util.js`         | 纯协议编解码（帧解析、CRC、地址解析）。无 I/O。                  |
-| `rollup.config.js`    | 将 `src/index.js` 打包为 `modbus.js`（ESM）。                    |
+| `rolldown.config.js`  | 将 `src/index.js` 打包为 `modbus.js`（ESM）。                    |
 | `modbus.js`           | 构建产物，也是包 `exports` 的入口。已被 git 忽略；由 `pnpm build` / `prepare` 生成。 |
 | `test/test.js`        | 手动 TCP 冒烟脚本。                                              |
 

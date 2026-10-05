@@ -56,8 +56,7 @@ a `string`, or takes a structured PDU address (function code, PDU address and le
   (`peerDependencies` + `peerDependenciesMeta.optional`), and TCP-only users must be able to use
   the library without installing it.
 - **Package manager:** pnpm (required — see `AGENTS.md`).
-- **Bundler:** Rollup with `@rollup/plugin-node-resolve`, `@rollup/plugin-commonjs`,
-  `@rollup/plugin-json`.
+- **Bundler:** Rolldown (built-in node resolution, CommonJS interop and JSON import; no plugins).
 
 ## Build and layout
 
@@ -67,7 +66,7 @@ a `string`, or takes a structured PDU address (function code, PDU address and le
 | `src/ModbusClient.js` | Client class.                                                   |
 | `src/ModbusServer.js` | Server class.                                                   |
 | `src/util.js`         | Pure protocol codec (frame parsing, CRC, address parsing). No I/O. |
-| `rollup.config.js`    | Bundles `src/index.js` → `modbus.js` (ESM).                     |
+| `rolldown.config.js`  | Bundles `src/index.js` → `modbus.js` (ESM).                     |
 | `modbus.js`           | Build output and the package `exports` entry. Git-ignored; produced by `pnpm build` / `prepare`. |
 | `test/test.js`        | Manual TCP smoke script.                                        |
 

@@ -172,7 +172,7 @@ Each item is a defect or missing piece, not intended behavior.
 
 - [ ] **`serialport` is imported unconditionally.** It is declared as an optional peer dependency
   (`peerDependencies` `>=10.0.0` + `peerDependenciesMeta.optional`) and kept `external` in
-  `rollup.config.js`, but `src/ModbusServer.js` still does `import { SerialPort } from
+  `rolldown.config.js`, but `src/ModbusServer.js` still does `import { SerialPort } from
   'serialport'` at module top level. Importing the package without `serialport` installed
   therefore throws for **every** user, including TCP-only ones. Making it truly optional needs a
   lazy `import('serialport')` on the serial path only (and `instanceof SerialPort` replaced by a
