@@ -69,8 +69,11 @@
   则递增 `#last_tid`，一旦超过 `packets_length + TRANSACTION_START` 就回绕到
   `TRANSACTION_START`。由于只有 256 个槽位，且不检查槽位是否空闲，同时待决的 TCP 事务超过
   256 个就会冲突。
-- **`process_packet_transaction`。** 设置 `status = 'pending'`，递增 `#trans_count`，将缓冲区
-  入队，并返回一个 Promise。它把 `resolve` / `reject` 闭包以及 `timeout_id` 存放在 packet 上。
+- **`process_packet_transaction`。** 处于重连退避（`_conn_failed`）时，它返回一个已以
+  `Error('connection lost')` 拒绝的 Promise；帧从不入队。它同时发出 `error`，但仅当客户端有
+  `error` 监听者时：没有监听者时发出 `error` 会抛出异常，而参数合法的调用不得同步抛出。
+  否则设置 `status = 'pending'`，递增
+  `#trans_count`，创建 Promise，再将缓冲区入队并返回该 Promise。它把 `resolve` / `reject` 闭包以及 `timeout_id` 存放在 packet 上。
   `end_transaction` 递减计数，标记 `status`，清除定时器，并把 `resolve`/`reject` 换成
   `DO_NOTHING`，使迟到/重复的响应无效。
 - **匹配（`on_data`）。** 解析 → 发出 `receive` → 跳过 `func_code === 0` → 按 `tid` 查找 →
@@ -79,18 +82,22 @@
 ## 发送队列 / 背压（`send` → `sending`）
 
 - `send_queue` 是一个数组，上限为 `send_queue_size`（256）；溢出时从**队首**切除（丢弃最旧的）。
-- `sending` 由 `#busy` 保护。已连接时，它取出一个缓冲区，调用 `_send`，然后在 `delay` 毫秒后
+- `sending` 由 `#busy` 保护，队列为空时立即返回。已连接时，它取出一个缓冲区，调用 `_send`，然后在 `delay` 毫秒后
   清除 `#busy` 并重新进入。这样既串行化了写入，也实现了节流。
-- 未连接且没有处于重连退避时，`sending` 以自身作为成功回调触发 `_connect`。若处于退避期，
-  则发出 `error`。
+- 未连接且没有处于重连退避时，`sending` 以自身作为成功回调触发 `_connect`。它不会在退避期间
+  运行：退避只在连接丢失后开始，此时 `abort_pending()` 已清空队列，而退避期间发出的请求在入队
+  之前就被拒绝。
+- **`abort_pending()`。** 清空 `send_queue`，并以 `Error('connection lost')` 拒绝每个 `status` 为
+  `'pending'` 的 packet。它在每次传输层 `close` / `error`（TCP 套接字和串口）时运行，因此按需连接
+  失败时，其请求也会立即失败。
 
 ## 连接状态（TCP，`set_tcp`）
 
 - `_connect(on_connect, on_error)` 挂接一次性的 `connect` / `error` 监听器，二者互相清理；只有
   在尚未处于 `connecting` 时才调用 `socket.connect`。
 - 流 `connect` → `is_connected = true`，`_conn_failed = false`，发出 `connect`。
-- 流 `close` / `error` → `is_connected = false`，调用 `reconnect()`，发出 `disconnect` /
-  `error`。
+- 流 `close` / `error` → `is_connected = false`，`abort_pending()`，调用 `reconnect()`，发出
+  `disconnect` / `error`。
 - `reconnect()` — 若 `reconnect_time > 0` 且尚未处于退避，则设置 `_conn_failed = true`，并在
   `reconnect_time` 毫秒后清除它并调用 `_connect()`。
 
@@ -200,12 +207,6 @@ RTU / 串口的缺陷列在上一节，不在此处。缺陷修复后即从本�
   抛出 `RangeError`（寄存器超过 127 个、线圈超过 2040 个）；`byte_count` 小于 `quantity` 的
   FC 15/16 请求会读到数据之外。两者都在套接字 `data` 处理器内抛出。spec 对此没有定义服务端的上限
   或异常码（见“待决问题”）。
-- **缺陷 21 — 连接丢失时不拒绝待决请求，且过期的帧仍留在队列中*（已验证）*。** spec 要求连接
-  丢失时立即拒绝每个待决请求并丢弃排队的帧。代码两件事都没做：待决请求只是等待自己的超时；客户端
-  断开或处于退避期间超时的请求，其帧仍留在 `send_queue` 中。连接恢复后，下一次 `send()` 会把它
-  发出去，因此调用者已被告知失败的写入仍可能被延迟执行。拒绝的值应为
-  `new Error('connection lost')`，重连退避期间发出的请求应被立即拒绝；目前 `sending()` 只发出
-  `error`，并把帧留在队列中。
 - **缺陷 26 — 服务端不捕获抛出异常的 `vector`。** spec 要求记录该错误并返回异常 `0x04`。
   `vector` 的调用没有被包裹，因此异常会作为未捕获异常逃出套接字 `data` 处理器，对端得不到任何
   响应。（由代码推出。）

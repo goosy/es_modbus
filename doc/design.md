@@ -79,8 +79,12 @@ A single routine builds every outgoing frame regardless of transport:
   transaction field). TCP increments `#last_tid` and wraps back to `TRANSACTION_START` once it
   passes `packets_length + TRANSACTION_START`. With 256 slots and no check that a slot is free,
   more than 256 simultaneously-pending TCP transactions would collide.
-- **`process_packet_transaction`.** Sets `status = 'pending'`, bumps `#trans_count`, enqueues the
-  buffer, and returns a Promise. It stores `resolve` / `reject` closures on the packet plus a
+- **`process_packet_transaction`.** During a reconnect back-off (`_conn_failed`) it returns a
+  Promise already rejected with `Error('connection lost')`; the frame is never queued. It also
+  emits `error`, but only when the client has an `error` listener: emitting `error` with no
+  listener throws, and a call with valid arguments must not throw synchronously.
+  Otherwise it sets `status = 'pending'`, bumps `#trans_count`, creates the Promise,
+  then enqueues the buffer and returns the Promise. It stores `resolve` / `reject` closures on the packet plus a
   `timeout_id`. `end_transaction` decrements the count, stamps `status`, clears the timer, and
   swaps `resolve`/`reject` for `DO_NOTHING` so a late/duplicate response is inert.
 - **Matching (`on_data`).** Parse → emit `receive` → skip `func_code === 0` → look up by `tid` →
@@ -90,18 +94,24 @@ A single routine builds every outgoing frame regardless of transport:
 
 - `send_queue` is an array capped at `send_queue_size` (256); overflow splices off the **front**
   (oldest dropped).
-- `sending` is guarded by `#busy`. When connected it shifts one buffer, calls `_send`, then after
+- `sending` is guarded by `#busy` and returns at once when the queue is empty. When connected it
+  shifts one buffer, calls `_send`, then after
   `delay` ms clears `#busy` and re-enters. This serializes writes and paces them.
 - When not connected and no reconnect back-off is active, `sending` triggers `_connect` with
-  itself as the success callback. If a back-off is active it emits `error`.
+  itself as the success callback. It never runs during a back-off: a back-off starts only after
+  the connection is lost, when `abort_pending()` has emptied the queue, and requests issued
+  during the back-off are rejected before they are queued.
+- **`abort_pending()`.** Empties `send_queue` and rejects every packet whose `status` is
+  `'pending'` with `Error('connection lost')`. It runs on every transport `close` / `error`
+  (TCP socket and serial port), so a failed on-demand connect also fails its requests at once.
 
 ## Connection state (TCP, `set_tcp`)
 
 - `_connect(on_connect, on_error)` attaches one-shot `connect` / `error` listeners that clean each
   other up, and only calls `socket.connect` when not already `connecting`.
 - `stream` `connect` → `is_connected = true`, `_conn_failed = false`, emit `connect`.
-- `stream` `close` / `error` → `is_connected = false`, call `reconnect()`, emit `disconnect` /
-  `error`.
+- `stream` `close` / `error` → `is_connected = false`, `abort_pending()`, call `reconnect()`,
+  emit `disconnect` / `error`.
 - `reconnect()` — if `reconnect_time > 0` and not already backing off, set `_conn_failed = true`
   and after `reconnect_time` ms clear it and call `_connect()`.
 
@@ -228,15 +238,6 @@ path as well, not only RTU.
   a FC 15/16 request whose `byte_count` is smaller than `quantity` requires reads past the data.
   Both throw inside the socket `data` handler. The spec defines no server-side limits or
   exception codes for this (see Open questions).
-- **Gap 21 — Connection loss does not reject pending requests, and stale frames stay queued
-  *(verified)*.** The spec requires every pending request to be rejected immediately and the
-  queued frames discarded when the connection is lost. The code does neither: pending requests
-  just wait for their timeout, and a request that timed out while the client was disconnected or
-  backing off keeps its frame in `send_queue`. That frame is sent after the connection returns,
-  on the next `send()`, so a write the caller was told had failed can still be executed late.
-  The rejection value is to be `new Error('connection lost')`, and a request issued during a
-  reconnect back-off is to be rejected at once; today `sending()` only emits `error` and leaves
-  the frame queued.
 - **Gap 26 — The server does not catch a throwing `vector`.** The spec requires the error to be
   recorded and exception `0x04` to be returned. The `vector` calls are not wrapped, so an
   exception escapes the socket `data` handler as an uncaught exception, and the peer gets no

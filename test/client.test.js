@@ -596,7 +596,7 @@ describe('Modbus_Client connection', () => {
         await fake.close();
     });
 
-    test('connection loss rejects pending requests with "connection lost"', { todo: 'design.md gap 21' }, async () => {
+    test('connection loss rejects pending requests with "connection lost"', async () => {
         const fake = await start_fake_server();
         const client = await connect_client(fake.port, { timeout: 2000 });
         const pending = client.read('40001');
@@ -612,7 +612,36 @@ describe('Modbus_Client connection', () => {
         }
     });
 
-    test('a request during a reconnect back-off is rejected at once', { todo: 'design.md gap 21' }, async () => {
+    test('connection loss rejects queued requests and discards their frames', async () => {
+        const fake = await start_fake_server();
+        const client = await connect_client(fake.port, { timeout: 2000, delay: 200 });
+        const sent = client.read('40001');
+        const queued = client.read('40002');
+        await sleep(30);
+        assert.equal(client.send_queue.length, 1);
+        for (const socket of fake.sockets) socket.destroy();
+        try {
+            await assert.rejects(sent, { message: 'connection lost' });
+            await assert.rejects(queued, { message: 'connection lost' });
+            assert.equal(client.send_queue.length, 0);
+        } finally {
+            close_client(client);
+            await fake.close();
+        }
+    });
+
+    test('a failed on-demand connect rejects the request with "connection lost"', async () => {
+        const client = create_client(await closed_port(), { timeout: 2000 });
+        const started = performance.now();
+        try {
+            await assert.rejects(client.read('40001'), { message: 'connection lost' });
+            assert.ok(performance.now() - started < 500);
+        } finally {
+            close_client(client);
+        }
+    });
+
+    test('a request during a reconnect back-off is rejected at once', async () => {
         const client = create_client(await closed_port(), { reconnect_time: 300, timeout: 2000 });
         await assert.rejects(client.connect());
         const started = performance.now();
@@ -624,7 +653,24 @@ describe('Modbus_Client connection', () => {
         }
     });
 
-    test('a request that failed during a back-off is not sent later', { todo: 'design.md gap 21' }, async () => {
+    test('a request during a back-off does not throw without an error listener', async () => {
+        const client = create_client(await closed_port(), { reconnect_time: 300, timeout: 2000 });
+        await assert.rejects(client.connect());
+        const listeners = client.listeners('error');
+        client.removeAllListeners('error');
+        try {
+            let pending;
+            assert.doesNotThrow(() => {
+                pending = client.write('40001', 1);
+            });
+            await assert.rejects(pending, { message: 'connection lost' });
+        } finally {
+            for (const listener of listeners) client.on('error', listener);
+            close_client(client);
+        }
+    });
+
+    test('a request that failed during a back-off is not sent later', async () => {
         const fake = await start_fake_server(auto_reply);
         const client = await connect_client(fake.port, { reconnect_time: 150, timeout: 50 });
         for (const socket of fake.sockets) socket.destroy();

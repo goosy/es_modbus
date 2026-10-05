@@ -166,28 +166,45 @@ export class Modbus_Client extends EventEmitter {
 
     #busy = false;
     sending() {
-        if (this.#busy) return;
+        if (this.#busy || this.send_queue.length === 0) return;
         if (this.is_connected) {
             const buffer = this.send_queue.shift();
-            if (buffer) {
-                this.#busy = true;
-                this._send(buffer);
-                setTimeout(() => {
-                    this.#busy = false;
-                    this.sending();
-                }, this.delay);
-            }
+            this.#busy = true;
+            this._send(buffer);
+            setTimeout(() => {
+                this.#busy = false;
+                this.sending();
+            }, this.delay);
         } else if (!this._conn_failed) {
             this._connect(
                 () => this.sending(),
                 () => this.emit('error', "send failed!")
             );
-        } else {
-            this.emit('error', 'Attempting to transfer data when a connection could not be established.');
+        }
+    }
+
+    /**
+     * Rejects every pending request with `Error('connection lost')` and discards the queued
+     * frames, so no request is executed after it was reported as failed.
+     */
+    abort_pending() {
+        this.send_queue.length = 0;
+        for (const packet of this.#packets) {
+            if (packet?.status === 'pending') packet.reject(new Error('connection lost'));
         }
     }
 
     process_packet_transaction(packet) {
+        if (this._conn_failed) {
+            // A request issued during a reconnect back-off fails at once and is never queued
+            packet.status = 'rejected';
+            // Emitted only when listened to, so a valid call never throws synchronously
+            if (this.listenerCount('error') > 0) {
+                this.emit('error', 'Attempting to transfer data when a connection could not be established.');
+            }
+            return Promise.reject(new Error('connection lost'));
+        }
+
         const end_transaction = (status) => {
             this.dec_trans_count();
             packet.status = status;
@@ -198,9 +215,8 @@ export class Modbus_Client extends EventEmitter {
 
         packet.status = 'pending';
         this.inc_trans_count();
-        this.send(packet.buffer);
 
-        return new Promise((resolve, reject) => {
+        const promise = new Promise((resolve, reject) => {
             packet.timeout_id = setTimeout(() => {
                 end_transaction('rejected');
                 this.emit('timeout');
@@ -217,6 +233,8 @@ export class Modbus_Client extends EventEmitter {
                 reject(reason);
             };
         });
+        this.send(packet.buffer);
+        return promise;
     }
     /**
      * Parses a `read` / `write` range by its type: a string is a Modicon range, an array or
@@ -404,13 +422,15 @@ export class Modbus_Client extends EventEmitter {
         });
 
         serialport.on('error', (error) => {
-            this.emit('error', error);
             this.is_connected = false;
+            this.abort_pending();
+            this.emit('error', error);
         });
 
         serialport.on('close', () => {
-            this.emit('disconnect');
             this.is_connected = false;
+            this.abort_pending();
+            this.emit('disconnect');
         });
 
         this.connect = () => serialport.open();
@@ -462,6 +482,7 @@ export class Modbus_Client extends EventEmitter {
 
         stream.on('close', () => {
             this.is_connected = false;
+            this.abort_pending();
             this.reconnect();
             this.emit('disconnect');
         });
@@ -474,6 +495,7 @@ export class Modbus_Client extends EventEmitter {
 
         stream.on('error', (error) => {
             this.is_connected = false;
+            this.abort_pending();
             this.reconnect();
             this.emit('error', error);
         });
