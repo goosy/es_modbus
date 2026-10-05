@@ -102,7 +102,7 @@ describe('Modbus_Server unit IDs', () => {
         }
     });
 
-    test('0 is an ordinary ID, not a synonym for every ID', { todo: 'design.md gap 27' }, () => {
+    test('0 is an ordinary ID, not a synonym for every ID', () => {
         const server = new Modbus_Server({}, { unit_id: 0 });
         assert.equal(server.is_valid_unit_id(0), true);
         assert.equal(server.is_valid_unit_id(1), false);
@@ -338,20 +338,25 @@ describe('Modbus_Server request handling (TCP framing)', () => {
         assert.deepEqual(tcp_exchange(server, tcp_frame(1, '018300000001')), []);
     });
 
-    test('a broadcast write is executed and not answered', { todo: 'design.md gap 27' }, () => {
-        assert.deepEqual(tcp_exchange(server, tcp_frame(1, '000600010005')), []);
-        assert.deepEqual(memory.calls, [['set_register', 1, 5, 0]]);
+    test('unit ID 0 is an ordinary unit on TCP', () => {
+        memory.unit(0).holding[1] = 9;
+        const [read] = tcp_exchange(server, tcp_frame(1, '000300010001'));
+        assert.equal(read.toString('hex'), tcp_frame(1, '0003020009').toString('hex'));
+        const [write] = tcp_exchange(server, tcp_frame(2, '000600010005'));
+        assert.equal(write.toString('hex'), tcp_frame(2, '000600010005').toString('hex'));
+        assert.deepEqual(memory.calls, [['get_holding_register', 1, 0], ['set_register', 1, 5, 0]]);
     });
 
-    test('a broadcast read is ignored', { todo: 'design.md gap 27' }, () => {
-        assert.deepEqual(tcp_exchange(server, tcp_frame(1, '000300010001')), []);
-        assert.deepEqual(memory.calls, []);
-    });
-
-    test('a broadcast is not answered even when unit 0 is not accepted', { todo: 'design.md gap 27' }, () => {
+    test('unit ID 0 that is not accepted gets exception 0x0B on TCP', () => {
         server.set_unit_ids([1]);
-        assert.deepEqual(tcp_exchange(server, tcp_frame(1, '000600010005')), []);
+        const [response] = tcp_exchange(server, tcp_frame(1, '000600010005'));
+        assert.equal(response.toString('hex'), tcp_frame(1, '00860b').toString('hex'));
         assert.deepEqual(memory.calls, []);
+    });
+
+    test('unit ID 255 is an ordinary unit on TCP', () => {
+        const [response] = tcp_exchange(server, tcp_frame(1, 'ff0300000001'));
+        assert.equal(response.toString('hex'), tcp_frame(1, 'ff03020000').toString('hex'));
     });
 });
 
@@ -391,10 +396,74 @@ describe('Modbus_Server request handling (RTU framing)', () => {
         }
     });
 
-    test('a unit ID that is not accepted gets exception 0x0B', () => {
+    /** Feeds one RTU request body to the server; returns what it wrote. */
+    const rtu_exchange = (body) => {
+        port.written.length = 0;
+        server.on_data(rtu_frame(body));
+        return port.written.map((b) => b.toString('hex'));
+    };
+
+    test('a unit ID that is not accepted is not answered', () => {
         server.set_unit_ids(1);
-        server.on_data(rtu_frame('020300000001'));
-        assert.deepEqual(port.written, [rtu_frame('02830b')]);
+        assert.deepEqual(rtu_exchange('020300000001'), []);
+        assert.deepEqual(rtu_exchange('020800000000'), []);
+        assert.deepEqual(memory.calls, []);
+    });
+
+    test('a broadcast write is executed and not answered', () => {
+        assert.deepEqual(rtu_exchange('000600010005'), []);
+        assert.deepEqual(memory.calls, [['set_register', 1, 5, 0]]);
+    });
+
+    test('a broadcast read is ignored', () => {
+        assert.deepEqual(rtu_exchange('000300010001'), []);
+        assert.deepEqual(memory.calls, []);
+    });
+
+    test('a broadcast is not answered or executed when unit 0 is not accepted', () => {
+        server.set_unit_ids([1]);
+        assert.deepEqual(rtu_exchange('000600010005'), []);
+        assert.deepEqual(memory.calls, []);
+    });
+
+    test('every write function is executed on a broadcast', () => {
+        assert.deepEqual(rtu_exchange('00050003ff00'), []);
+        assert.deepEqual(rtu_exchange('000f0010000201 03'), []);
+        assert.deepEqual(rtu_exchange('00100020000102 0102'), []);
+        assert.deepEqual(memory.calls, [
+            ['set_coil', 3, true, 0],
+            ['set_coil', 0x10, true, 0], ['set_coil', 0x11, true, 0],
+            ['set_register', 0x20, 0x0102, 0],
+        ]);
+    });
+
+    test('a broadcast is executed when unit 0 is the only accepted ID', () => {
+        server.set_unit_ids(0);
+        assert.deepEqual(rtu_exchange('000600010005'), []);
+        assert.deepEqual(memory.calls, [['set_register', 1, 5, 0]]);
+    });
+
+    test('an invalid broadcast write is neither executed nor answered', () => {
+        assert.deepEqual(rtu_exchange('000500011234'), []);
+        assert.deepEqual(rtu_exchange('0010ffff000204 00010002'), []);
+        assert.deepEqual(memory.calls, []);
+    });
+
+    test('a broadcast with an unsupported function code is not answered', () => {
+        assert.deepEqual(rtu_exchange('000800000000'), []);
+    });
+
+    test('a throwing vector on a broadcast is reported but not answered', () => {
+        server.vector = {
+            ...memory.vector,
+            set_register() {
+                throw new Error('device failure');
+            },
+        };
+        let reported = 0;
+        server.on('vector_error', () => reported++);
+        assert.deepEqual(rtu_exchange('000600010005'), []);
+        assert.equal(reported, 1);
     });
 
     test('a frame with a bad CRC is dropped', () => {

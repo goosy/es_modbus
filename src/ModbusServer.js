@@ -29,6 +29,9 @@ function check_request({ func_code, start_address, quantity, byte_count, data })
     return 0;
 }
 
+const BROADCAST_ID = 0;
+const WRITE_FUNCTIONS = new Set([5, 6, 15, 16]);
+
 // Wraps an exception thrown by a `vector` function
 class Vector_Error extends Error {
     constructor(cause) {
@@ -65,7 +68,7 @@ export class Modbus_Server extends EventEmitter {
     constructor(vector, options = {}) {
         super();
         this.vector = vector;
-        this.set_unit_ids(options.unit_id ?? 0);
+        this.set_unit_ids(options.unit_id);
         this.host = options.host ?? '0.0.0.0';
         const port = options.port ?? 502;
         if (typeof port === 'number' || port instanceof SerialPort) {
@@ -89,13 +92,13 @@ export class Modbus_Server extends EventEmitter {
      * Configures which Modbus unit IDs (slave addresses) this server will accept and respond to.
      * @param {number | number[] | null | undefined | 'all' | '*'} unit_id - The unit ID(s) to accept:
      * - If null, undefined, 'all', or '*': Accept all unit IDs (0-255)
-     * - If a number: Accept only that specific unit ID; 0 is the broadcast address
-     *   (the code still treats 0 as "accept all", see doc/design.md gap 27)
+     * - If a number: Accept only that specific unit ID; 0 is an ordinary ID on TCP and the
+     *   broadcast address on a serial bus
      * - If an array of numbers: Accept all unit IDs specified in the array
      * @throws {Error} If any specified unit ID is invalid (not an integer between 0 and 255)
      */
     set_unit_ids(unit_id) {
-        if (unit_id == null || unit_id === 0 || unit_id === 'all' || unit_id === '*') {
+        if (unit_id == null || unit_id === 'all' || unit_id === '*') {
             // Accept all unit IDs
             this.accept_all_units = true;
             this.unit_ids = null;
@@ -168,25 +171,40 @@ export class Modbus_Server extends EventEmitter {
 
     _on_data(request, socket) {
         const { tid, pid, unit_id, func_code } = request;
+        // RTU framing means a serial bus; RTU-over-TCP will join it once it is served
+        // (see doc/design.md, "RTU / serial: unfinished work")
+        const serial_bus = socket === undefined;
 
-        if (!this.is_valid_unit_id(unit_id)) {
-            // If the unit_id is invalid, send an error response or ignore the request.
-            // 0x0B: Gateway Target Device Failed To Respond
-            this.send_exception_response(unit_id, func_code, 0x0B, socket, tid, pid);
+        if (serial_bus && unit_id === BROADCAST_ID) {
+            // A broadcast is never answered; only an accepted write is executed
+            if (this.is_valid_unit_id(unit_id) && WRITE_FUNCTIONS.has(func_code)) {
+                this.serve(request);
+            }
             return;
         }
 
-        let response;
+        if (!this.is_valid_unit_id(unit_id)) {
+            // A slave on a serial bus stays silent for other addresses; on TCP the server
+            // answers as a gateway would: 0x0B, Gateway Target Device Failed To Respond
+            if (!serial_bus) this.send_exception_response(unit_id, func_code, 0x0B, socket, tid, pid);
+            return;
+        }
+
+        this.send_response(this.serve(request), socket, tid, pid);
+    }
+
+    /**
+     * Serves a request and returns the response PDU; a throwing `vector` yields exception 0x04.
+     */
+    serve(request) {
         try {
-            response = this.dispatch(request);
+            return this.dispatch(request);
         } catch (error) {
             if (!(error instanceof Vector_Error)) throw error;
             // 0x04: Server Device Failure
             this.emit('vector_error', error.cause, request);
-            response = this.create_error_response(unit_id, func_code, 0x04);
+            return this.create_error_response(request.unit_id, request.func_code, 0x04);
         }
-
-        this.send_response(response, socket, tid, pid);
     }
 
     /**

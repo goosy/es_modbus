@@ -147,9 +147,9 @@ describe(`Modbus RTU server on ${SERVER_PATH}, raw peer on ${PEER_PATH}`, { skip
         assert.equal(as_hex(response), as_hex(rtu_frame('020304cafebabe')));
     });
 
-    test('a unit ID that is not accepted gets exception 0x0B', async () => {
-        const response = await exchange(peer, '070300000001', 5);
-        assert.equal(as_hex(response), as_hex(rtu_frame('07830b')));
+    test('a unit ID that is not accepted is not answered', async () => {
+        const response = await exchange(peer, '070300000001', 1, 200);
+        assert.equal(response.length, 0);
         assert.deepEqual(memory.calls, []);
     });
 

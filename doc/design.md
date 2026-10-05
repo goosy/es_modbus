@@ -157,8 +157,12 @@ A single routine builds every outgoing frame regardless of transport:
 1. `on_data(buffer, socket?)` — parse with `parse_tcp_request` when a `socket` is present, else
    `parse_rtu_request`. Emit `receive` per frame. A frame with `func_code: 0` is dropped, unless
    the parser set `illegal_function`; then it goes on with that function code.
-2. `_on_data(request, socket?)` — reject the unit ID if not accepted (`0x0B`); otherwise
-   `dispatch()` switches on `func_code` to the matching `handle_*` method, which calls into
+2. `_on_data(request, socket?)` — `serial_bus` is true for RTU framing (no `socket`; it is to
+   include RTU-over-TCP once that is served). On a serial bus a broadcast (unit `0`) is never
+   answered: if unit `0` is accepted and the function is a write (5, 6, 15, 16) it is served and
+   the response discarded, anything else is dropped; a non-accepted unit ID is dropped silently.
+   On TCP unit `0` is ordinary and a non-accepted unit ID gets `0x0B`. Otherwise
+   `serve()` calls `dispatch()`, which switches on `func_code` to the matching `handle_*` method, which calls into
    `vector` and builds the response PDU. An unsupported function code → exception `0x01` under
    its own function code (`fc | 0x80`).
    - Before any `vector` call, `check_request()` validates a supported request as the Modbus
@@ -168,7 +172,7 @@ A single routine builds every outgoing frame regardless of transport:
      with that exception and the `vector` is not called. An over-limit FC 15/16 request with a
      matching byte count cannot occur: it does not fit in a 253-byte PDU.
    - Every `vector` call goes through `call_vector`, which wraps a thrown exception in a private
-     `Vector_Error`. `_on_data` catches only `Vector_Error`: it emits `vector_error` with the
+     `Vector_Error`. `serve()` catches only `Vector_Error`: it emits `vector_error` with the
      original error and the request, and answers exception `0x04`. A `vector_error` with no
      listener is ignored. Any other exception is a bug and propagates.
 3. `send_response(pdu, socket?, tid, pid)` — TCP: prepend a fresh MBAP header and `socket.write`.
@@ -242,12 +246,6 @@ path as well, not only RTU.
   configuration does not.
 - **Gap 10 — `write()` resolves with the wrong type.** The spec says `Promise<Buffer>`, but the
   promise resolves with `response.data`: a `number` for FC 5/6 and `undefined` for FC 15/16.
-- **Gap 27 — `unit_id` `0` still means "accept every unit ID", and broadcast is not handled.**
-  The spec separates the two: only `null`, `undefined`, `'all'`, `'*'` accept every ID (the
-  default), `0` is the broadcast address, and a broadcast executes writes, ignores reads and is
-  never answered. The code keeps `0` as an alias for "all" (and defaults `options.unit_id` to
-  `0`), and answers requests to unit `0` like any other. The JSDoc already describes the spec;
-  the code does not yet. This is a breaking change to `set_unit_ids`.
 
 ---
 
@@ -276,10 +274,6 @@ Decisions the spec does not make yet. Settle them in the spec first, then implem
   detection, such as closing the socket after N consecutive timeouts or enabling TCP keep-alive.
 - **Return value of `write()`.** Decide whether it resolves with a `Buffer` (spec today) or with
   the echoed value (code today); see gap 10.
-- **Unit ID mismatch on a serial bus.** The spec says a request to a non-accepted unit ID gets an
-  exception `0x0B` on every transport. On a shared RTU bus the other slaves would answer the same
-  request, so the usual behavior is to stay silent. Decide whether the RTU server answers `0x0B`
-  (spec today) or stays silent.
 - **`disconnect()` and auto-reconnect.** `disconnect()` ends the socket, the `close` event then
   triggers the reconnect timer, so with `reconnect_time > 0` the client reconnects by itself after
   an explicit `disconnect()` (this follows the spec's reconnect rule literally). Decide whether an

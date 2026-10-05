@@ -19,13 +19,26 @@ The server's transport is selected by `options.port` and `options.rtu` (see `spe
 | 0–1    | Transaction ID     | Echoed by the responder; used for matching.  |
 | 2–3    | Protocol ID        | Always `0`; a non-zero value is invalid.     |
 | 4–5    | Length             | Byte count of everything after this field (unit ID + PDU). Must be 3–253. |
-| 6      | Unit ID            | Slave address.                               |
+| 6      | Unit ID            | Unit address (see "Unit ID").               |
 | 7…     | PDU                | Function code + function data.               |
 
 ### RTU frame
 
 `[unit_id: 1][function_code: 1][function data: n][crc16: 2 LE]`. The PDU length (everything
 except the trailing 2 CRC bytes) must be 3–253. RTU has no transaction field.
+
+### Unit ID
+
+The meaning of the unit ID depends on the transport, following common Modbus practice:
+
+- **Serial bus** (RTU, and RTU-over-TCP, which carries a serial line). `0` is the broadcast
+  address: a broadcast write is executed by every slave and answered by none. `1..247` are
+  individual slave addresses. `248..255` are reserved by the Modbus serial line specification and
+  should not be assigned to a slave. A slave answers only requests addressed to itself.
+- **TCP.** There is no broadcast; `0` is an ordinary unit ID. The unit ID selects a unit behind
+  the server, as through a gateway. By convention (Modbus TCP implementation guide) `0xFF` (255)
+  addresses the server itself when no unit routing is needed; this library treats it as an
+  ordinary unit ID.
 
 ### Frame delimiting
 
@@ -171,7 +184,7 @@ adds MBAP). The client surfaces it by rejecting the pending transaction with
 | `0x02` | Illegal Data Address                      | The requested range ends past address 65535. |
 | `0x03` | Illegal Data Value                        | A quantity outside the limits above (`>= 1` and at most the maximum), a byte count that does not match the quantity (FC 15/16), or an FC 5 value other than `0xFF00` / `0x0000`. |
 | `0x04` | Server Device Failure                     | A `vector` function threw while serving the request. |
-| `0x0B` | Gateway Target Device Failed To Respond   | Request addressed to a unit ID the server is not configured to accept (never for unit `0`, which is never answered). |
+| `0x0B` | Gateway Target Device Failed To Respond   | TCP only: request addressed to a unit ID the server is not configured to accept. On a serial bus such a request is not answered. |
 
 For a supported function code the server checks the request in this order, as the Modbus
 application protocol does: the data values (`0x03`), then the address range (`0x02`), and only

@@ -138,7 +138,10 @@
 1. `on_data(buffer, socket?)` — 存在 `socket` 时用 `parse_tcp_request` 解析，否则用
    `parse_rtu_request`。逐帧发出 `receive`。`func_code: 0` 的帧被丢弃，除非解析器设置了
    `illegal_function`；此时以该功能码继续处理。
-2. `_on_data(request, socket?)` — 若单元 ID 不被接受则拒绝（`0x0B`）；否则由 `dispatch()` 按
+2. `_on_data(request, socket?)` — RTU 帧格式（没有 `socket`）时 `serial_bus` 为真；待 RTU-over-TCP
+   得到服务后也应包含它。在串行总线上，广播（单元 `0`）从不应答：若单元 `0` 被接受且功能为写
+   （5、6、15、16），则执行并丢弃响应，其余一律丢弃；未被接受的单元 ID 静默丢弃。在 TCP 上单元
+   `0` 是普通单元，未被接受的单元 ID 得到 `0x0B`。否则由 `serve()` 调用 `dispatch()`，按
    `func_code` 分支到对应的 `handle_*` 方法，由其调用 `vector` 并构造响应 PDU。不支持的功能码 →
    以其自身功能码（`fc | 0x80`）应答异常 `0x01`。
    - 在调用任何 `vector` 之前，`check_request()` 按 Modbus 应用协议校验受支持的请求：数量超出
@@ -146,7 +149,7 @@
      为 `0x03`；然后区间结束于地址 65535 之后时为 `0x02`。校验失败的请求以该异常应答，不调用
      `vector`。字节数与数量相符却超限的 FC 15/16 请求不会出现：它放不进 253 字节的 PDU。
    - 每次 `vector` 调用都经过 `call_vector`，它把抛出的异常包装为私有的 `Vector_Error`。
-     `_on_data` 只捕获 `Vector_Error`：以原始错误和请求发出 `vector_error`，并应答异常 `0x04`。
+     `serve()` 只捕获 `Vector_Error`：以原始错误和请求发出 `vector_error`，并应答异常 `0x04`。
      没有监听者的 `vector_error` 会被忽略。其他异常属于程序缺陷，会向外传播。
 3. `send_response(pdu, socket?, tid, pid)` — TCP：前置新的 MBAP 头并 `socket.write`。
    串口：追加 CRC-16（小端）并 `port.write`。发出 `send`。
@@ -210,11 +213,6 @@ RTU / 串口的缺陷列在上一节，不在此处。缺陷修复后即从本�
 - **缺陷 3 — 没有 lint 配置。** 自动化测试套件已经存在（`spec-test.zh-cn.md`）；lint 配置尚无。
 - **缺陷 10 — `write()` 兑现的类型不对。** spec 写的是 `Promise<Buffer>`，但 promise 以
   `response.data` 兑现：FC 5/6 为 `number`，FC 15/16 为 `undefined`。
-- **缺陷 27 — `unit_id` `0` 仍表示“接受所有单元 ID”，广播也没有被处理。** spec 把两者分开：
-  只有 `null`、`undefined`、`'all'`、`'*'` 表示接受所有 ID（默认值），`0` 是广播地址，广播会执行
-  写入、忽略读取，且从不应答。代码仍把 `0` 保留为“全部”的别名（并把 `options.unit_id` 默认为
-  `0`），对发往单元 `0` 的请求与其他请求一样应答。JSDoc 已按 spec 描述，代码尚未跟上。这是对
-  `set_unit_ids` 的破坏性改动。
 
 ---
 
@@ -240,9 +238,6 @@ spec 尚未做出的决定。先在 spec 中定下来，再去实现。
   后关闭套接字，或启用 TCP keep-alive。
 - **`write()` 的返回值。** 需要决定它以 `Buffer`（spec 现状）还是以回显的值（代码现状）兑现；见
   缺陷 10。
-- **串行总线上的单元 ID 不匹配。** spec 规定，发往未被接受单元 ID 的请求，在所有传输方式上都得到
-  异常 `0x0B`。在共享的 RTU 总线上，其他从站会应答同一个请求，因此通常的做法是保持沉默。需要决定
-  RTU 服务端是应答 `0x0B`（spec 现状），还是保持沉默。
 - **`disconnect()` 与自动重连。** `disconnect()` 结束套接字，随后 `close` 事件会触发重连定时器，
   因此 `reconnect_time > 0` 时，显式 `disconnect()` 之后客户端会自行重连（这是按字面遵循 spec 的
   重连规则）。需要决定显式 `disconnect()` 是否应抑制重连。

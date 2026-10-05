@@ -37,16 +37,20 @@ across the three transports; only the framing and the lifecycle events differ.
 ### `set_unit_ids(unit_id)`
 
 - `null`, `undefined`, `'all'`, `'*'` → accept **every** unit ID (0–255). This is the default.
-- a `number` → accept only that ID. `0` is an ordinary ID here (the broadcast address); it is not
-  a synonym for "every ID".
+- a `number` → accept only that ID. `0` is an ordinary ID here (on a serial bus, the broadcast
+  address); it is not a synonym for "every ID".
 - an array of numbers → accept exactly those IDs.
 - Any ID outside `0..255` (non-integer included) throws.
 
-Requests to a non-accepted unit ID get an exception response with code `0x0B`.
+How unit IDs behave depends on the transport (see "Unit ID" in `spec-protocol.md`):
 
-**Broadcast (unit ID `0`).** A request addressed to unit `0` is a broadcast. If unit `0` is
-accepted (explicitly, or because every ID is accepted) a write request is executed; a read
-request is ignored. A broadcast is never answered, whether or not unit `0` is accepted.
+- **TCP.** Every unit ID, `0` included, is an ordinary unit. A request to an accepted unit is
+  served through the `vector`; a request to a non-accepted unit gets an exception response with
+  code `0x0B`.
+- **Serial bus (RTU, RTU-over-TCP).** The server is one slave on a shared line, so a request to a
+  non-accepted unit ID is not answered at all. A request to unit `0` is a broadcast: if unit `0`
+  is accepted (explicitly, or because every ID is accepted) a write request is executed; a read
+  request is ignored. A broadcast is never answered, whether or not unit `0` is accepted.
 
 ## The `vector` interface
 
