@@ -145,7 +145,8 @@ The Modbus protocol limits how many points one request may carry:
 | 15   | 1968 coils |
 | 16   | 123 registers |
 
-The client rejects a request that exceeds its limit (see `spec-client.md`).
+The client rejects a request that exceeds its limit (see `spec-client.md`); the server answers
+it with exception `0x03` (see "Exception responses").
 
 ### Bit packing
 
@@ -167,5 +168,11 @@ adds MBAP). The client surfaces it by rejecting the pending transaction with
 | Code   | Meaning                                   | When the server sends it                    |
 | ------ | ----------------------------------------- | ------------------------------------------ |
 | `0x01` | Illegal Function                          | Function code not in the supported set.     |
+| `0x02` | Illegal Data Address                      | The requested range ends past address 65535. |
+| `0x03` | Illegal Data Value                        | A quantity outside the limits above (`>= 1` and at most the maximum), a byte count that does not match the quantity (FC 15/16), or an FC 5 value other than `0xFF00` / `0x0000`. |
 | `0x04` | Server Device Failure                     | A `vector` function threw while serving the request. |
 | `0x0B` | Gateway Target Device Failed To Respond   | Request addressed to a unit ID the server is not configured to accept (never for unit `0`, which is never answered). |
+
+For a supported function code the server checks the request in this order, as the Modbus
+application protocol does: the data values (`0x03`), then the address range (`0x02`), and only
+then calls the `vector` (`0x04` if it throws). A request that fails a check is not executed.

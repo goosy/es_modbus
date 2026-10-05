@@ -121,6 +121,8 @@
   增量计算。
 - RTU 解析器合成 `tid = TRANSACTION_START`（8000，因为 RTU 没有事务字段），校验 PDU 长度（`3..253`），校验各 FC 的字节布局，
   然后验证 CRC — 任何失败都归结为 `{ tid, func_code: 0, buffer }`。
+- 请求解析器对功能码不受支持但在 `1..127` 之内的帧设置 `illegal_function`（同时 `func_code: 0`）；
+  对 RTU，仅当整个缓冲区的 CRC 有效时才设置。其他任何失败都使其为 `undefined`。
 - 响应解析器把 `func_code > 127` 且 PDU 为 3 字节的情形视为异常并读取异常码字节；其他无法识别
   的情形变为 `func_code: 0`。
 
@@ -134,9 +136,18 @@
 ### 请求流程
 
 1. `on_data(buffer, socket?)` — 存在 `socket` 时用 `parse_tcp_request` 解析，否则用
-   `parse_rtu_request`。逐帧发出 `receive`。
-2. `_on_data(request, socket?)` — 若单元 ID 不被接受则拒绝（`0x0B`）；否则按 `func_code`
-   分支到对应的 `handle_*` 方法，由其调用 `vector` 并构造响应 PDU。未知功能码 → 异常 `0x01`。
+   `parse_rtu_request`。逐帧发出 `receive`。`func_code: 0` 的帧被丢弃，除非解析器设置了
+   `illegal_function`；此时以该功能码继续处理。
+2. `_on_data(request, socket?)` — 若单元 ID 不被接受则拒绝（`0x0B`）；否则由 `dispatch()` 按
+   `func_code` 分支到对应的 `handle_*` 方法，由其调用 `vector` 并构造响应 PDU。不支持的功能码 →
+   以其自身功能码（`fc | 0x80`）应答异常 `0x01`。
+   - 在调用任何 `vector` 之前，`check_request()` 按 Modbus 应用协议校验受支持的请求：数量超出
+     `1..MAX_QUANTITY[fc]`、字节数与数量不符（FC 15/16），或 FC 5 的值不是 `0xFF00` / `0x0000` 时
+     为 `0x03`；然后区间结束于地址 65535 之后时为 `0x02`。校验失败的请求以该异常应答，不调用
+     `vector`。字节数与数量相符却超限的 FC 15/16 请求不会出现：它放不进 253 字节的 PDU。
+   - 每次 `vector` 调用都经过 `call_vector`，它把抛出的异常包装为私有的 `Vector_Error`。
+     `_on_data` 只捕获 `Vector_Error`：以原始错误和请求发出 `vector_error`，并应答异常 `0x04`。
+     没有监听者的 `vector_error` 会被忽略。其他异常属于程序缺陷，会向外传播。
 3. `send_response(pdu, socket?, tid, pid)` — TCP：前置新的 MBAP 头并 `socket.write`。
    串口：追加 CRC-16（小端）并 `port.write`。发出 `send`。
 
@@ -199,17 +210,6 @@ RTU / 串口的缺陷列在上一节，不在此处。缺陷修复后即从本�
 - **缺陷 3 — 没有 lint 配置。** 自动化测试套件已经存在（`spec-test.zh-cn.md`）；lint 配置尚无。
 - **缺陷 10 — `write()` 兑现的类型不对。** spec 写的是 `Promise<Buffer>`，但 promise 以
   `response.data` 兑现：FC 5/6 为 `number`，FC 15/16 为 `undefined`。
-- **缺陷 11 — 服务端不丢弃格式错误的帧。** `on_data` 把所有解析出的帧（包括 `func_code: 0` 的，
-  即长度错误、CRC 错误、不支持的功能码）都交给 `_on_data`，后者以功能码字节为 `0x80`（`0 + 0x80`）
-  的异常应答。spec 规定格式错误的帧应丢弃，不支持的功能码应以 `function_code | 0x80` 应答，但原始
-  功能码已在解析器中丢失。短到无法携带单元 ID 的帧，会以未定义的单元 ID 得到应答。
-- **缺陷 13 — 服务端不校验数量 / 字节数。** 数量很大的读请求会在 `writeUInt8(quantity * 2)` 处
-  抛出 `RangeError`（寄存器超过 127 个、线圈超过 2040 个）；`byte_count` 小于 `quantity` 的
-  FC 15/16 请求会读到数据之外。两者都在套接字 `data` 处理器内抛出。spec 对此没有定义服务端的上限
-  或异常码（见“待决问题”）。
-- **缺陷 26 — 服务端不捕获抛出异常的 `vector`。** spec 要求记录该错误并返回异常 `0x04`。
-  `vector` 的调用没有被包裹，因此异常会作为未捕获异常逃出套接字 `data` 处理器，对端得不到任何
-  响应。（由代码推出。）
 - **缺陷 27 — `unit_id` `0` 仍表示“接受所有单元 ID”，广播也没有被处理。** spec 把两者分开：
   只有 `null`、`undefined`、`'all'`、`'*'` 表示接受所有 ID（默认值），`0` 是广播地址，广播会执行
   写入、忽略读取，且从不应答。代码仍把 `0` 保留为“全部”的别名（并把 `options.unit_id` 默认为
@@ -228,10 +228,6 @@ spec 尚未做出的决定。先在 spec 中定下来，再去实现。
 - **不完整的 TCP 帧。** 对 TCP，spec 只要求拆分被合并的帧（对 RTU-over-TCP 则要求按长度界定）。
   代码还会丢弃末尾不完整的帧，而不是缓冲到下一次读取（客户端的 `unprocessed_buffer` 字段未被
   使用）。需要决定 TCP 是否也要求缓冲。
-- **服务端的上限与异常码。** 客户端一侧已定：超限的长度会抛出异常。对服务端，需要决定超范围的
-  数量是否应答 `0x03`（非法数据值）、超范围的地址是否应答 `0x02`，等等（见缺陷 13）。
-- **服务端如何记录 `vector` 的错误。** spec 规定要记录该错误。需要决定机制：专用事件、现有的
-  `error` 事件（无人监听时会抛出），或可注入的 logger。
 - **`start()` / `stop()` 的返回值。** `listen()` 和串口 `open()` 是异步完成的；统一后的
   `start` / `stop` 事件就是通知信号。需要决定 `start()` / `stop()` 是否还应返回 Promise（就绪时
   兑现，失败时拒绝）。

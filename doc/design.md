@@ -139,6 +139,9 @@ A single routine builds every outgoing frame regardless of transport:
   incremental computation across chunks.
 - RTU parsers synthesize `tid = TRANSACTION_START` (8000, since RTU has no transaction field), validate PDU length (`3..253`), validate the
   per-FC byte layout, then verify CRC — any failure collapses to `{ tid, func_code: 0, buffer }`.
+- Request parsers set `illegal_function` (alongside `func_code: 0`) for a frame whose function
+  code is unsupported but within `1..127`; for RTU only when the CRC over the whole buffer is
+  valid. Every other failure leaves it `undefined`.
 - Response parsers treat `func_code > 127` with a 3-byte PDU as an exception and read the
   exception byte; anything else unrecognized becomes `func_code: 0`.
 
@@ -152,10 +155,22 @@ A single routine builds every outgoing frame regardless of transport:
 ### Request flow
 
 1. `on_data(buffer, socket?)` — parse with `parse_tcp_request` when a `socket` is present, else
-   `parse_rtu_request`. Emit `receive` per frame.
-2. `_on_data(request, socket?)` — reject the unit ID if not accepted (`0x0B`); otherwise switch
-   on `func_code` to the matching `handle_*` method, which calls into `vector` and builds the
-   response PDU. Unknown function codes → exception `0x01`.
+   `parse_rtu_request`. Emit `receive` per frame. A frame with `func_code: 0` is dropped, unless
+   the parser set `illegal_function`; then it goes on with that function code.
+2. `_on_data(request, socket?)` — reject the unit ID if not accepted (`0x0B`); otherwise
+   `dispatch()` switches on `func_code` to the matching `handle_*` method, which calls into
+   `vector` and builds the response PDU. An unsupported function code → exception `0x01` under
+   its own function code (`fc | 0x80`).
+   - Before any `vector` call, `check_request()` validates a supported request as the Modbus
+     application protocol does: `0x03` for a quantity outside `1..MAX_QUANTITY[fc]`, a byte count
+     that does not match the quantity (FC 15/16) or an FC 5 value other than `0xFF00` /
+     `0x0000`; then `0x02` for a range ending past address 65535. A failing request is answered
+     with that exception and the `vector` is not called. An over-limit FC 15/16 request with a
+     matching byte count cannot occur: it does not fit in a 253-byte PDU.
+   - Every `vector` call goes through `call_vector`, which wraps a thrown exception in a private
+     `Vector_Error`. `_on_data` catches only `Vector_Error`: it emits `vector_error` with the
+     original error and the request, and answers exception `0x04`. A `vector_error` with no
+     listener is ignored. Any other exception is a bug and propagates.
 3. `send_response(pdu, socket?, tid, pid)` — TCP: prepend a fresh MBAP header and `socket.write`.
    Serial: append CRC-16 (LE) and `port.write`. Emit `send`.
 
@@ -227,21 +242,6 @@ path as well, not only RTU.
   configuration does not.
 - **Gap 10 — `write()` resolves with the wrong type.** The spec says `Promise<Buffer>`, but the
   promise resolves with `response.data`: a `number` for FC 5/6 and `undefined` for FC 15/16.
-- **Gap 11 — Server does not drop malformed frames.** `on_data` hands every parsed frame,
-  including `func_code: 0` ones (bad length, bad CRC, unsupported function), to `_on_data`, which
-  answers with an exception whose function byte is `0x80` (`0 + 0x80`). The spec says malformed
-  frames are dropped, and an unsupported function must be answered with `function_code | 0x80`,
-  but the original function code is lost in the parser. Frames too short to carry a unit ID are
-  answered with an undefined unit ID.
-- **Gap 13 — Server does not validate quantity / byte count.** A read with a large quantity
-  throws `RangeError` in `writeUInt8(quantity * 2)` (registers above 127, coils above 2040), and
-  a FC 15/16 request whose `byte_count` is smaller than `quantity` requires reads past the data.
-  Both throw inside the socket `data` handler. The spec defines no server-side limits or
-  exception codes for this (see Open questions).
-- **Gap 26 — The server does not catch a throwing `vector`.** The spec requires the error to be
-  recorded and exception `0x04` to be returned. The `vector` calls are not wrapped, so an
-  exception escapes the socket `data` handler as an uncaught exception, and the peer gets no
-  response. (Derived from the code.)
 - **Gap 27 — `unit_id` `0` still means "accept every unit ID", and broadcast is not handled.**
   The spec separates the two: only `null`, `undefined`, `'all'`, `'*'` accept every ID (the
   default), `0` is the broadcast address, and a broadcast executes writes, ignores reads and is
@@ -262,12 +262,6 @@ Decisions the spec does not make yet. Settle them in the spec first, then implem
   RTU-over-TCP it requires length-based delimiting). The code also drops an incomplete trailing
   frame instead of buffering it for the next read (the client's `unprocessed_buffer` field is
   unused). Decide whether buffering is required for TCP as well.
-- **Server-side limits and exception codes.** The client side is settled: it throws on an
-  over-limit length. For the server, decide whether an out-of-range quantity is answered with
-  `0x03` (Illegal Data Value), an out-of-range address with `0x02`, and so on (see gap 13).
-- **How the server records a `vector` error.** The spec says the error is recorded. Decide the
-  mechanism: a dedicated event, the existing `error` event (which throws if nobody listens), or
-  an injectable logger.
 - **Return value of `start()` / `stop()`.** `listen()` and serial `open()` complete
   asynchronously; the unified `start` / `stop` events are the signal. Decide whether `start()` /
   `stop()` should also return a Promise (resolved when ready, rejected on failure).

@@ -76,8 +76,14 @@ There is no separate discrete-input accessor — FC 2 reuses `get_coil`. Read ac
 once per point across the requested range; the server packs/serializes the results into the
 response.
 
-**A throwing `vector`.** If a `vector` function throws, the server records the error and answers
-the request with exception `0x04` (Server Device Failure) instead of a data response.
+**A throwing `vector`.** If a `vector` function throws, the server emits `vector_error` with the
+error and answers the request with exception `0x04` (Server Device Failure) instead of a data
+response. Unlike `error`, `vector_error` is ignored when nobody listens, so a faulty `vector`
+never brings the server down.
+
+**Invalid requests.** Before calling the `vector`, the server validates the request data and the
+address range (see "Exception responses" in `spec-protocol.md`); an invalid request is answered
+with an exception and the `vector` is not called.
 
 ## Methods
 
@@ -101,3 +107,4 @@ TCP-family transports (TCP and RTU-over-TCP).
 | `socket_error`      | TCP-family      | `Error`  | A per-connection error.                     |
 | `send`              | all             | `Buffer` | A frame was written.                        |
 | `receive`           | all             | `Buffer` | A frame was received.                       |
+| `vector_error`      | all             | `Error`, request | A `vector` function threw; the request was answered with `0x04`. |

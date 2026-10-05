@@ -253,6 +253,21 @@ describe('parse_rtu_request', () => {
         }
     });
 
+    test('an unsupported function code with a valid CRC is reported as illegal_function', () => {
+        assert.equal(parse_rtu_request(rtu_frame('010800000000'))[0].illegal_function, 8);
+        assert.equal(parse_rtu_request(rtu_frame('012b0e01'))[0].illegal_function, 0x2b);
+        assert.equal(parse_rtu_request(rtu_frame('010300000001'))[0].illegal_function, undefined);
+    });
+
+    test('no illegal_function for a bad CRC, a code 0 or a code >= 0x80', () => {
+        const frame = rtu_frame('010800000000');
+        frame[frame.length - 1] ^= 0xff;
+        assert.equal(parse_rtu_request(frame)[0].illegal_function, undefined);
+        for (const body of ['010000000001', '018300000001']) {
+            assert.equal(parse_rtu_request(rtu_frame(body))[0].illegal_function, undefined, body);
+        }
+    });
+
     test('rejects a frame that is too short or too long', () => {
         assert.deepEqual(parse_rtu_request(hex('01030000')), [
             { tid: TRANSACTION_START, func_code: 0, buffer: hex('01030000') },
@@ -414,6 +429,13 @@ describe('parse_tcp_request', () => {
 
     test('an unsupported function code yields func_code 0', () => {
         assert.equal(parse_tcp_request(tcp_frame(1, '010800000000'))[0].func_code, 0);
+    });
+
+    test('an unsupported function code is reported as illegal_function', () => {
+        assert.equal(parse_tcp_request(tcp_frame(1, '010800000000'))[0].illegal_function, 8);
+        assert.equal(parse_tcp_request(tcp_frame(1, '012b0e01'))[0].illegal_function, 0x2b);
+        assert.equal(parse_tcp_request(tcp_frame(1, '018300000001'))[0].illegal_function, undefined);
+        assert.equal(parse_tcp_request(tcp_frame(1, '01030000000100'))[0].illegal_function, undefined);
     });
 });
 

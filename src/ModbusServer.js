@@ -1,7 +1,40 @@
 import { createServer } from 'node:net';
 import { EventEmitter } from 'node:events';
 import { SerialPort } from 'serialport';
-import { modbus_crc16, parse_tcp_request, parse_rtu_request } from './util.js';
+import { MAX_QUANTITY, modbus_crc16, parse_tcp_request, parse_rtu_request } from './util.js';
+
+/**
+ * Checks the data of a supported request as the Modbus application protocol does, before any
+ * `vector` call. Returns the exception code to answer with, or 0 when the request is valid:
+ * 0x03 (Illegal Data Value) for a quantity outside 1..MAX_QUANTITY, a byte count that does not
+ * match the quantity, or an FC 5 value other than 0xFF00 / 0x0000; then 0x02 (Illegal Data
+ * Address) for a range that ends past address 65535.
+ */
+function check_request({ func_code, start_address, quantity, byte_count, data }) {
+    switch (func_code) {
+        case 5:
+            if (data !== 0xFF00 && data !== 0x0000) return 0x03;
+            return 0;
+        case 6:
+            return 0;
+        case 15:
+            if (byte_count !== Math.ceil(quantity / 8)) return 0x03;
+            break;
+        case 16:
+            if (byte_count !== quantity * 2) return 0x03;
+            break;
+    }
+    if (quantity < 1 || quantity > MAX_QUANTITY[func_code]) return 0x03;
+    if (start_address + quantity > 0x10000) return 0x02;
+    return 0;
+}
+
+// Wraps an exception thrown by a `vector` function
+class Vector_Error extends Error {
+    constructor(cause) {
+        super('vector function failed', { cause });
+    }
+}
 
 /**
  * @typedef {Object} ModbusVector
@@ -134,17 +167,38 @@ export class Modbus_Server extends EventEmitter {
     }
 
     _on_data(request, socket) {
-        const {
-            tid, pid, unit_id, func_code,
-            start_address, quantity,
-            data
-        } = request;
+        const { tid, pid, unit_id, func_code } = request;
 
         if (!this.is_valid_unit_id(unit_id)) {
             // If the unit_id is invalid, send an error response or ignore the request.
             // 0x0B: Gateway Target Device Failed To Respond
             this.send_exception_response(unit_id, func_code, 0x0B, socket, tid, pid);
             return;
+        }
+
+        let response;
+        try {
+            response = this.dispatch(request);
+        } catch (error) {
+            if (!(error instanceof Vector_Error)) throw error;
+            // 0x04: Server Device Failure
+            this.emit('vector_error', error.cause, request);
+            response = this.create_error_response(unit_id, func_code, 0x04);
+        }
+
+        this.send_response(response, socket, tid, pid);
+    }
+
+    /**
+     * Serves a request through the `vector` and returns the response PDU. A request that fails
+     * check_request() is answered with its exception code without calling the `vector`.
+     * A throwing `vector` function surfaces as a Vector_Error.
+     */
+    dispatch(request) {
+        const { unit_id, func_code, start_address, quantity, data } = request;
+        if (MAX_QUANTITY[func_code] !== undefined) {
+            const exception_code = check_request(request);
+            if (exception_code) return this.create_error_response(unit_id, func_code, exception_code);
         }
 
         let response;
@@ -172,8 +226,15 @@ export class Modbus_Server extends EventEmitter {
             default: // 0x01: Illegal Function
                 response = this.create_error_response(unit_id, func_code, 0x01);
         }
+        return response;
+    }
 
-        this.send_response(response, socket, tid, pid);
+    call_vector(name, ...args) {
+        try {
+            return this.vector[name](...args);
+        } catch (error) {
+            throw new Vector_Error(error);
+        }
     }
 
     on_data(buffer, socket) {
@@ -183,7 +244,13 @@ export class Modbus_Server extends EventEmitter {
 
         for (const request of requests) {
             this.emit('receive', request.buffer);
-            this._on_data(request, socket);
+            if (request.func_code !== 0) {
+                this._on_data(request, socket);
+            } else if (request.illegal_function !== undefined) {
+                // Answered with exception 0x01 under its own function code
+                this._on_data({ ...request, func_code: request.illegal_function }, socket);
+            }
+            // Any other invalid frame is dropped
         }
     }
 
@@ -212,7 +279,7 @@ export class Modbus_Server extends EventEmitter {
         const values = [];
         for (let i = 0; i < quantity; i++) {
             const addr = start_address + i;
-            const value = this.vector.get_coil(addr, unit_id);
+            const value = this.call_vector('get_coil', addr, unit_id);
             values.push(value ? 1 : 0);
         }
 
@@ -240,8 +307,8 @@ export class Modbus_Server extends EventEmitter {
         for (let i = 0; i < quantity; i++) {
             const addr = start_address + i;
             const value = function_code === 3
-                ? this.vector.get_holding_register(addr, unit_id)
-                : this.vector.get_input_register(addr, unit_id);
+                ? this.call_vector('get_holding_register', addr, unit_id)
+                : this.call_vector('get_input_register', addr, unit_id);
             values.push(value);
         }
 
@@ -258,7 +325,7 @@ export class Modbus_Server extends EventEmitter {
     }
 
     handle_write_single_coil(address, value, unit_id) {
-        this.vector.set_coil(address, value === 0xFF00, unit_id);
+        this.call_vector('set_coil', address, value === 0xFF00, unit_id);
 
         const buffer = Buffer.alloc(6);
         buffer.writeUInt8(unit_id, 0);
@@ -270,7 +337,7 @@ export class Modbus_Server extends EventEmitter {
     }
 
     handle_write_single_register(address, value, unit_id) {
-        this.vector.set_register(address, value, unit_id);
+        this.call_vector('set_register', address, value, unit_id);
 
         const buffer = Buffer.alloc(6);
         buffer.writeUInt8(unit_id, 0);
@@ -286,7 +353,7 @@ export class Modbus_Server extends EventEmitter {
             const byteIndex = Math.floor(i / 8);
             const bitIndex = i % 8;
             const value = (data[byteIndex] & (1 << bitIndex)) !== 0;
-            this.vector.set_coil(start_address + i, value, unit_id);
+            this.call_vector('set_coil', start_address + i, value, unit_id);
         }
 
         const buffer = Buffer.alloc(6);
@@ -301,7 +368,7 @@ export class Modbus_Server extends EventEmitter {
     handle_write_multiple_registers(start_address, quantity, data, unit_id) {
         for (let i = 0; i < quantity; i++) {
             const value = data.readUInt16BE(i * 2);
-            this.vector.set_register(start_address + i, value, unit_id);
+            this.call_vector('set_register', start_address + i, value, unit_id);
         }
 
         const buffer = Buffer.alloc(6);
@@ -321,7 +388,7 @@ export class Modbus_Server extends EventEmitter {
     create_error_response(unit_id, function_code, exception_code) {
         const buffer = Buffer.alloc(3);
         buffer.writeUInt8(unit_id, 0);
-        buffer.writeUInt8(function_code + 0x80, 1);
+        buffer.writeUInt8(function_code | 0x80, 1);
         buffer.writeUInt8(exception_code, 2);
         return buffer;
     }

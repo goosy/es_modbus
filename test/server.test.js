@@ -227,17 +227,17 @@ describe('Modbus_Server request handling (TCP framing)', () => {
         assert.deepEqual(sent, [tcp_frame(1, '0103020000').toString('hex')]);
     });
 
-    test('an unsupported function code gets exception 0x01 with the original code', { todo: 'design.md gap 11' }, () => {
+    test('an unsupported function code gets exception 0x01 with the original code', () => {
         const [response] = tcp_exchange(server, tcp_frame(1, '010800000000'));
         assert.equal(response?.toString('hex'), tcp_frame(1, '018801').toString('hex'));
     });
 
-    test('a malformed frame is dropped without a response', { todo: 'design.md gap 11' }, () => {
+    test('a malformed frame is dropped without a response', () => {
         assert.deepEqual(tcp_exchange(server, tcp_frame(1, '01030000000100')), []);
         assert.deepEqual(tcp_exchange(server, tcp_frame(1, '0110000000010200')), []);
     });
 
-    test('a throwing vector is answered with exception 0x04', { todo: 'design.md gap 26' }, () => {
+    test('a throwing vector is answered with exception 0x04', () => {
         server.vector = {
             ...memory.vector,
             get_holding_register() {
@@ -247,6 +247,95 @@ describe('Modbus_Server request handling (TCP framing)', () => {
         server.on('error', () => { });
         const [response] = tcp_exchange(server, tcp_frame(1, '010300000001'));
         assert.equal(response.toString('hex'), tcp_frame(1, '018304').toString('hex'));
+    });
+
+    test('a quantity outside the protocol limit gets exception 0x03', () => {
+        const requests = [
+            ['010100000000', '018103'], ['0101000007d1', '018103'],
+            ['010200000000', '018203'], ['0102000007d1', '018203'],
+            ['010300000000', '018303'], ['01030000007e', '018303'],
+            ['01040000007e', '018403'], ['010300000100', '018303'],
+            // An over-limit FC 15/16 request with a matching byte count does not fit in a PDU
+            ['010f00000000 00', '018f03'], ['010f000007b1 01 ff', '018f03'],
+            ['0110 0000 0000 00', '019003'], ['0110 0000 007c 02 0000', '019003'],
+        ];
+        for (const [request, response] of requests) {
+            const [written] = tcp_exchange(server, tcp_frame(1, request));
+            assert.equal(written?.toString('hex'), tcp_frame(1, response).toString('hex'), request);
+        }
+        assert.deepEqual(memory.calls, []);
+    });
+
+    test('a byte count that does not match the quantity gets exception 0x03', () => {
+        const [coils] = tcp_exchange(server, tcp_frame(1, '010f0000000a 01 cd'));
+        assert.equal(coils.toString('hex'), tcp_frame(1, '018f03').toString('hex'));
+        const [registers] = tcp_exchange(server, tcp_frame(1, '0110 0000 0002 02 0001'));
+        assert.equal(registers.toString('hex'), tcp_frame(1, '019003').toString('hex'));
+        assert.deepEqual(memory.calls, []);
+    });
+
+    test('an FC 5 value other than 0xFF00 or 0x0000 gets exception 0x03', () => {
+        const [response] = tcp_exchange(server, tcp_frame(1, '010500001234'));
+        assert.equal(response.toString('hex'), tcp_frame(1, '018503').toString('hex'));
+        assert.deepEqual(memory.calls, []);
+    });
+
+    test('a range past address 65535 gets exception 0x02', () => {
+        const requests = [
+            ['0103ffff0002', '018302'], ['0101fff00011', '018102'],
+            ['0110 ffff 0002 04 00010002', '019002'],
+        ];
+        for (const [request, response] of requests) {
+            const [written] = tcp_exchange(server, tcp_frame(1, request));
+            assert.equal(written.toString('hex'), tcp_frame(1, response).toString('hex'), request);
+        }
+        assert.deepEqual(memory.calls, []);
+    });
+
+    test('a range may end at address 65535', () => {
+        const [response] = tcp_exchange(server, tcp_frame(1, '0103fffe0002'));
+        assert.equal(response.toString('hex'), tcp_frame(1, '01030400000000').toString('hex'));
+    });
+
+    test('the quantity is checked before the address', () => {
+        const [response] = tcp_exchange(server, tcp_frame(1, '0103ffff0080'));
+        assert.equal(response.toString('hex'), tcp_frame(1, '018303').toString('hex'));
+    });
+
+    test('a throwing vector is reported through vector_error', () => {
+        const failure = new Error('device failure');
+        server.vector = {
+            ...memory.vector,
+            set_coil() {
+                throw failure;
+            },
+        };
+        const reported = [];
+        server.on('vector_error', (error, request) => reported.push([error, request.func_code]));
+        const [response] = tcp_exchange(server, tcp_frame(1, '010f0000000a02cd01'));
+        assert.equal(response.toString('hex'), tcp_frame(1, '018f04').toString('hex'));
+        assert.deepEqual(reported, [[failure, 15]]);
+    });
+
+    test('a throwing vector without a vector_error listener does not throw', () => {
+        server.vector = {
+            ...memory.vector,
+            get_coil() {
+                throw new Error('device failure');
+            },
+        };
+        const [response] = tcp_exchange(server, tcp_frame(1, '010200000001'));
+        assert.equal(response.toString('hex'), tcp_frame(1, '018204').toString('hex'));
+    });
+
+    test('an unsupported function code to a unit that is not accepted gets 0x0B', () => {
+        server.set_unit_ids([1]);
+        const [response] = tcp_exchange(server, tcp_frame(1, '020800000000'));
+        assert.equal(response.toString('hex'), tcp_frame(1, '02880b').toString('hex'));
+    });
+
+    test('a request with an exception function code is dropped', () => {
+        assert.deepEqual(tcp_exchange(server, tcp_frame(1, '018300000001')), []);
     });
 
     test('a broadcast write is executed and not answered', { todo: 'design.md gap 27' }, () => {
@@ -308,10 +397,26 @@ describe('Modbus_Server request handling (RTU framing)', () => {
         assert.deepEqual(port.written, [rtu_frame('02830b')]);
     });
 
-    test('a frame with a bad CRC is dropped', { todo: 'design.md gap 11' }, () => {
+    test('a frame with a bad CRC is dropped', () => {
         const frame = rtu_frame('010300000001');
         frame[frame.length - 1] ^= 0xff;
         server.on_data(frame);
+        assert.deepEqual(port.written, []);
+    });
+
+    test('an unsupported function code gets exception 0x01 with the original code', () => {
+        server.on_data(rtu_frame('010800000000'));
+        assert.deepEqual(port.written, [rtu_frame('018801')]);
+    });
+
+    test('an invalid quantity gets exception 0x03', () => {
+        server.on_data(rtu_frame('010300000000'));
+        assert.deepEqual(port.written, [rtu_frame('018303')]);
+    });
+
+    test('a malformed frame is dropped without a response', () => {
+        server.on_data(rtu_frame('01030000000100'));
+        server.on_data(hex('0103'));
         assert.deepEqual(port.written, []);
     });
 });

@@ -172,7 +172,8 @@ export function parse_modicon_range(range_str, zero_based = false) {
  * @returns {Array} An array containing an object with the parsed request data:
  *   - tid: Transaction ID (always TRANSACTION_START for RTU)
  *   - unit_id: Unit ID
- *   - func_code: Function code
+ *   - func_code: Function code (0 when the frame is invalid or the function unsupported)
+ *   - illegal_function: the function code of a well-formed frame with an unsupported function
  *   - start_address: Starting address
  *   - quantity: Quantity of registers/coils (for read/write multiple functions)
  *   - byte_count: Byte count (for write multiple functions)
@@ -193,6 +194,7 @@ export function parse_rtu_request(buffer) {
     let quantity;                                  // Quantity of registers/coils
     let byte_count = 0;                            // Byte count of the data
     let data;                                      // Data to write
+    let illegal_function;                          // Unsupported function code, if any
 
     // Currently,then func_code only support 1, 2, 3, 4, 5, 6, 15, and 16
     switch (func_code) {
@@ -235,21 +237,24 @@ export function parse_rtu_request(buffer) {
             data = buffer.subarray(7, PDU_length);  // Data to write
             break;
         default:
-            func_code = 0;  // Invalid function code
+            // Unsupported function code: the whole buffer is taken as the frame
+            if (func_code >= 1 && func_code <= 127) illegal_function = func_code;
+            func_code = 0;
             break;
     }
 
     // Verify CRC
-    if (func_code !== 0) {
+    if (func_code !== 0 || illegal_function !== undefined) {
         const calculatedCRC = modbus_crc16(buffer.subarray(0, PDU_length));
         const receivedCRC = buffer.readUInt16LE(PDU_length);
         if (calculatedCRC !== receivedCRC) {
             func_code = 0;
+            illegal_function = undefined;
         }
     }
 
     return [{
-        tid, unit_id, func_code,
+        tid, unit_id, func_code, illegal_function,
         start_address, quantity, byte_count,
         data, buffer
     }];
@@ -359,7 +364,8 @@ export function parse_rtu_response(buffer) {
  *   - pid: Protocol ID
  *   - length: Length of the remaining message
  *   - unit_id: Unit ID
- *   - func_code: Function code
+ *   - func_code: Function code (0 when the frame is invalid or the function unsupported)
+ *   - illegal_function: the function code of a frame with an unsupported function
  *   - start_address: Starting address (for applicable function codes)
  *   - quantity: Quantity of registers/coils (for applicable function codes)
  *   - byte_count: Byte count (for write multiple functions)
@@ -382,6 +388,7 @@ function parse_mt_request(buffer) {
     let quantity;                                  // Quantity of registers/coils
     let byte_count = 0;                            // Byte count of the data
     let data;                                      // Data to write
+    let illegal_function;                          // Unsupported function code, if any
 
     // Currently,then func_code only support 1, 2, 3, 4, 5, 6, 15, and 16
     switch (func_code) {
@@ -424,13 +431,15 @@ function parse_mt_request(buffer) {
             data = buffer.subarray(13, 13 + byte_count);  // Data to write
             break;
         default:
-            func_code = 0; // Invalid packet length
+            // Unsupported function code
+            if (func_code >= 1 && func_code <= 127) illegal_function = func_code;
+            func_code = 0;
             break;
     }
 
     return {
         tid, pid,
-        unit_id, func_code,
+        unit_id, func_code, illegal_function,
         start_address, quantity, byte_count,
         data, buffer
     };

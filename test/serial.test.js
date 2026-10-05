@@ -169,7 +169,7 @@ describe(`Modbus RTU server on ${SERVER_PATH}, raw peer on ${PEER_PATH}`, { skip
         assert.equal(memory.unit(1).holding[0x40], 19);
     });
 
-    test('a frame with a bad CRC is dropped', { todo: 'design.md gap 11' }, async () => {
+    test('a frame with a bad CRC is dropped', async () => {
         const frame = rtu_frame('010300000001');
         frame[frame.length - 1] ^= 0xff;
         const response = await exchange(peer, frame, 1, 200);
