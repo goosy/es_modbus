@@ -68,9 +68,4 @@ there.
 
 ## Known gaps
 
-- A test whose behavior is defined by the spec but not yet implemented is marked
-  `{ todo: '<reference>' }`, where the reference names the item in `design.md` (for example
-  `design.md gap 21`). The runner reports it as `todo` and does not fail the run.
-- When a gap is fixed, the `todo` option is removed from its tests in the same change, so they
-  become ordinary tests.
-- A test must never be marked `todo` to hide a regression in behavior that already works.
+Spec behavior not yet implemented is marked `{ todo }`; the mark is removed once it is fixed.

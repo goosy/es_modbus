@@ -99,7 +99,9 @@ const is_integer_in = (value, min, max) => typeof value === 'number'
  */
 export function parse_pdu_range(range) {
     if (range === null || typeof range !== 'object') return null;
-    let func_code, pdu_addr, length;
+    let func_code;
+    let pdu_addr;
+    let length;
     if (Array.isArray(range)) {
         if (range.length !== 3) return null;
         [func_code, pdu_addr, length] = range;
@@ -110,7 +112,7 @@ export function parse_pdu_range(range) {
     if (typeof func_code !== 'number' || !Object.hasOwn(MB_func_dict, func_code)) return null;
     if (!is_integer_in(pdu_addr, 0, 0xFFFF)) return null;
     // The quantity limit and the end of the range are checked by the client, not here
-    if (!is_integer_in(length, 1, Infinity)) return null;
+    if (!is_integer_in(length, 1, Number.POSITIVE_INFINITY)) return null;
     return { ...MB_func_dict[func_code], func_code, pdu_addr, length };
 }
 

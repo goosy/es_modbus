@@ -53,7 +53,7 @@ describe('Modbus_Server construction', () => {
         assert.equal(server.sockets, null);
     });
 
-    test('a string port selects serial RTU on that device path', { todo: 'design.md open question: serial parameters' }, () => {
+    test('a string port selects serial RTU on that device path', { todo: 'spec.md open question: serial parameters' }, () => {
         const server = new Modbus_Server({}, { port: 'COM_NONEXISTENT' });
         assert.equal(server.is_tcp, false);
         assert.equal(server.port.path, 'COM_NONEXISTENT');

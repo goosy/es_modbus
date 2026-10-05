@@ -63,6 +63,10 @@ mix. The server works in PDU addresses only.
 - **Tests:** the Node.js built-in test runner (`node:test`). During development `serialport` is
   installed by pnpm's `auto-install-peers` (on by default), so the serial tests and the server
   module can load; it is not listed in `devDependencies`.
+- **Linter:** ESLint with `@stylistic/eslint-plugin` (`eslint.config.js`), all pinned to exact
+  versions in `devDependencies`. ESLint's recommended rules find code problems; `@stylistic`
+  normalizes whitespace (tab indent, spacing, quotes, semicolons) without re-wrapping lines, so
+  hand-laid tables keep their layout. A reformatting formatter (Prettier, Biome) is not used.
 
 ## Build and layout
 
@@ -73,6 +77,7 @@ mix. The server works in PDU addresses only.
 | `src/ModbusServer.js` | Server class.                                                   |
 | `src/util.js`         | Pure protocol codec (frame parsing, CRC, range parsing). No I/O. |
 | `rolldown.config.js`  | Bundles `src/index.js` → `modbus.js` (ESM).                     |
+| `eslint.config.js`    | ESLint and `@stylistic` configuration.                          |
 | `modbus.js`           | Build output and the package `exports` entry. Git-ignored; produced by `pnpm build` / `prepare`. |
 | `test/*.test.js`      | Automated tests (see `spec-test.md`).                           |
 | `test/helpers.js`     | Shared test fixtures.                                           |
@@ -83,6 +88,8 @@ Commands:
 - `pnpm build` — run before anything that imports `../modbus.js`.
 - `pnpm test` — builds, then runs the automated test suite (`node --test`).
 - `pnpm test:coverage` — the test suite with a coverage report for `src/`.
+- `pnpm lint` — runs ESLint (`eslint .`); `pnpm lint --fix` applies the fixable rules. It is
+  separate from `pnpm test`.
 
 ## Conventions
 
@@ -93,3 +100,31 @@ Commands:
 - Ranges cross the public API in one of two forms chosen by JavaScript type, as defined in
   `spec-protocol.md`: a `string` is Modicon notation (5- or 6-digit), an array or object is a
   structured PDU range.
+
+## Open questions
+
+Decisions the spec does not make yet. Settle them in the spec first, then implement.
+
+- **Serial parameters.** A `string` server `port` is passed to `new SerialPort(port)`, but
+  `serialport` needs an options object (path, baud rate, parity, …). The spec defines no way to
+  give serial parameters except passing a ready-made `SerialPort` instance.
+- **Partial TCP frames.** For TCP the spec only requires splitting coalesced frames (for
+  RTU-over-TCP it requires length-based delimiting). The code also drops an incomplete trailing
+  frame instead of buffering it for the next read (the client's `unprocessed_buffer` field is
+  unused). Decide whether buffering is required for TCP as well.
+- **Return value of `start()` / `stop()`.** `listen()` and serial `open()` complete
+  asynchronously; the unified `start` / `stop` events are the signal. Decide whether `start()` /
+  `stop()` should also return a Promise (resolved when ready, rejected on failure).
+- **Connection flapping (debounce).** The client sets `is_connected` from the socket's
+  `connect` / `close` / `error` events and nothing else: no keep-alive, no heartbeat, no
+  smoothing. A closed TCP socket cannot recover, and responses to requests sent on it can never
+  arrive, so delaying the "connection lost" rejection would only delay the failure. What
+  flapping does cost is a reconnect storm if `reconnect_time` is small, and event noise
+  (`connect` / `disconnect`) for the caller. The opposite problem is a half-open connection
+  (cable pulled, peer gone without a FIN), where no event fires and the client only ever sees
+  timeouts. Decide whether to add (a) a minimum or growing reconnect delay, and (b) dead-link
+  detection, such as closing the socket after N consecutive timeouts or enabling TCP keep-alive.
+- **`disconnect()` and auto-reconnect.** `disconnect()` ends the socket, the `close` event then
+  triggers the reconnect timer, so with `reconnect_time > 0` the client reconnects by itself after
+  an explicit `disconnect()` (this follows the spec's reconnect rule literally). Decide whether an
+  explicit `disconnect()` should suppress reconnecting.

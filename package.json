@@ -7,6 +7,10 @@
     ".": "./modbus.js"
   },
   "devDependencies": {
+    "@eslint/js": "10.0.1",
+    "@stylistic/eslint-plugin": "5.10.0",
+    "eslint": "10.12.0",
+    "globals": "17.13.0",
     "rolldown": "^1.2.12"
   },
   "peerDependencies": {
@@ -21,7 +25,8 @@
     "build": "rolldown -c",
     "test": "pnpm build && node --test \"test/**/*.test.js\"",
     "test:coverage": "pnpm build && node --test --experimental-test-coverage --test-coverage-include=\"src/**\" \"test/**/*.test.js\"",
-    "prepare": "pnpm build"
+    "prepare": "pnpm build",
+    "lint": "eslint ."
   },
   "keywords": [
     "modbus",

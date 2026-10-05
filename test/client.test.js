@@ -117,7 +117,7 @@ describe('Modbus_Client argument validation', () => {
     });
 
     test('rejects invalid unit IDs', () => {
-        for (const unit_id of [-1, 256, 1.5, '1', null, NaN]) {
+        for (const unit_id of [-1, 256, 1.5, '1', null, Number.NaN]) {
             assert.throws(() => client.read('40001', unit_id), /Invalid unit ID/, String(unit_id));
             assert.throws(() => client.write('40001', 1, unit_id), /Invalid unit ID/, String(unit_id));
         }
@@ -181,7 +181,7 @@ describe('Modbus_Client argument validation', () => {
     });
 
     test('rejects invalid register values', () => {
-        for (const value of [-1, 65536, 1.5, NaN, 'x', true, null]) {
+        for (const value of [-1, 65536, 1.5, Number.NaN, 'x', true, null]) {
             assert.throws(() => client.write('40001', value), /Invalid value for register write/, String(value));
         }
         assert.throws(() => client.write('40001,2', 5), /Invalid value for register write/);
