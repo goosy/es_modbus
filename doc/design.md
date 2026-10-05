@@ -21,21 +21,37 @@ into `design-<topic>.md` files when it grows.
 `spec-protocol.md`): a start address and a length, with the function code (or the table's
 function codes) as attributes of the range. An *address* is a single point: a Modicon address
 (`"40001"`) or a PDU address (`pdu_addr`, the number on the wire). The parsers turn every form
-of range into the same internal range object; `parse_modicon_range` handles the Modicon form.
+of range into the same internal range object: `parse_modicon_range` handles the Modicon form,
+`parse_pdu_range` the structured PDU range, and the client's `resolve_range` picks one of them.
 
 The forms accepted for `range` (a Modicon string, or a structured array / object) and the rules
 for their fields are defined in `spec-protocol.md`; the client-side validation is in
 `spec-client.md`. How they are implemented:
 
-- **Type split first.** `read()` / `write()` look at the type of `range` before anything else:
-  a `string` goes to the Modicon parser, an array or object to the structured-address
-  validator.
+- **Type split first.** `read()` / `write()` call `resolve_range`, which looks at the type of
+  `range` before anything else: a `string` goes to the Modicon parser (`parse_modicon_range`),
+  anything else to the structured-range validator (`parse_pdu_range`). Either one returning
+  `null` throws `Invalid range format`.
 - **Numbering base.** The constructor option `modicon_zero_based` (default `false`, i.e.
   1-based) only affects the Modicon parser. A structured `pdu_addr` is used unchanged.
 - **Function code lookup.** A Modicon string finds its table through `MB_prefix_dict`, keyed by
-  the leading digit. A structured `func_code` needs its own function-code lookup (see gap 20).
-- **Explicit function code.** With a structured address `write()` does not infer the function
-  code from the shape of `value`; it validates the value against `func_code`.
+  the leading digit. A structured `func_code` finds its table and access direction (`read` /
+  `write`) through `MB_func_dict`, keyed by function code. A function code of the wrong
+  direction for the method throws `Function code <fc> is not a read function` (or `write`).
+- **Structured validation.** `parse_pdu_range` takes an array of exactly three elements or an
+  object with the three fields (other keys are ignored); each must be a `number`, `pdu_addr` an
+  integer in `0..65535`, and `length` an integer `>= 1`.
+- **Range checks.** After the range is parsed and the function code chosen, `check_range()`
+  applies the same two checks to both forms: the length must be within `MAX_QUANTITY[func_code]`
+  (`Invalid length …`), and `pdu_addr + length` must not exceed `0x10000`
+  (`Range exceeds address 65535`). `write()` runs it after `check_write_value`, so a value that
+  does not fit the function code is reported first.
+- **Explicit function code.** With a Modicon string `write()` infers the function code from the
+  shape of `value` (`infer_write`); with a structured range it takes `func_code` as given.
+  In both cases `check_write_value` then validates `value` against the function code and length,
+  and for FC 16 rejects an odd-length `Buffer` as a wrong buffer length.
+- **One transaction path.** Both methods end in `transact()`, which allocates the TID, builds the
+  frame and stores the packet.
 
 ## Frame construction pipeline (`Modbus_Client.make_data_packet`)
 
@@ -212,19 +228,6 @@ path as well, not only RTU.
   a FC 15/16 request whose `byte_count` is smaller than `quantity` requires reads past the data.
   Both throw inside the socket `data` handler. The spec defines no server-side limits or
   exception codes for this (see Open questions).
-- **Gap 19 — `read()` / `write()` accept only Modicon strings.** The array form
-  `[func_code, pdu_addr, length]` and the object form `{ func_code, pdu_addr, length }` (see
-  "Client range argument") are not implemented, nor is the validation of their fields
-  (`func_code` a `number` from `1, 2, 3, 4, 5, 6, 15, 16`, `pdu_addr` an integer `0..65535`,
-  `length` an integer `>= 1` and exactly `1` for FC 5 and 6). The argument validation for
-  Modicon strings (unit ID, quantity limits, write values) is in place.
-- **Gap 20 — `MB_prefix_dict` cannot resolve a function code.** The structured forms need a
-  lookup from `func_code` to the table type and the read/write direction. `MB_prefix_dict` is
-  keyed by the Modicon prefix digit (`'0'` coils, `'1'` discrete inputs, `'4'` holding, `'3'`
-  input), not by function code, so indexing it with `func_code - 1` gives wrong or missing
-  results: FC 3 → `'2'` (missing, holding is `'4'`), FC 5 → `'4'` (holding, but FC 5 writes a
-  coil), FC 6 → `'5'` (missing), FC 15 → `'14'` (missing). A function-code lookup (a table or an
-  array indexed by function code) has to be added next to it.
 - **Gap 21 — Connection loss does not reject pending requests, and stale frames stay queued
   *(verified)*.** The spec requires every pending request to be rejected immediately and the
   queued frames discarded when the connection is lost. The code does neither: pending requests
@@ -244,11 +247,6 @@ path as well, not only RTU.
   never answered. The code keeps `0` as an alias for "all" (and defaults `options.unit_id` to
   `0`), and answers requests to unit `0` like any other. The JSDoc already describes the spec;
   the code does not yet. This is a breaking change to `set_unit_ids`.
-- **Gap 28 — An odd-length register `Buffer` throws the wrong error *(verified)*.** For
-  `write('40001', Buffer.alloc(3))` the length is derived as `value.length / 2 = 1.5`; the
-  buffer-length check `value.length !== length * 2` passes, and `check_quantity` then throws
-  `Invalid length 1.5 for function code 16`. The spec requires
-  `Invalid buffer length for register write`. It still throws synchronously.
 
 ---
 

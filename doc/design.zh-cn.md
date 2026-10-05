@@ -20,19 +20,30 @@
 **地址与区间。** `read()` / `write()` 接受一个*区间*（range，见 `spec-protocol.zh-cn.md` 的“区间
 表示法”）：一个起始地址加一个长度，功能码（或该表的各功能码）作为区间的属性。*地址*（address）
 指单个点：Modicon 地址（`"40001"`）或 PDU 地址（`pdu_addr`，即线路上的数字）。解析器把各种形式的
-区间都转换成同一种内部区间对象；`parse_modicon_range` 处理 Modicon 形式。
+区间都转换成同一种内部区间对象：`parse_modicon_range` 处理 Modicon 形式，`parse_pdu_range` 处理
+结构化 PDU 区间，客户端的 `resolve_range` 在两者之间选择。
 
 `range` 接受的形式（Modicon 字符串，或结构化的数组 / 对象）及其字段规则定义在
 `spec-protocol.zh-cn.md` 中；客户端侧的校验见 `spec-client.zh-cn.md`。实现方式如下：
 
-- **先按类型分流。** `read()` / `write()` 在做任何事之前先看 `range` 的类型：`string` 交给
-  Modicon 解析器，数组或对象交给结构化地址校验器。
+- **先按类型分流。** `read()` / `write()` 调用 `resolve_range`，它在做任何事之前先看 `range`
+  的类型：`string` 交给 Modicon 解析器（`parse_modicon_range`），其他一切交给结构化区间校验器
+  （`parse_pdu_range`）。任一返回 `null` 即抛出 `Invalid range format`。
 - **编号起点。** 构造函数选项 `modicon_zero_based`（默认 `false`，即 1 起始）只影响 Modicon
   解析器。结构化的 `pdu_addr` 原样使用。
 - **功能码查找。** Modicon 字符串通过 `MB_prefix_dict`（以首位数字为键）找到表。结构化的
-  `func_code` 需要它自己的功能码查找（见缺陷 20）。
-- **显式功能码。** 使用结构化地址时，`write()` 不再根据 `value` 的形态推断功能码，而是针对
-  `func_code` 校验该值。
+  `func_code` 通过 `MB_func_dict`（以功能码为键）找到表和访问方向（`read` / `write`）。功能码方向
+  与方法不符时抛出 `Function code <fc> is not a read function`（或 `write`）。
+- **结构化校验。** `parse_pdu_range` 接受恰好三个元素的数组，或带这三个字段的对象；每个
+  字段都必须是 `number`（其他键会被忽略），`pdu_addr` 为 `0..65535` 的整数，`length` 为 `>= 1` 的整数。
+- **区间检查。** 区间解析完、功能码确定之后，`check_range()` 对两种形式做同样的两项检查：长度必须
+  在 `MAX_QUANTITY[func_code]` 之内（`Invalid length …`），且 `pdu_addr + length` 不得超过 `0x10000`
+  （`Range exceeds address 65535`）。`write()` 在 `check_write_value` 之后运行它，因此值与功能码
+  不符的错误先报告。
+- **显式功能码。** 使用 Modicon 字符串时，`write()` 根据 `value` 的形态推断功能码（`infer_write`）；
+  使用结构化区间时直接采用给定的 `func_code`。两种情况下随后都由 `check_write_value` 按功能码和
+  长度校验 `value`，对 FC 16 把奇数长度的 `Buffer` 作为缓冲区长度错误拒绝。
+- **单一事务路径。** 两个方法最终都进入 `transact()`，由它分配 TID、构造帧并保存 packet。
 
 ## 帧构造流水线（`Modbus_Client.make_data_packet`）
 
@@ -189,17 +200,6 @@ RTU / 串口的缺陷列在上一节，不在此处。缺陷修复后即从本�
   抛出 `RangeError`（寄存器超过 127 个、线圈超过 2040 个）；`byte_count` 小于 `quantity` 的
   FC 15/16 请求会读到数据之外。两者都在套接字 `data` 处理器内抛出。spec 对此没有定义服务端的上限
   或异常码（见“待决问题”）。
-- **缺陷 19 — `read()` / `write()` 只接受 Modicon 字符串。** 数组形式
-  `[func_code, pdu_addr, length]` 和对象形式 `{ func_code, pdu_addr, length }`（见“客户端区间
-  参数”）都没有实现，其字段的校验也没有实现（`func_code` 为 `1, 2, 3, 4, 5, 6, 15, 16` 之一的
-  `number`，`pdu_addr` 为 `0..65535` 的整数，`length` 为 `>= 1` 的整数，且 FC 5 和 6 时恰为 `1`）。
-  针对 Modicon 字符串的参数校验（单元 ID、数量上限、写入值）已经就位。
-- **缺陷 20 — `MB_prefix_dict` 无法解析功能码。** 结构化形式需要一个从 `func_code` 到表类型和
-  读/写方向的查找。`MB_prefix_dict` 的键是 Modicon 前缀数字（`'0'` 线圈、`'1'` 离散输入、`'4'`
-  保持、`'3'` 输入），而不是功能码，因此用 `func_code - 1` 去索引会得到错误或缺失的结果：FC 3 →
-  `'2'`（缺失，保持寄存器是 `'4'`），FC 5 → `'4'`（保持寄存器，但 FC 5 写的是线圈），FC 6 →
-  `'5'`（缺失），FC 15 → `'14'`（缺失）。需要在它旁边增加一个按功能码查找的结构（表，或按功能码
-  索引的数组）。
 - **缺陷 21 — 连接丢失时不拒绝待决请求，且过期的帧仍留在队列中*（已验证）*。** spec 要求连接
   丢失时立即拒绝每个待决请求并丢弃排队的帧。代码两件事都没做：待决请求只是等待自己的超时；客户端
   断开或处于退避期间超时的请求，其帧仍留在 `send_queue` 中。连接恢复后，下一次 `send()` 会把它
@@ -214,11 +214,6 @@ RTU / 串口的缺陷列在上一节，不在此处。缺陷修复后即从本�
   写入、忽略读取，且从不应答。代码仍把 `0` 保留为“全部”的别名（并把 `options.unit_id` 默认为
   `0`），对发往单元 `0` 的请求与其他请求一样应答。JSDoc 已按 spec 描述，代码尚未跟上。这是对
   `set_unit_ids` 的破坏性改动。
-- **缺陷 28 — 奇数长度的寄存器 `Buffer` 抛出的错误不对*（已验证）*。** 对
-  `write('40001', Buffer.alloc(3))`，长度按 `value.length / 2 = 1.5` 推出；缓冲区长度检查
-  `value.length !== length * 2` 得以通过，随后 `check_quantity` 抛出
-  `Invalid length 1.5 for function code 16`。spec 要求的是
-  `Invalid buffer length for register write`。它仍然是同步抛出。
 
 ---
 

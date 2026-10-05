@@ -73,6 +73,47 @@ const MB_prefix_dict = {
     },
 };
 
+// Function code -> table and access direction, for structured PDU ranges
+const MB_func_dict = {
+    1: { type: 'coils', access: 'read' },
+    2: { type: 'discrete_inputs', access: 'read' },
+    3: { type: 'holding_registers', access: 'read' },
+    4: { type: 'input_registers', access: 'read' },
+    5: { type: 'coils', access: 'write' },
+    6: { type: 'holding_registers', access: 'write' },
+    15: { type: 'coils', access: 'write' },
+    16: { type: 'holding_registers', access: 'write' },
+};
+
+const is_integer_in = (value, min, max) => typeof value === 'number'
+    && Number.isInteger(value) && value >= min && value <= max;
+
+/**
+ * Validates a structured PDU range, `[func_code, pdu_addr, length]` or
+ * `{ func_code, pdu_addr, length }`. Every field must be a `number`; the PDU address is used
+ * unchanged (never converted by a numbering base).
+ *
+ * @param {Array|Object} range - the structured PDU range.
+ * @returns {Object|null} the range `{ type, access, func_code, pdu_addr, length }`, or null
+ *   when the range is invalid.
+ */
+export function parse_pdu_range(range) {
+    if (range === null || typeof range !== 'object') return null;
+    let func_code, pdu_addr, length;
+    if (Array.isArray(range)) {
+        if (range.length !== 3) return null;
+        [func_code, pdu_addr, length] = range;
+    } else {
+        ({ func_code, pdu_addr, length } = range);
+    }
+
+    if (typeof func_code !== 'number' || !Object.hasOwn(MB_func_dict, func_code)) return null;
+    if (!is_integer_in(pdu_addr, 0, 0xFFFF)) return null;
+    // The quantity limit and the end of the range are checked by the client, not here
+    if (!is_integer_in(length, 1, Infinity)) return null;
+    return { ...MB_func_dict[func_code], func_code, pdu_addr, length };
+}
+
 /**
  * Splits a Modicon string into its table digit, point number and optional length.
  * Returns null when the string does not match the notation.
@@ -98,13 +139,13 @@ function point_to_pdu_addr(point, zero_based) {
 }
 
 /**
- * Parses a Modicon address string (5- or 6-digit, optional ",N" length) into a range.
+ * Parses a Modicon range string (a 5- or 6-digit Modicon address, optional ",N" length).
  *
  * @param {string} range_str - the Modicon string, such as "40001,73" or "400001".
  * @param {boolean} [zero_based=false] - true for 0-based point numbering.
  * @returns {Object|null} the range `{ type, fm_read, fs_write, fm_write, pdu_addr, length }`
  *   (the function-code fields are absent for tables that lack that operation), or null when
- *   the string is not a valid address.
+ *   the string is not a valid range.
  */
 export function parse_modicon_range(range_str, zero_based = false) {
     if (typeof range_str !== 'string') return null;

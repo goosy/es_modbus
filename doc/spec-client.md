@@ -43,10 +43,11 @@ defined in `spec-protocol.md`. `unit_id` is an integer in `0..255`.
 Both methods throw synchronously, instead of returning a rejected promise, when an argument is
 invalid:
 
-- `range` is not a valid range (`Error('Invalid range format')`);
+- `range` is not a valid range (`Error('Invalid range format')`), including a length below `1`;
 - `unit_id` is not an integer in `0..255`;
-- the length exceeds the quantity limit of its function code (see `spec-protocol.md`) or is
-  below `1`;
+- the length exceeds the quantity limit of its function code (see `spec-protocol.md`)
+  (`Error('Invalid length <length> for function code <fc>')`), for both forms of range;
+- the range ends past PDU address 65535 (`Error('Range exceeds address 65535')`);
 - the function code does not belong to the method.
 
 ### `read(range, unit_id = 1) → Promise<Buffer>`

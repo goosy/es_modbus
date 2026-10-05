@@ -130,6 +130,36 @@ describe('Modbus_Client argument validation', () => {
         assert.throws(() => client.read('30001,126'), /Invalid length 126 for function code 4/);
     });
 
+    test('a structured range over the limit gets the same message as a Modicon one', () => {
+        assert.throws(() => client.read([3, 0, 126]), /Invalid length 126 for function code 3/);
+        assert.throws(() => client.read([1, 0, 2001]), /Invalid length 2001 for function code 1/);
+        assert.throws(() => client.write([16, 0, 124], Buffer.alloc(248)), /Invalid length 124 for function code 16/);
+        assert.throws(() => client.write([15, 0, 1969], Buffer.alloc(247)), /Invalid length 1969 for function code 15/);
+    });
+
+    test('rejects a range past PDU address 65535', () => {
+        assert.throws(() => client.read('465536,2'), /Range exceeds address 65535/);
+        assert.throws(() => client.read([3, 65535, 2]), /Range exceeds address 65535/);
+        assert.throws(() => client.read([1, 64000, 2000]), /Range exceeds address 65535/);
+        assert.throws(() => client.write('465535', hex('000100020003')), /Range exceeds address 65535/);
+        assert.throws(() => client.write([16, 65535, 2], hex('00010002')), /Range exceeds address 65535/);
+    });
+
+    test('a range may end at PDU address 65535', () => {
+        client.on('error', () => { });
+        try {
+            for (const call of [
+                () => client.read('465536'),
+                () => client.read([3, 65534, 2]),
+                () => client.write([5, 65535, 1], true),
+            ]) {
+                call().catch(() => { });
+            }
+        } finally {
+            close_client(client);
+        }
+    });
+
     test('rejects write lengths over the protocol limit', () => {
         assert.throws(() => client.write('00001,1969', Buffer.alloc(247)), /function code 15/);
         assert.throws(() => client.write('40001,124', Buffer.alloc(248)), /function code 16/);
@@ -158,15 +188,15 @@ describe('Modbus_Client argument validation', () => {
         assert.throws(() => client.write('40001,3', Buffer.alloc(4)), /Invalid buffer length for register write/);
     });
 
-    test('rejects an odd-length register Buffer as a wrong buffer length', { todo: 'design.md gap 28' }, () => {
+    test('rejects an odd-length register Buffer as a wrong buffer length', () => {
         assert.throws(() => client.write('40001', Buffer.alloc(3)), /Invalid buffer length for register write/);
     });
 
-    test('rejects structured ranges with invalid fields', { todo: 'design.md gap 19' }, () => {
+    test('rejects structured ranges with invalid fields', () => {
         const invalid = [
             ['3', 0, 1], [3, '0', 1], [3, 0, '1'], [true, 0, 1], [3n, 0, 1],
             [7, 0, 1], [0, 0, 1], [3, -1, 1], [3, 65536, 1], [3, 1.5, 1],
-            [3, 0, 0], [3, 0, 126], [1, 0, 2001], [3, 0, 1.5],
+            [3, 0, 0], [3, 0, -1], [3, 0, 1.5],
             { func_code: 3, pdu_addr: 0 }, { func_code: 3, length: 1 },
         ];
         for (const range of invalid) {
@@ -175,7 +205,7 @@ describe('Modbus_Client argument validation', () => {
         }
     });
 
-    test('rejects a structured function code that does not belong to the method', { todo: 'design.md gap 19' }, () => {
+    test('rejects a structured function code that does not belong to the method', () => {
         for (const func_code of [5, 6, 15, 16]) {
             assert.throws(() => client.read([func_code, 0, 1]));
         }
@@ -184,6 +214,22 @@ describe('Modbus_Client argument validation', () => {
         }
         assert.throws(() => client.write([5, 0, 2], true));
         assert.throws(() => client.write([6, 0, 2], 1));
+    });
+
+    test('a structured range is checked against the value of its function code', () => {
+        assert.throws(() => client.write([5, 0, 1], 1), /Invalid value for coil write/);
+        assert.throws(() => client.write([15, 0, 3], true), /Invalid value for coil write/);
+        assert.throws(() => client.write([15, 0, 9], Buffer.alloc(1)), /Invalid buffer length for coil write/);
+        assert.throws(() => client.write([6, 0, 1], 65536), /Invalid value for register write/);
+        assert.throws(() => client.write([6, 0, 1], Buffer.alloc(4)), /Invalid value for register write/);
+        assert.throws(() => client.write([16, 0, 2], 5), /Invalid value for register write/);
+        assert.throws(() => client.write([16, 0, 2], Buffer.alloc(2)), /Invalid buffer length for register write/);
+    });
+
+    test('a structured range does not take the Modicon type split', () => {
+        assert.throws(() => client.read(['40001']), /Invalid range format/);
+        assert.throws(() => client.read([3, 0, 1, 0]), /Invalid range format/);
+        assert.throws(() => client.read({ func_code: 3, pdu_addr: 0, length: 1n }), /Invalid range format/);
     });
 });
 
@@ -249,7 +295,7 @@ describe('Modbus_Client TCP framing', () => {
         ]);
     });
 
-    test('structured ranges are sent unchanged', { todo: 'design.md gap 19' }, async () => {
+    test('structured ranges are sent unchanged', async () => {
         await client.read([3, 256, 2]);
         await client.read({ func_code: 4, pdu_addr: 0, length: 1 });
         await client.read([1, 65535, 1]);
@@ -302,7 +348,7 @@ describe('Modbus_Client Modicon numbering base', () => {
         assert.deepEqual(frames.map((f) => f.readUInt16BE(8)), [0, 1, 9999, 65535]);
     });
 
-    test('the numbering base never applies to structured addresses', { todo: 'design.md gap 19' }, async () => {
+    test('the numbering base never applies to structured ranges', async () => {
         const client = await connect_client(fake.port, { modicon_zero_based: false });
         fake.frames.length = 0;
         try {

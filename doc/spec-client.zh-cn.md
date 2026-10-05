@@ -42,9 +42,11 @@ Modicon 地址的编号起点同样在构造时选择：默认 1 起始，以 `m
 
 当参数无效时，两个方法都会同步抛出异常，而不是返回被拒绝的 promise：
 
-- `range` 不是有效区间（`Error('Invalid range format')`）；
+- `range` 不是有效区间（`Error('Invalid range format')`），包括长度小于 `1`；
 - `unit_id` 不是 `0..255` 范围内的整数；
-- 长度超过其功能码的数量上限（见 `spec-protocol.zh-cn.md`），或小于 `1`；
+- 长度超过其功能码的数量上限（见 `spec-protocol.zh-cn.md`）
+  （`Error('Invalid length <length> for function code <fc>')`），两种形式的区间相同；
+- 区间结束于 PDU 地址 65535 之后（`Error('Range exceeds address 65535')`）；
 - 功能码不属于该方法。
 
 ### `read(range, unit_id = 1) → Promise<Buffer>`

@@ -93,11 +93,15 @@ An array `[func_code, pdu_addr, length]` or an object `{ func_code, pdu_addr, le
 - `func_code` — a `number`, the decimal function code, one of `1, 2, 3, 4, 5, 6, 15, 16`.
 - `pdu_addr` — a `number`, an integer in `0..65535`. PDU addresses are **always 0-based**: this
   is the address as carried on the wire, sent unchanged. The numbering base above does not apply.
-- `length` — a `number`, an integer `>= 1`, within the quantity limits below; exactly `1` for
-  FC 5 and 6.
+- `length` — a `number`, an integer `>= 1`.
 
 Every field must be a `number`; any other type (a numeric string, `boolean`, `bigint`, …) or an
 out-of-range value makes the range invalid.
+
+The length is also subject to the quantity limits below (exactly `1` for FC 5 and 6), and the
+range must end within the PDU address space: `pdu_addr + length - 1 <= 65535`. The same two rules
+apply to a Modicon string after its conversion to a PDU address. The client reports a violation
+with its own message rather than as an invalid range (see `spec-client.md`).
 
 Example: `[3, 256, 2]` and `{ func_code: 3, pdu_addr: 256, length: 2 }` both mean 2 holding
 registers starting at PDU address 256, which is `"40257,2"` in 1-based Modicon notation.

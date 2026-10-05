@@ -2,7 +2,7 @@ import { describe, test } from 'node:test';
 import assert from 'node:assert/strict';
 import {
     TRANSACTION_START, DO_NOTHING, MAX_QUANTITY,
-    modbus_crc16, parse_modicon_range,
+    modbus_crc16, parse_modicon_range, parse_pdu_range,
     parse_rtu_request, parse_rtu_response,
     parse_tcp_request, parse_tcp_response,
 } from '../src/util.js';
@@ -128,6 +128,51 @@ describe('parse_modicon_range', () => {
     test('rejects points out of range in 0-based numbering', () => {
         for (const value of ['465536', '499999']) {
             assert.equal(parse_modicon_range(value, true), null, value);
+        }
+    });
+});
+
+describe('parse_pdu_range', () => {
+    test('the array and object forms are equivalent', () => {
+        const expected = { type: 'holding_registers', access: 'read', func_code: 3, pdu_addr: 256, length: 2 };
+        assert.deepEqual(parse_pdu_range([3, 256, 2]), expected);
+        assert.deepEqual(parse_pdu_range({ func_code: 3, pdu_addr: 256, length: 2 }), expected);
+    });
+
+    test('every function code maps to its table and direction', () => {
+        const tables = {
+            1: ['coils', 'read'], 2: ['discrete_inputs', 'read'],
+            3: ['holding_registers', 'read'], 4: ['input_registers', 'read'],
+            5: ['coils', 'write'], 6: ['holding_registers', 'write'],
+            15: ['coils', 'write'], 16: ['holding_registers', 'write'],
+        };
+        for (const [func_code, [type, access]] of Object.entries(tables)) {
+            const result = parse_pdu_range([Number(func_code), 0, 1]);
+            assert.deepEqual([result.type, result.access], [type, access], func_code);
+        }
+    });
+
+    test('the PDU address range is inclusive', () => {
+        assert.equal(parse_pdu_range([1, 0, 1]).pdu_addr, 0);
+        assert.equal(parse_pdu_range([1, 65535, 1]).pdu_addr, 65535);
+    });
+
+    test('quantity limits are left to the client', () => {
+        assert.equal(parse_pdu_range([16, 0, 124]).length, 124);
+        assert.equal(parse_pdu_range([5, 0, 2]).length, 2);
+        assert.equal(parse_pdu_range([1, 65535, 2000]).length, 2000);
+    });
+
+    test('rejects invalid input', () => {
+        const invalid = [
+            '40001', 3, null, undefined, [], [3, 0], [3, 0, 1, 0],
+            ['3', 0, 1], [3, '0', 1], [3, 0, '1'], [true, 0, 1], [3n, 0, 1], [3, 0, 1n],
+            [7, 0, 1], [0, 0, 1], [3.5, 0, 1], [NaN, 0, 1],
+            [3, -1, 1], [3, 65536, 1], [3, 1.5, 1], [3, 0, 0], [3, 0, 1.5],
+            { func_code: 3, pdu_addr: 0 }, { pdu_addr: 0, length: 1 },
+        ];
+        for (const value of invalid) {
+            assert.equal(parse_pdu_range(value), null, String(value));
         }
     });
 });

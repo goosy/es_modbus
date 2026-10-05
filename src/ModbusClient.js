@@ -2,7 +2,8 @@ import { Socket } from 'node:net';
 import { EventEmitter } from 'node:events';
 import {
     TRANSACTION_START, DO_NOTHING, MAX_QUANTITY,
-    modbus_crc16, parse_modicon_range, parse_rtu_response, parse_tcp_response
+    modbus_crc16, parse_modicon_range, parse_pdu_range,
+    parse_rtu_response, parse_tcp_response
 } from './util.js';
 
 function check_unit_id(unit_id) {
@@ -11,9 +12,76 @@ function check_unit_id(unit_id) {
     }
 }
 
-function check_quantity(func_code, length) {
+/**
+ * Checks a range against the quantity limit of its function code and the PDU address space.
+ */
+function check_range(func_code, pdu_addr, length) {
     if (!Number.isInteger(length) || length < 1 || length > MAX_QUANTITY[func_code]) {
         throw new Error(`Invalid length ${length} for function code ${func_code}`);
+    }
+    if (pdu_addr + length > 0x10000) {
+        throw new Error('Range exceeds address 65535');
+    }
+}
+
+/**
+ * Chooses the write function code and length for a Modicon range from the shape of `value`.
+ */
+function infer_write(target, value) {
+    const { fs_write, fm_write } = target;
+    if (!fs_write || !fm_write) {
+        throw new Error('Write operation not supported for this table');
+    }
+    if (fs_write === 5) {
+        // Coils: a boolean is a single write, a Buffer is a multiple write
+        if (typeof value === 'boolean') return { func_code: 5, length: target.length ?? 1 };
+        if (Buffer.isBuffer(value)) {
+            // A bit count cannot be derived from a byte count, so ",N" is required
+            if (target.length === undefined) {
+                throw new Error('Coil Buffer write requires a ",N" length');
+            }
+            return { func_code: 15, length: target.length };
+        }
+        throw new Error('Invalid value for coil write');
+    }
+    // Holding registers: a number or a 2-byte Buffer of length 1 is a single write
+    const length = target.length ?? (Buffer.isBuffer(value) ? value.length / 2 : 1);
+    if (typeof value === 'number') return { func_code: 6, length };
+    if (Buffer.isBuffer(value)) {
+        return { func_code: value.length === 2 && length === 1 ? 6 : 16, length };
+    }
+    throw new Error('Invalid value for register write');
+}
+
+/**
+ * Validates `value` against a write function code and length; returns the frame data.
+ */
+function check_write_value(func_code, length, value) {
+    switch (func_code) {
+        case 5:
+            if (typeof value !== 'boolean' || length !== 1) {
+                throw new Error('Invalid value for coil write');
+            }
+            return value;
+        case 15:
+            if (!Buffer.isBuffer(value)) throw new Error('Invalid value for coil write');
+            if (value.length !== Math.ceil(length / 8)) {
+                throw new Error('Invalid buffer length for coil write');
+            }
+            return value;
+        case 6: {
+            const data = Buffer.isBuffer(value) && value.length === 2 ? value.readUInt16BE(0) : value;
+            if (length !== 1 || !Number.isInteger(data) || data < 0 || data > 0xFFFF) {
+                throw new Error('Invalid value for register write');
+            }
+            return data;
+        }
+        case 16:
+            if (!Buffer.isBuffer(value)) throw new Error('Invalid value for register write');
+            if (value.length % 2 !== 0 || value.length !== length * 2) {
+                throw new Error('Invalid buffer length for register write');
+            }
+            return value;
     }
 }
 
@@ -150,92 +218,61 @@ export class Modbus_Client extends EventEmitter {
             };
         });
     }
-    read(range, unit_id = 1) {
-        const address_obj = parse_modicon_range(range, this.modicon_zero_based);
-        if (!address_obj) throw new Error('Invalid range format');
-        check_unit_id(unit_id);
-
-        const func_code = address_obj.fm_read;
-        const address = address_obj.pdu_addr;
-        const length = address_obj.length ?? 1;
-        check_quantity(func_code, length);
-
-        const tid = this.get_tid();
-        const buffer = this.make_data_packet(tid, 0, unit_id, func_code, address, null, length);
-        const packet = {
-            tid,
-            unit_id,
-            func_code,
-            address,
-            buffer,
-            status: 'init',
-        };
-        this.set_packet(tid, packet);
-
-        return this.process_packet_transaction(packet);
+    /**
+     * Parses a `read` / `write` range by its type: a string is a Modicon range, an array or
+     * object is a structured PDU range. Throws when it is invalid.
+     */
+    resolve_range(range) {
+        const resolved = typeof range === 'string'
+            ? parse_modicon_range(range, this.modicon_zero_based)
+            : parse_pdu_range(range);
+        if (!resolved) throw new Error('Invalid range format');
+        return resolved;
     }
 
-    write(range, value, unit_id = 1) {
-        const address_obj = parse_modicon_range(range, this.modicon_zero_based);
-        if (!address_obj) throw new Error('Invalid range format');
+    read(range, unit_id = 1) {
+        const target = this.resolve_range(range);
         check_unit_id(unit_id);
-
-        const { fs_write, fm_write, pdu_addr: address } = address_obj;
-        if (!fs_write || !fm_write) {
-            throw new Error('Write operation not supported for this table');
-        }
 
         let func_code;
         let length;
-        let data;
-        if (fs_write === 5) {
-            // Coils: a boolean is a single write, a Buffer is a multiple write
-            if (typeof value === 'boolean') {
-                func_code = 5;
-                length = address_obj.length ?? 1;
-                if (length !== 1) throw new Error('Invalid value for coil write');
-                data = value;
-            } else if (Buffer.isBuffer(value)) {
-                func_code = 15;
-                // A bit count cannot be derived from a byte count, so ",N" is required
-                length = address_obj.length;
-                if (length === undefined) {
-                    throw new Error('Coil Buffer write requires a ",N" length');
-                }
-                if (value.length !== Math.ceil(length / 8)) {
-                    throw new Error('Invalid buffer length for coil write');
-                }
-                data = value;
-            } else {
-                throw new Error('Invalid value for coil write');
-            }
+        if (typeof range === 'string') {
+            func_code = target.fm_read;
+            length = target.length ?? 1;
         } else {
-            // Holding registers: a number or a 2-byte Buffer of length 1 is a single write
-            const single_buffer = Buffer.isBuffer(value) && value.length === 2
-                && (address_obj.length ?? 1) === 1;
-            if (typeof value === 'number' || single_buffer) {
-                func_code = 6;
-                length = address_obj.length ?? 1;
-                data = Buffer.isBuffer(value) ? value.readUInt16BE(0) : value;
-                if (length !== 1 || !Number.isInteger(data) || data < 0 || data > 0xFFFF) {
-                    throw new Error('Invalid value for register write');
-                }
-            } else if (Buffer.isBuffer(value)) {
-                func_code = 16;
-                length = address_obj.length ?? value.length / 2;
-                if (value.length !== length * 2) {
-                    throw new Error('Invalid buffer length for register write');
-                }
-                data = value;
-            } else {
-                throw new Error('Invalid value for register write');
+            if (target.access !== 'read') {
+                throw new Error(`Function code ${target.func_code} is not a read function`);
             }
+            ({ func_code, length } = target);
         }
-        check_quantity(func_code, length);
+        check_range(func_code, target.pdu_addr, length);
 
+        return this.transact(unit_id, func_code, target.pdu_addr, null, length);
+    }
+
+    write(range, value, unit_id = 1) {
+        const target = this.resolve_range(range);
+        check_unit_id(unit_id);
+
+        let func_code;
+        let length;
+        if (typeof range === 'string') {
+            ({ func_code, length } = infer_write(target, value));
+        } else {
+            if (target.access !== 'write') {
+                throw new Error(`Function code ${target.func_code} is not a write function`);
+            }
+            ({ func_code, length } = target);
+        }
+        const data = check_write_value(func_code, length, value);
+        check_range(func_code, target.pdu_addr, length);
+
+        return this.transact(unit_id, func_code, target.pdu_addr, data, length);
+    }
+
+    transact(unit_id, func_code, address, data, length) {
         const tid = this.get_tid();
         const buffer = this.make_data_packet(tid, 0, unit_id, func_code, address, data, length);
-
         const packet = {
             tid,
             unit_id,
