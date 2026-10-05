@@ -1,4 +1,4 @@
-# Protocol: framing, addressing, function codes
+# Protocol: framing, ranges, function codes
 
 Covers the wire-level rules shared by client and server.
 
@@ -38,14 +38,15 @@ except the trailing 2 CRC bytes) must be 3–253. RTU has no transaction field.
 - **RTU-over-TCP.** A stream has no inter-frame silence; frame boundaries come from the length
   implied by the function code and, where present, the byte count.
 
-## Address notation
+## Range notation
 
-An address given to the client takes one of two forms, **decided strictly by JavaScript type**
-and never by guessing from its value:
+`read` and `write` take a **range**: a start address and a length, together with the table (or
+the function code) it applies to. A range given to the client takes one of two forms, **decided
+strictly by JavaScript type** and never by guessing from its value:
 
-- a **Modicon string**, such as `"40001,73"`;
-- a **structured PDU address**, an array or an object that carries a function code, a PDU
-  address and a length.
+- a **Modicon string**, such as `"40001,73"`: a Modicon address with an optional length;
+- a **structured PDU range**, an array or an object that carries a function code, a PDU address
+  and a length.
 
 A numeric string is a Modicon string and must match the notation below; a `number` is never read
 as Modicon. For example `"40001"` is Modicon, while the `pdu_addr` `40001` is the PDU address
@@ -74,18 +75,18 @@ Examples: `"40001"` → 1 holding register at 40001; `"40001,73"` → 73 holding
 at 40001; `"400001,73"` → the same range in 6-digit form; `"00001,16"` → 16 coils.
 
 A string that does not match the notation, or whose leading digit is not one of `0, 1, 3, 4`, is
-not a valid address.
+not a valid range.
 
 **Numbering base.** Modicon point numbers are **1-based by default**. The client chooses the base
 when it is constructed (1-based, or 0-based on request) and it stays fixed for the client's
-lifetime. The base applies to Modicon strings only, never to a structured PDU address.
+lifetime. The base applies to Modicon strings only, never to a structured PDU range.
 
 | Base              | 5-digit point | 6-digit point | PDU address |
 | ----------------- | ------------- | ------------- | ----------- |
 | 1-based (default) | `1..9999`     | `1..65536`    | `point - 1` |
 | 0-based           | `0..9999`     | `0..65535`    | `point`     |
 
-### Structured PDU address
+### Structured PDU range
 
 An array `[func_code, pdu_addr, length]` or an object `{ func_code, pdu_addr, length }`:
 
@@ -96,7 +97,7 @@ An array `[func_code, pdu_addr, length]` or an object `{ func_code, pdu_addr, le
   FC 5 and 6.
 
 Every field must be a `number`; any other type (a numeric string, `boolean`, `bigint`, …) or an
-out-of-range value makes the address invalid.
+out-of-range value makes the range invalid.
 
 Example: `[3, 256, 2]` and `{ func_code: 3, pdu_addr: 256, length: 2 }` both mean 2 holding
 registers starting at PDU address 256, which is `"40257,2"` in 1-based Modicon notation.
@@ -104,7 +105,8 @@ registers starting at PDU address 256, which is `"40257,2"` in 1-based Modicon n
 ### Address conversion on the wire
 
 - **Client.** A Modicon string is converted to the PDU address `point - 1` (1-based numbering, the
-  default) or `point` (0-based numbering); a structured PDU address is sent unchanged.
+  default) or `point` (0-based numbering); the PDU address of a structured PDU range is sent
+  unchanged.
 - **Server.** The server works in PDU addresses only. It performs no conversion and Modicon
   notation never appears on the server side: the `vector` receives the raw on-wire (0-based) PDU
   address as a `number`.

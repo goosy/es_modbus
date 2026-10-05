@@ -2,7 +2,7 @@ import { Socket } from 'node:net';
 import { EventEmitter } from 'node:events';
 import {
     TRANSACTION_START, DO_NOTHING, MAX_QUANTITY,
-    modbus_crc16, parse_address, parse_rtu_response, parse_tcp_response
+    modbus_crc16, parse_modicon_range, parse_rtu_response, parse_tcp_response
 } from './util.js';
 
 function check_unit_id(unit_id) {
@@ -18,7 +18,11 @@ function check_quantity(func_code, length) {
 }
 
 export class Modbus_Client extends EventEmitter {
-    zero_based;
+    // Numbering base of Modicon strings, fixed at construction
+    #modicon_zero_based;
+    get modicon_zero_based() {
+        return this.#modicon_zero_based;
+    }
     is_connected = false;
     timeout; // response timeout
     delay; // delay between pools
@@ -65,7 +69,7 @@ export class Modbus_Client extends EventEmitter {
             reconnect_time = 10000
         } = options;
         this.reconnect_time = reconnect_time;
-        this.zero_based = options.zero_based ?? false;
+        this.#modicon_zero_based = options.modicon_zero_based ?? false;
         this.unprocessed_buffer = Buffer.alloc(0);
         this.timeout = options.timeout ?? 1000;
         this.delay = options.delay ?? 20;
@@ -146,13 +150,13 @@ export class Modbus_Client extends EventEmitter {
             };
         });
     }
-    read(address_str, unit_id = 1) {
-        const address_obj = parse_address(address_str);
-        if (!address_obj) throw new Error('Invalid address format');
+    read(range, unit_id = 1) {
+        const address_obj = parse_modicon_range(range, this.modicon_zero_based);
+        if (!address_obj) throw new Error('Invalid range format');
         check_unit_id(unit_id);
 
         const func_code = address_obj.fm_read;
-        const address = address_obj.address;
+        const address = address_obj.pdu_addr;
         const length = address_obj.length ?? 1;
         check_quantity(func_code, length);
 
@@ -171,14 +175,14 @@ export class Modbus_Client extends EventEmitter {
         return this.process_packet_transaction(packet);
     }
 
-    write(address_str, value, unit_id = 1) {
-        const address_obj = parse_address(address_str);
-        if (!address_obj) throw new Error('Invalid address format');
+    write(range, value, unit_id = 1) {
+        const address_obj = parse_modicon_range(range, this.modicon_zero_based);
+        if (!address_obj) throw new Error('Invalid range format');
         check_unit_id(unit_id);
 
-        const { fs_write, fm_write, address } = address_obj;
+        const { fs_write, fm_write, pdu_addr: address } = address_obj;
         if (!fs_write || !fm_write) {
-            throw new Error('Write operation not supported for this address type');
+            throw new Error('Write operation not supported for this table');
         }
 
         let func_code;
@@ -269,12 +273,8 @@ export class Modbus_Client extends EventEmitter {
         }
     }
 
-    make_data_packet(trans_id, proto_id, unit_id, func_code, address, data, length) {
-        if (typeof address !== 'number' && typeof address !== 'boolean') return null;
-        const start_address = this.zero_based
-            ? address
-            : address === 0 ? 0xffff : address - 1;
-
+    // `start_address` is the PDU address, already converted from Modicon notation
+    make_data_packet(trans_id, proto_id, unit_id, func_code, start_address, data, length) {
         let dataBytes = 0;
         if (func_code === 15) { dataBytes = Math.ceil(length / 8); }
         if (func_code === 16) { dataBytes = length * 2; }

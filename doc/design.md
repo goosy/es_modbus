@@ -15,13 +15,19 @@ into `design-<topic>.md` files when it grows.
   wraps a `string` port in a new `SerialPort`. `is_tcp` is a getter:
   `typeof this.port === 'number'`.
 
-## Client address argument (`read` / `write`)
+## Client range argument (`read` / `write`)
 
-The forms accepted for `address` (a Modicon string, or a structured array / object) and the rules
+**Address and range.** `read()` / `write()` take a *range* (see "Range notation" in
+`spec-protocol.md`): a start address and a length, with the function code (or the table's
+function codes) as attributes of the range. An *address* is a single point: a Modicon address
+(`"40001"`) or a PDU address (`pdu_addr`, the number on the wire). The parsers turn every form
+of range into the same internal range object; `parse_modicon_range` handles the Modicon form.
+
+The forms accepted for `range` (a Modicon string, or a structured array / object) and the rules
 for their fields are defined in `spec-protocol.md`; the client-side validation is in
 `spec-client.md`. How they are implemented:
 
-- **Type split first.** `read()` / `write()` look at the type of `address` before anything else:
+- **Type split first.** `read()` / `write()` look at the type of `range` before anything else:
   a `string` goes to the Modicon parser, an array or object to the structured-address
   validator.
 - **Numbering base.** The constructor option `modicon_zero_based` (default `false`, i.e.
@@ -42,10 +48,9 @@ A single routine builds every outgoing frame regardless of transport:
    - FC 5: `0xFF00` / `0x0000` at offset 10.
    - FC 6: 16-bit value at offset 10.
    - FC 15/16: quantity at 10, byte count at 12, data from 13.
-3. Apply the Modicon→PDU conversion here: the PDU address is `point - 1` by default, or `point`
-   when the client was constructed with `options.modicon_zero_based = true`. A `number` PDU address is
-   to be used unchanged (not converted). The code still has a `0 → 0xFFFF` case that is to be
-   removed (see gaps 15 and 17).
+3. The start address is the PDU address and is written unchanged. The Modicon→PDU conversion
+   (`point - 1` by default, `point` when the client was constructed with
+   `options.modicon_zero_based = true`) has already been done by the Modicon parser.
 4. If `protocol === 'tcp'`: fill MBAP (offsets 0–5) and return.
    Else: drop the 6-byte MBAP prefix, append CRC-16 little-endian, return the RTU frame.
 
@@ -86,9 +91,14 @@ A single routine builds every outgoing frame regardless of transport:
 
 ## Parser notes (`src/util.js`)
 
-- `parse_address` returns `{ type, fm_read, fs_write, fm_write, address, length }` (fields absent
-  for tables that lack that operation) or `null` for a non-string, a string that does not match,
-  an unsupported table digit, or a `,0` length.
+- `parse_modicon_range(address_str, zero_based)` returns
+  `{ type, fm_read, fs_write, fm_write, pdu_addr, length }` (fields absent for tables that lack
+  that operation) or `null` for a non-string, a string that does not match, an unsupported table
+  digit, a point out of range, or a `,0` length. It is built from three steps: `split_modicon`
+  (the regular expression; the 5- and 6-digit forms differ only in the point's digit count),
+  the `MB_prefix_dict` lookup of the table digit, and `point_to_pdu_addr` (applies the numbering
+  base; a PDU address outside `0..65535` rejects the point, which yields the ranges of
+  `spec-protocol.md` for both forms and both bases).
 - `read()` / `write()` validate their arguments before building a frame and throw synchronously:
   `unit_id` must be an integer in `0..255`, the length must be within `MAX_QUANTITY` (exported
   from `src/util.js`) for the function code, and an FC 6 value must be an integer in `0..65535`.
@@ -202,31 +212,9 @@ path as well, not only RTU.
   a FC 15/16 request whose `byte_count` is smaller than `quantity` requires reads past the data.
   Both throw inside the socket `data` handler. The spec defines no server-side limits or
   exception codes for this (see Open questions).
-- **Gap 15 — Dead branch in `make_data_packet`.** `address === 0 ? 0xffff` is unreachable
-  because `parse_address` rejects address `0`. Remove it once 0-based numbering is handled
-  properly (gap 17).
-- **Gap 16 — 6-digit Modicon addresses are not supported.** `parse_address` only matches
-  `^(\d{5})(,(\d{1,4}))?$`, so `"400001"` is rejected. The spec requires both the 5-digit form
-  (point `1..9999` when 1-based, `0..9999` when 0-based) and the 6-digit form (`1..65536` /
-  `0..65535`), told apart by digit count. The current `1..65535` range check on the 5-digit form
-  is meaningless (the field maxes out at 9999).
-- **Gap 17 — 0-based Modicon numbering is only half implemented.** The mechanism is the client
-  constructor option `options.modicon_zero_based` (default `false`; `true` selects 0-based
-  Modicon numbering and makes the PDU address equal to the point number). The code still calls
-  it `zero_based`; rename it. The mechanism is the right place, but:
-  - `parse_address` rejects point `0` and ignores the base, so in 0-based mode the first point
-    (`"40000"`, `"400000"`) cannot be addressed and the ranges in gap 16 are not honored.
-  - The option's meaning must be narrowed to Modicon strings: it must not affect structured PDU
-    addresses, which are always 0-based and never converted.
-- **Gap 18 — `parse_address(address_str)` is poorly structured.** Beyond gap 16:
-  - It returns `null` for a non-string, so the array and object forms fail with
-    `Invalid address format`; the type-based split described in "Client address argument" has
-    yet to be built (gap 19).
-  - It mixes three jobs: parsing the string, validating the point range, and mapping the table
-    digit to function codes.
 - **Gap 19 — `read()` / `write()` accept only Modicon strings.** The array form
   `[func_code, pdu_addr, length]` and the object form `{ func_code, pdu_addr, length }` (see
-  "Client address argument") are not implemented, nor is the validation of their fields
+  "Client range argument") are not implemented, nor is the validation of their fields
   (`func_code` a `number` from `1, 2, 3, 4, 5, 6, 15, 16`, `pdu_addr` an integer `0..65535`,
   `length` an integer `>= 1` and exactly `1` for FC 5 and 6). The argument validation for
   Modicon strings (unit ID, quantity limits, write values) is in place.

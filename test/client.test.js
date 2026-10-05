@@ -66,6 +66,16 @@ describe('Modbus_Client construction', () => {
         assert.equal(client.delay, 20);
         assert.equal(client.is_connected, false);
         assert.equal(client.send_queue_size, 256);
+        assert.equal(client.modicon_zero_based, false);
+    });
+
+    test('the Modicon numbering base cannot change after construction', () => {
+        const client = new Modbus_Client(HOST, { reconnect_time: 0, modicon_zero_based: true });
+        assert.equal(client.modicon_zero_based, true);
+        assert.throws(() => {
+            client.modicon_zero_based = false;
+        }, TypeError);
+        assert.equal(client.modicon_zero_based, true);
     });
 
     test('reconnect_time defaults to 10000 and connects at construction', async () => {
@@ -99,10 +109,10 @@ describe('Modbus_Client argument validation', () => {
         client = new Modbus_Client(HOST, { reconnect_time: 0 });
     });
 
-    test('rejects invalid address strings synchronously', () => {
-        for (const address of ['20001', '4001', '40001,0', '40000', 'abc', '', 40001, null, undefined]) {
-            assert.throws(() => client.read(address), /Invalid address format/, String(address));
-            assert.throws(() => client.write(address, 1), /Invalid address format/, String(address));
+    test('rejects invalid range strings synchronously', () => {
+        for (const range of ['20001', '4001', '40001,0', '40000', 'abc', '', 40001, null, undefined]) {
+            assert.throws(() => client.read(range), /Invalid range format/, String(range));
+            assert.throws(() => client.write(range, 1), /Invalid range format/, String(range));
         }
     });
 
@@ -152,15 +162,16 @@ describe('Modbus_Client argument validation', () => {
         assert.throws(() => client.write('40001', Buffer.alloc(3)), /Invalid buffer length for register write/);
     });
 
-    test('rejects structured addresses with invalid fields', { todo: 'design.md gap 19' }, () => {
+    test('rejects structured ranges with invalid fields', { todo: 'design.md gap 19' }, () => {
         const invalid = [
             ['3', 0, 1], [3, '0', 1], [3, 0, '1'], [true, 0, 1], [3n, 0, 1],
             [7, 0, 1], [0, 0, 1], [3, -1, 1], [3, 65536, 1], [3, 1.5, 1],
             [3, 0, 0], [3, 0, 126], [1, 0, 2001], [3, 0, 1.5],
             { func_code: 3, pdu_addr: 0 }, { func_code: 3, length: 1 },
         ];
-        for (const address of invalid) {
-            assert.throws(() => client.read(address), /Invalid address format/, JSON.stringify(address, (k, v) => typeof v === 'bigint' ? `${v}n` : v));
+        for (const range of invalid) {
+            assert.throws(() => client.read(range), /Invalid range format/,
+                JSON.stringify(range, (k, v) => typeof v === 'bigint' ? `${v}n` : v));
         }
     });
 
@@ -226,7 +237,7 @@ describe('Modbus_Client TCP framing', () => {
         assert.equal(new Set(tids).size, 3);
     });
 
-    test('6-digit Modicon addresses', { todo: 'design.md gap 16' }, async () => {
+    test('6-digit Modicon addresses', async () => {
         await client.read('400001,2');
         await client.read('465536');
         await client.read('100001');
@@ -238,7 +249,7 @@ describe('Modbus_Client TCP framing', () => {
         ]);
     });
 
-    test('structured addresses are sent unchanged', { todo: 'design.md gap 19' }, async () => {
+    test('structured ranges are sent unchanged', { todo: 'design.md gap 19' }, async () => {
         await client.read([3, 256, 2]);
         await client.read({ func_code: 4, pdu_addr: 0, length: 1 });
         await client.read([1, 65535, 1]);
@@ -276,7 +287,7 @@ describe('Modbus_Client Modicon numbering base', () => {
         assert.deepEqual(frames.map((f) => f.readUInt16BE(8)), [0, 9998]);
     });
 
-    test('modicon_zero_based: true makes the PDU address equal to the point', { todo: 'design.md gap 17' }, async () => {
+    test('modicon_zero_based: true makes the PDU address equal to the point', async () => {
         const client = await connect_client(fake.port, { modicon_zero_based: true });
         fake.frames.length = 0;
         try {
@@ -291,7 +302,7 @@ describe('Modbus_Client Modicon numbering base', () => {
         assert.deepEqual(frames.map((f) => f.readUInt16BE(8)), [0, 1, 9999, 65535]);
     });
 
-    test('the numbering base never applies to structured addresses', { todo: 'design.md gaps 17 and 19' }, async () => {
+    test('the numbering base never applies to structured addresses', { todo: 'design.md gap 19' }, async () => {
         const client = await connect_client(fake.port, { modicon_zero_based: false });
         fake.frames.length = 0;
         try {

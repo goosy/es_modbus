@@ -73,20 +73,52 @@ const MB_prefix_dict = {
     },
 };
 
-export function parse_address(address_str) {
-    if (typeof address_str !== 'string') return null;
-    const match = address_str.match(/^(\d{5})(,(\d{1,4}))?$/);
+/**
+ * Splits a Modicon string into its table digit, point number and optional length.
+ * Returns null when the string does not match the notation.
+ */
+function split_modicon(range_str) {
+    const match = range_str.match(/^(\d)(\d{4,5})(?:,(\d{1,4}))?$/);
     if (!match) return null;
+    return {
+        prefix: match[1],
+        point: Number.parseInt(match[2], 10),
+        length: match[3] === undefined ? undefined : Number.parseInt(match[3], 10),
+    };
+}
 
-    const MB_object = MB_prefix_dict[match[1].substring(0, 1)];
-    if (!MB_object) return null;
+/**
+ * Converts a Modicon point number to a PDU address, or null when it is out of range.
+ * The digit count bounds the point (9999 or 99999); the PDU address must fit 0..65535.
+ */
+function point_to_pdu_addr(point, zero_based) {
+    const pdu_addr = zero_based ? point : point - 1;
+    if (pdu_addr < 0 || pdu_addr > 0xFFFF) return null;
+    return pdu_addr;
+}
 
-    const address = Number.parseInt(match[1].substring(1), 10);
-    if (address <= 0 || address > 65535) return null;
+/**
+ * Parses a Modicon address string (5- or 6-digit, optional ",N" length) into a range.
+ *
+ * @param {string} range_str - the Modicon string, such as "40001,73" or "400001".
+ * @param {boolean} [zero_based=false] - true for 0-based point numbering.
+ * @returns {Object|null} the range `{ type, fm_read, fs_write, fm_write, pdu_addr, length }`
+ *   (the function-code fields are absent for tables that lack that operation), or null when
+ *   the string is not a valid address.
+ */
+export function parse_modicon_range(range_str, zero_based = false) {
+    if (typeof range_str !== 'string') return null;
+    const parts = split_modicon(range_str);
+    if (!parts) return null;
 
-    const length = match[3] ? Number.parseInt(match[3], 10) : undefined;
-    if (length === 0) return null;
-    return { ...MB_object, address, length };
+    const table = MB_prefix_dict[parts.prefix];
+    if (!table) return null;
+
+    const pdu_addr = point_to_pdu_addr(parts.point, zero_based);
+    if (pdu_addr === null) return null;
+
+    if (parts.length === 0) return null;
+    return { ...table, pdu_addr, length: parts.length };
 }
 
 /**

@@ -29,7 +29,7 @@
 | 文件                  | 覆盖内容                                                                  |
 | --------------------- | ------------------------------------------------------------------------- |
 | `test/helpers.js`     | 共享夹具：内存 `vector`、RTU / MBAP 帧构造、伪 TCP 从站、原始 TCP 对端、服务端与客户端的搭建。不是测试文件。 |
-| `test/util.test.js`   | 常量、`modbus_crc16`、`parse_address`、RTU 与 TCP 的请求 / 响应解析器。   |
+| `test/util.test.js`   | 常量、`modbus_crc16`、`parse_modicon_range`、RTU 与 TCP 的请求 / 响应解析器。   |
 | `test/client.test.js` | `Modbus_Client` 对接伪 TCP 从站：构造、参数校验、线路上的帧、事务匹配、超时、发送节流、队列溢出、事件、连接与重连、RTU-over-TCP 帧格式。 |
 | `test/server.test.js` | `Modbus_Server`：构造、单元 ID、TCP 与 RTU 帧格式下的每个功能码（通过伪套接字 / 伪串口）、异常、事件，以及真实套接字上的 TCP 生命周期。 |
 | `test/tcp.test.js`    | 端到端：`Modbus_Client` 与 `Modbus_Server` 在回环地址上通过 Modbus TCP 互测。 |

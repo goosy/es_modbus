@@ -2,7 +2,7 @@ import { describe, test } from 'node:test';
 import assert from 'node:assert/strict';
 import {
     TRANSACTION_START, DO_NOTHING, MAX_QUANTITY,
-    modbus_crc16, parse_address,
+    modbus_crc16, parse_modicon_range,
     parse_rtu_request, parse_rtu_response,
     parse_tcp_request, parse_tcp_response,
 } from '../src/util.js';
@@ -54,50 +54,80 @@ describe('modbus_crc16', () => {
     });
 });
 
-describe('parse_address', () => {
+describe('parse_modicon_range', () => {
     test('holding registers ("4")', () => {
-        assert.deepEqual(parse_address('40001'), {
+        assert.deepEqual(parse_modicon_range('40001'), {
             type: 'holding_registers', fm_read: 3, fs_write: 6, fm_write: 16,
-            address: 1, length: undefined,
+            pdu_addr: 0, length: undefined,
         });
     });
 
     test('length suffix', () => {
-        assert.equal(parse_address('40001,73').length, 73);
-        assert.equal(parse_address('40001,1').length, 1);
-        assert.equal(parse_address('40001,9999').length, 9999);
+        assert.equal(parse_modicon_range('40001,73').length, 73);
+        assert.equal(parse_modicon_range('40001,1').length, 1);
+        assert.equal(parse_modicon_range('40001,9999').length, 9999);
     });
 
     test('coils ("0")', () => {
-        assert.deepEqual(parse_address('00001,16'), {
+        assert.deepEqual(parse_modicon_range('00001,16'), {
             type: 'coils', fm_read: 1, fs_write: 5, fm_write: 15,
-            address: 1, length: 16,
+            pdu_addr: 0, length: 16,
         });
     });
 
     test('discrete inputs ("1") are read-only', () => {
-        assert.deepEqual(parse_address('10002'), {
-            type: 'discrete_inputs', fm_read: 2, address: 2, length: undefined,
+        assert.deepEqual(parse_modicon_range('10002'), {
+            type: 'discrete_inputs', fm_read: 2, pdu_addr: 1, length: undefined,
         });
     });
 
     test('input registers ("3") are read-only', () => {
-        assert.deepEqual(parse_address('39999,2'), {
-            type: 'input_registers', fm_read: 4, address: 9999, length: 2,
+        assert.deepEqual(parse_modicon_range('39999,2'), {
+            type: 'input_registers', fm_read: 4, pdu_addr: 9998, length: 2,
         });
+    });
+
+    test('the 6-digit form names the same table', () => {
+        assert.deepEqual(parse_modicon_range('400001,73'), parse_modicon_range('40001,73'));
+        assert.equal(parse_modicon_range('465536').pdu_addr, 65535);
+        assert.equal(parse_modicon_range('100001').fm_read, 2);
+        assert.equal(parse_modicon_range('010000').pdu_addr, 9999);
+    });
+
+    test('1-based by default: the PDU address is point - 1', () => {
+        assert.equal(parse_modicon_range('40001').pdu_addr, 0);
+        assert.equal(parse_modicon_range('49999').pdu_addr, 9998);
+        assert.equal(parse_modicon_range('400001').pdu_addr, 0);
+        assert.equal(parse_modicon_range('465536').pdu_addr, 65535);
+    });
+
+    test('0-based: the PDU address is the point', () => {
+        assert.equal(parse_modicon_range('40000', true).pdu_addr, 0);
+        assert.equal(parse_modicon_range('49999', true).pdu_addr, 9999);
+        assert.equal(parse_modicon_range('400000', true).pdu_addr, 0);
+        assert.equal(parse_modicon_range('465535', true).pdu_addr, 65535);
     });
 
     test('rejects invalid input', () => {
         const invalid = [
             '20001', '50001', '90001',  // unsupported table digit
+            '200001', '500001',
             '4001', '4000001',          // wrong digit count
             '40001,', '40001,12345', '40001,-1', '40001,0',
             ' 40001', '40001 ', '4000a', '',
-            '40000',                    // point 0 is invalid in 1-based numbering
+            '40000', '400000',          // point 0 is invalid in 1-based numbering
+            '465537', '499999',         // above 65536 in 1-based numbering
             40001, null, undefined, ['40001'], { address: '40001' },
         ];
         for (const value of invalid) {
-            assert.equal(parse_address(value), null, `${JSON.stringify(value)} should be rejected`);
+            assert.equal(parse_modicon_range(value), null,
+                `${JSON.stringify(value)} should be rejected`);
+        }
+    });
+
+    test('rejects points out of range in 0-based numbering', () => {
+        for (const value of ['465536', '499999']) {
+            assert.equal(parse_modicon_range(value, true), null, value);
         }
     });
 });

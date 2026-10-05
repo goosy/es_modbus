@@ -28,7 +28,7 @@ missing or older than any file in `src/`.
 | File                  | Covers                                                                    |
 | --------------------- | ------------------------------------------------------------------------- |
 | `test/helpers.js`     | Shared fixtures: in-memory `vector`, RTU / MBAP frame builders, fake TCP slave, raw TCP peer, server and client set-up. Not a test file. |
-| `test/util.test.js`   | Constants, `modbus_crc16`, `parse_address`, the RTU and TCP request / response parsers. |
+| `test/util.test.js`   | Constants, `modbus_crc16`, `parse_modicon_range`, the RTU and TCP request / response parsers. |
 | `test/client.test.js` | `Modbus_Client` against a fake TCP slave: construction, argument validation, frames on the wire, transaction matching, timeouts, pacing, queue overflow, events, connection and reconnect, RTU-over-TCP framing. |
 | `test/server.test.js` | `Modbus_Server`: construction, unit IDs, every function code with TCP and RTU framing (through a fake socket / fake serial port), exceptions, events, and the TCP lifecycle on a real socket. |
 | `test/tcp.test.js`    | End to end: `Modbus_Client` against `Modbus_Server` over Modbus TCP on loopback. |

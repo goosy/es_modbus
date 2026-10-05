@@ -7,7 +7,7 @@
 
 子文档：
 
-- [spec-protocol.zh-cn.md](./spec-protocol.zh-cn.md) — Modbus 帧格式、地址表示法、功能码、CRC。
+- [spec-protocol.zh-cn.md](./spec-protocol.zh-cn.md) — Modbus 帧格式、区间表示法、功能码、CRC。
 - [spec-client.zh-cn.md](./spec-client.zh-cn.md) — `Modbus_Client` 的 API、选项、事件、行为约定。
 - [spec-server.zh-cn.md](./spec-server.zh-cn.md) — `Modbus_Server` 的 API、`vector` 处理接口、事件。
 - [spec-test.zh-cn.md](./spec-test.zh-cn.md) — 自动化测试套件：覆盖范围、命令、串口测试环境、
@@ -21,9 +21,9 @@
 - `Modbus_Client` — 主站/客户端，发出读写请求，并以 Promise 返回结果。
 - `Modbus_Server` — 从站/服务端，接收请求，并通过用户提供的数据访问回调（即 `vector`）作答。
 
-客户端以 `string` 形式使用 Modicon 地址表示法（5 位或 6 位，例如 `"40001,73"`、`"400001,73"`），
-或接受结构化的 PDU 地址（功能码、PDU 地址和长度，全部为 `number`）。由类型决定，二者绝不混用。
-服务端只使用 PDU 地址。
+客户端读写的是*区间*（range）：一个起始地址加一个长度。区间可以用 Modicon 表示法以 `string` 给出
+（5 位或 6 位，例如 `"40001,73"`、`"400001,73"`），也可以是结构化的 PDU 区间（功能码、PDU 地址和
+长度，全部为 `number`）。由类型决定，二者绝不混用。服务端只使用 PDU 地址。
 
 ## 范围
 
@@ -64,7 +64,7 @@
 | `src/index.js`        | 公共接口：`export { Modbus_Client, Modbus_Server }`。            |
 | `src/ModbusClient.js` | 客户端类。                                                       |
 | `src/ModbusServer.js` | 服务端类。                                                       |
-| `src/util.js`         | 纯协议编解码（帧解析、CRC、地址解析）。无 I/O。                  |
+| `src/util.js`         | 纯协议编解码（帧解析、CRC、区间解析）。无 I/O。                  |
 | `rolldown.config.js`  | 将 `src/index.js` 打包为 `modbus.js`（ESM）。                    |
 | `modbus.js`           | 构建产物，也是包 `exports` 的入口。已被 git 忽略；由 `pnpm build` / `prepare` 生成。 |
 | `test/*.test.js`      | 自动化测试（见 `spec-test.zh-cn.md`）。                          |
@@ -81,5 +81,5 @@
 
 - 源码仅使用 ESM；标识符使用 `snake_case`，外部接口另有规定的除外（见 `AGENTS.md`）。
 - 解析时会校验所支持的功能码和 PDU 长度；格式错误的帧会被丢弃，而不是抛出异常。
-- 地址在公共 API 中有两种形式，按 JavaScript 类型区分，定义见 `spec-protocol.zh-cn.md`：
-  `string` 是 Modicon 表示法（5 位或 6 位），数组或对象是结构化的 PDU 地址。
+- 区间在公共 API 中有两种形式，按 JavaScript 类型区分，定义见 `spec-protocol.zh-cn.md`：
+  `string` 是 Modicon 表示法（5 位或 6 位），数组或对象是结构化的 PDU 区间。

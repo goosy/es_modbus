@@ -15,12 +15,17 @@
 - **服务端。** 构造函数对 `number` 端口或 `SerialPort` 实例原样保存，对 `string` 端口则包装成新的
   `SerialPort`。`is_tcp` 是一个 getter：`typeof this.port === 'number'`。
 
-## 客户端地址参数（`read` / `write`）
+## 客户端区间参数（`read` / `write`）
 
-`address` 接受的形式（Modicon 字符串，或结构化的数组 / 对象）及其字段规则定义在
+**地址与区间。** `read()` / `write()` 接受一个*区间*（range，见 `spec-protocol.zh-cn.md` 的“区间
+表示法”）：一个起始地址加一个长度，功能码（或该表的各功能码）作为区间的属性。*地址*（address）
+指单个点：Modicon 地址（`"40001"`）或 PDU 地址（`pdu_addr`，即线路上的数字）。解析器把各种形式的
+区间都转换成同一种内部区间对象；`parse_modicon_range` 处理 Modicon 形式。
+
+`range` 接受的形式（Modicon 字符串，或结构化的数组 / 对象）及其字段规则定义在
 `spec-protocol.zh-cn.md` 中；客户端侧的校验见 `spec-client.zh-cn.md`。实现方式如下：
 
-- **先按类型分流。** `read()` / `write()` 在做任何事之前先看 `address` 的类型：`string` 交给
+- **先按类型分流。** `read()` / `write()` 在做任何事之前先看 `range` 的类型：`string` 交给
   Modicon 解析器，数组或对象交给结构化地址校验器。
 - **编号起点。** 构造函数选项 `modicon_zero_based`（默认 `false`，即 1 起始）只影响 Modicon
   解析器。结构化的 `pdu_addr` 原样使用。
@@ -39,9 +44,8 @@
    - FC 5：`0xFF00` / `0x0000` 位于偏移 10。
    - FC 6：16 位值位于偏移 10。
    - FC 15/16：数量位于 10，字节数位于 12，数据从 13 开始。
-3. 在此处应用 Modicon→PDU 的转换：PDU 地址默认为 `point - 1`；当客户端以
-   `options.modicon_zero_based = true` 构造时为 `point`。`number` 形式的 PDU 地址应原样使用（不做转换）。
-   代码目前还保留一个 `0 → 0xFFFF` 的情形，应删除（见缺陷 15 和 17）。
+3. 起始地址即 PDU 地址，原样写入。Modicon→PDU 的转换（默认 `point - 1`；当客户端以
+   `options.modicon_zero_based = true` 构造时为 `point`）已由 Modicon 解析器完成。
 4. 若 `protocol === 'tcp'`：填充 MBAP（偏移 0–5）并返回。
    否则：去掉 6 字节的 MBAP 前缀，追加小端 CRC-16，返回 RTU 帧。
 
@@ -81,8 +85,12 @@
 
 ## 解析器说明（`src/util.js`）
 
-- `parse_address` 返回 `{ type, fm_read, fs_write, fm_write, address, length }`（对于缺少相应
-  操作的表，对应字段不存在）；对非字符串、不匹配的字符串、不支持的表数字或 `,0` 长度，返回 `null`。
+- `parse_modicon_range(address_str, zero_based)` 返回
+  `{ type, fm_read, fs_write, fm_write, pdu_addr, length }`（对于缺少相应操作的表，对应字段不存在）；
+  对非字符串、不匹配的字符串、不支持的表数字、超范围的点号或 `,0` 长度，返回 `null`。它由三步组成：
+  `split_modicon`（正则表达式；5 位与 6 位形式只在点号的位数上不同）、用 `MB_prefix_dict` 查找表的
+  数字，以及 `point_to_pdu_addr`（应用编号起点；PDU 地址超出 `0..65535` 即拒绝该点号，这对两种形式、
+  两种起点都恰好得出 `spec-protocol.zh-cn.md` 中的范围）。
 - `read()` / `write()` 在构造帧之前校验参数并同步抛出异常：`unit_id` 必须是 `0..255` 范围内的
   整数，长度必须在该功能码的 `MAX_QUANTITY`（由 `src/util.js` 导出）之内，FC 6 的值必须是
   `0..65535` 范围内的整数。
@@ -181,25 +189,8 @@ RTU / 串口的缺陷列在上一节，不在此处。缺陷修复后即从本�
   抛出 `RangeError`（寄存器超过 127 个、线圈超过 2040 个）；`byte_count` 小于 `quantity` 的
   FC 15/16 请求会读到数据之外。两者都在套接字 `data` 处理器内抛出。spec 对此没有定义服务端的上限
   或异常码（见“待决问题”）。
-- **缺陷 15 — `make_data_packet` 中的死分支。** `address === 0 ? 0xffff` 不可达，因为
-  `parse_address` 会拒绝地址 `0`。待 0 起始编号被正确处理后应删除它（见缺陷 17）。
-- **缺陷 16 — 不支持 6 位 Modicon 地址。** `parse_address` 只匹配 `^(\d{5})(,(\d{1,4}))?$`，
-  因此 `"400001"` 会被拒绝。spec 要求同时支持 5 位形式（1 起始时点号 `1..9999`，0 起始时
-  `0..9999`）和 6 位形式（`1..65536` / `0..65535`），以位数区分。目前对 5 位形式的 `1..65535`
-  范围检查没有意义（该字段最大只有 9999）。
-- **缺陷 17 — 0 起始 Modicon 编号只实现了一半。** 机制是客户端构造函数选项
-  `options.modicon_zero_based`（默认 `false`；`true` 选择 0 起始的 Modicon 编号，此时 PDU 地址
-  等于点号）。代码里目前仍叫 `zero_based`，需要改名。机制的位置是对的，但：
-  - `parse_address` 拒绝点号 `0` 且不考虑起点，因此 0 起始模式下第一个点（`"40000"`、
-    `"400000"`）无法寻址，缺陷 16 中的范围也没有被遵守。
-  - 该选项的含义必须收窄为只作用于 Modicon 字符串：不得影响结构化 PDU 地址，后者永远是 0 起始
-    且从不转换。
-- **缺陷 18 — `parse_address(address_str)` 结构不好。** 除缺陷 16 之外：
-  - 它对非字符串返回 `null`，因此数组和对象形式会以 `Invalid address format` 失败；“客户端地址
-    参数”中描述的按类型分流尚未实现（缺陷 19）。
-  - 它把三件事混在一起：解析字符串、校验点号范围、把表的数字映射成功能码。
 - **缺陷 19 — `read()` / `write()` 只接受 Modicon 字符串。** 数组形式
-  `[func_code, pdu_addr, length]` 和对象形式 `{ func_code, pdu_addr, length }`（见“客户端地址
+  `[func_code, pdu_addr, length]` 和对象形式 `{ func_code, pdu_addr, length }`（见“客户端区间
   参数”）都没有实现，其字段的校验也没有实现（`func_code` 为 `1, 2, 3, 4, 5, 6, 15, 16` 之一的
   `number`，`pdu_addr` 为 `0..65535` 的整数，`length` 为 `>= 1` 的整数，且 FC 5 和 6 时恰为 `1`）。
   针对 Modicon 字符串的参数校验（单元 ID、数量上限、写入值）已经就位。

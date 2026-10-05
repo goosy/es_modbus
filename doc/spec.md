@@ -6,7 +6,7 @@ provides and **why**; implementation mechanics, implementation status, and TODOs
 
 Sub-documents:
 
-- [spec-protocol.md](./spec-protocol.md) — Modbus framing, address notation, function codes, CRC.
+- [spec-protocol.md](./spec-protocol.md) — Modbus framing, range notation, function codes, CRC.
 - [spec-client.md](./spec-client.md) — `Modbus_Client` API, options, events, behavior contract.
 - [spec-server.md](./spec-server.md) — `Modbus_Server` API, the `vector` handler interface, events.
 - [spec-test.md](./spec-test.md) — the automated test suite: coverage, commands, serial test
@@ -24,9 +24,10 @@ Modbus conversation from one package:
 - `Modbus_Server` — a slave/server that accepts requests and answers them through user-supplied
   data-access callbacks (the `vector`).
 
-The client speaks Modicon address notation, 5- or 6-digit (e.g. `"40001,73"`, `"400001,73"`), as
-a `string`, or takes a structured PDU address (function code, PDU address and length, all
-`number`s). The type decides, so the two never mix. The server works in PDU addresses only.
+The client reads and writes a *range*: a start address and a length. A range is given in Modicon
+notation, 5- or 6-digit (e.g. `"40001,73"`, `"400001,73"`), as a `string`, or as a structured PDU
+range (function code, PDU address and length, all `number`s). The type decides, so the two never
+mix. The server works in PDU addresses only.
 
 ## Scope
 
@@ -70,7 +71,7 @@ a `string`, or takes a structured PDU address (function code, PDU address and le
 | `src/index.js`        | Public surface: `export { Modbus_Client, Modbus_Server }`.      |
 | `src/ModbusClient.js` | Client class.                                                   |
 | `src/ModbusServer.js` | Server class.                                                   |
-| `src/util.js`         | Pure protocol codec (frame parsing, CRC, address parsing). No I/O. |
+| `src/util.js`         | Pure protocol codec (frame parsing, CRC, range parsing). No I/O. |
 | `rolldown.config.js`  | Bundles `src/index.js` → `modbus.js` (ESM).                     |
 | `modbus.js`           | Build output and the package `exports` entry. Git-ignored; produced by `pnpm build` / `prepare`. |
 | `test/*.test.js`      | Automated tests (see `spec-test.md`).                           |
@@ -89,6 +90,6 @@ Commands:
   otherwise (see `AGENTS.md`).
 - Supported function codes and PDU lengths are validated when parsing; malformed frames are
   dropped rather than raising an exception.
-- Addresses cross the public API in one of two forms chosen by JavaScript type, as defined in
+- Ranges cross the public API in one of two forms chosen by JavaScript type, as defined in
   `spec-protocol.md`: a `string` is Modicon notation (5- or 6-digit), an array or object is a
-  structured PDU address.
+  structured PDU range.

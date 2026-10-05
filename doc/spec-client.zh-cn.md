@@ -25,30 +25,31 @@ const client = new Modbus_Client(address, options);
 | `timeout`        | `1000`  | 单事务响应超时，毫秒。到期时请求被拒绝，并发出 `timeout` 事件。         |
 | `delay`          | `20`    | 连续两次帧写入之间的最小间隔，毫秒（发送节流）。                        |
 | `reconnect_time` | `10000` | TCP 和 RTU-over-TCP 的重连延迟，毫秒。`> 0` 同时使构造函数立即连接；`0` 禁用自动重连。 |
+| `modicon_zero_based` | `false` | `true` 选择 0 起始的 Modicon 点号编号（见下文）。 |
 
 当 `reconnect_time > 0` 时，构造函数会自动打开连接。`reconnect_time = 0` 时，连接丢失后客户端不会
 自行重连，但仍会按需连接：第一个请求（或 `connect()`）会打开连接。
 
-Modicon 地址的编号起点同样在构造时选择：默认 1 起始，也可按需选择 0 起始（见
+Modicon 地址的编号起点同样在构造时选择：默认 1 起始，以 `modicon_zero_based: true` 选择 0 起始（见
 `spec-protocol.zh-cn.md` 的“编号起点”）。它只作用于 Modicon 字符串，绝不作用于结构化的 PDU
-地址，且此后不能更改。
+区间，且此后不能更改：`modicon_zero_based` 属性是只读的。
 
 ## 方法
 
-在 `read` 和 `write` 中，`address` 要么是 Modicon 字符串，要么是结构化 PDU 地址（数组
+在 `read` 和 `write` 中，`range` 要么是 Modicon 字符串，要么是结构化 PDU 区间（数组
 `[func_code, pdu_addr, length]` 或对象 `{ func_code, pdu_addr, length }`），二者都定义在
 `spec-protocol.zh-cn.md` 中。`unit_id` 是 `0..255` 范围内的整数。
 
 当参数无效时，两个方法都会同步抛出异常，而不是返回被拒绝的 promise：
 
-- `address` 不是有效地址（`Error('Invalid address format')`）；
+- `range` 不是有效区间（`Error('Invalid range format')`）；
 - `unit_id` 不是 `0..255` 范围内的整数；
 - 长度超过其功能码的数量上限（见 `spec-protocol.zh-cn.md`），或小于 `1`；
 - 功能码不属于该方法。
 
-### `read(address, unit_id = 1) → Promise<Buffer>`
+### `read(range, unit_id = 1) → Promise<Buffer>`
 
-功能码和长度来自地址：
+功能码和长度来自区间：
 
 - **Modicon 字符串** — 首位数字选出的表给出读功能码（1–4）；长度是 `,N` 后缀，默认 1。
 - **结构化** — `func_code` 必须是 `1, 2, 3, 4` 之一；`length` 就是长度。
@@ -61,12 +62,12 @@ Modicon 地址的编号起点同样在构造时选择：默认 1 起始，也可
 - 请求待决期间连接丢失，或请求在重连退避期间发出：消息为 `connection lost` 的 `Error`（见
   “连接丢失”）。
 
-### `write(address, value, unit_id = 1) → Promise<Buffer>`
+### `write(range, value, unit_id = 1) → Promise<Buffer>`
 
-对 Modicon 字符串，功能码由所属的表和 `value` 的形态决定；对结构化地址，由 `func_code` 指定，
+对 Modicon 字符串，功能码由所属的表和 `value` 的形态决定；对结构化区间，由 `func_code` 指定，
 且必须是 `5, 6, 15, 16` 之一。
 
-| 地址所属表 / FC    | `value`                              | 功能码        | 说明 |
+| 所属表 / FC        | `value`                              | 功能码        | 说明 |
 | ------------------ | ------------------------------------ | ------------- | ---- |
 | 线圈（`0…`）/ 5    | `boolean`                            | 5（单个）     | 非布尔值抛出 `Invalid value for coil write`。 |
 | 线圈（`0…`）/ 15   | 长度为 `ceil(length / 8)` 字节的 `Buffer` | 15（多个）  | 长度错误抛出 `Invalid buffer length for coil write`。 |
@@ -75,9 +76,9 @@ Modicon 地址的编号起点同样在构造时选择：默认 1 起始，也可
 
 `Buffer` 携带大端的寄存器字和 LSB 优先打包的线圈位。
 
-`length` 是 `,N` 后缀（默认 1），或结构化地址的 `length`。对于没有 `,N` 后缀的寄存器 `Buffer`，
+`length` 是 `,N` 后缀（默认 1），或结构化区间的 `length`。对于没有 `,N` 后缀的寄存器 `Buffer`，
 `length` 为 `value.length / 2`；线圈 `Buffer` 始终需要 `,N`，因为无法由字节数推出位数。写入只读表
-（离散输入 `1…`、输入寄存器 `3…`）会抛出 `Write operation not supported for this address type`。
+（离散输入 `1…`、输入寄存器 `3…`）会抛出 `Write operation not supported for this table`。
 兑现/拒绝的方式与 `read` 相同。
 
 ### `connect() → Promise<void>`
