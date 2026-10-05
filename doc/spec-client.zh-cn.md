@@ -64,7 +64,7 @@ Modicon 地址的编号起点同样在构造时选择：默认 1 起始，以 `m
 - 请求待决期间连接丢失，或请求在重连退避期间发出：消息为 `connection lost` 的 `Error`（见
   “连接丢失”）。
 
-### `write(range, value, unit_id = 1) → Promise<Buffer>`
+### `write(range, value, unit_id = 1) → Promise<boolean>`
 
 对 Modicon 字符串，功能码由所属的表和 `value` 的形态决定；对结构化区间，由 `func_code` 指定，
 且必须是 `5, 6, 15, 16` 之一。
@@ -81,7 +81,9 @@ Modicon 地址的编号起点同样在构造时选择：默认 1 起始，以 `m
 `length` 是 `,N` 后缀（默认 1），或结构化区间的 `length`。对于没有 `,N` 后缀的寄存器 `Buffer`，
 `length` 为 `value.length / 2`；线圈 `Buffer` 始终需要 `,N`，因为无法由字节数推出位数。写入只读表
 （离散输入 `1…`、输入寄存器 `3…`）会抛出 `Write operation not supported for this table`。
-兑现/拒绝的方式与 `read` 相同。
+以写入是否得到确认兑现：Modbus 写响应会回显其请求（功能码、单元 ID 和地址，以及 FC 5/6 的值或
+FC 15/16 的数量）。回显与请求一致时为 `true`，不一致时为 `false`。拒绝的情形与 `read` 相同（超时、
+异常响应、连接丢失）。
 
 ### `connect() → Promise<void>`
 
@@ -101,7 +103,7 @@ Modicon 地址的编号起点同样在构造时选择：默认 1 起始，以 `m
 | `timeout`    | —                   | 某个事务的 `timeout` 到期仍无响应。                     |
 | `send`       | `Buffer`            | 一帧已写入线路（完整帧，含 MBAP/CRC）。                 |
 | `receive`    | `Buffer`            | 从线路解析出一帧（逐帧触发，早于匹配）。                |
-| `data`       | 载荷 `Buffer`       | 某个事务成功兑现。                                      |
+| `data`       | 兑现值              | 某个事务兑现：读为载荷 `Buffer`，写为 `boolean` 结果。 |
 | `data_error` | —                   | 某个事务被拒绝（异常或显式 reject）。                   |
 
 `send` / `receive` 是线路跟踪钩子；`data` / `data_error` 对应 Promise 的结算结果。

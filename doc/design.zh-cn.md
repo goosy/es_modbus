@@ -77,7 +77,11 @@
   `end_transaction` 递减计数，标记 `status`，清除定时器，并把 `resolve`/`reject` 换成
   `DO_NOTHING`，使迟到/重复的响应无效。
 - **匹配（`on_data`）。** 解析 → 发出 `receive` → 跳过 `func_code === 0` → 按 `tid` 查找 →
-  除非 `status === 'pending'` 否则忽略 → 有 `exception_code` 则 `reject`，否则 `resolve(data)`。
+  除非 `status === 'pending'` 否则忽略 → 有 `exception_code` 则 `reject`，否则兑现：读以
+  `response.data` 兑现，写以 `echo_matches()` 的结果兑现。
+- **写回显。** `transact()` 保存 `packet.echo`，即写响应在地址之后必须回显的值（`expected_echo()`：
+  FC 5 为 `0xFF00` / `0x0000`，FC 6 为值，FC 15/16 为数量；读为 `undefined`）。`echo_matches()` 把响应的
+  功能码、单元 ID、起始地址以及回显的值或数量与请求比较；写以比较结果兑现。
 
 ## 发送队列 / 背压（`send` → `sending`）
 
@@ -211,8 +215,6 @@ RTU / 串口的缺陷列在上一节，不在此处。缺陷修复后即从本�
 其余由阅读代码推出。它们同样影响 TCP 路径，而不仅仅是 RTU。
 
 - **缺陷 3 — 没有 lint 配置。** 自动化测试套件已经存在（`spec-test.zh-cn.md`）；lint 配置尚无。
-- **缺陷 10 — `write()` 兑现的类型不对。** spec 写的是 `Promise<Buffer>`，但 promise 以
-  `response.data` 兑现：FC 5/6 为 `number`，FC 15/16 为 `undefined`。
 
 ---
 
@@ -236,8 +238,6 @@ spec 尚未做出的决定。先在 spec 中定下来，再去实现。
   事件噪声。相反的问题是半开连接（拔掉网线、对端消失而没有 FIN）：此时不会触发任何事件，客户端
   只能看到超时。需要决定是否增加 (a) 最小或递增的重连延迟，以及 (b) 死链检测，例如连续 N 次超时
   后关闭套接字，或启用 TCP keep-alive。
-- **`write()` 的返回值。** 需要决定它以 `Buffer`（spec 现状）还是以回显的值（代码现状）兑现；见
-  缺陷 10。
 - **`disconnect()` 与自动重连。** `disconnect()` 结束套接字，随后 `close` 事件会触发重连定时器，
   因此 `reconnect_time > 0` 时，显式 `disconnect()` 之后客户端会自行重连（这是按字面遵循 spec 的
   重连规则）。需要决定显式 `disconnect()` 是否应抑制重连。

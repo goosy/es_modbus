@@ -66,7 +66,7 @@ coil bytes) — the caller decodes them. Rejects with:
 - an `Error` with the message `connection lost`, if the connection is lost while the request is
   pending, or if the request is issued during a reconnect back-off (see "Connection loss").
 
-### `write(range, value, unit_id = 1) → Promise<Buffer>`
+### `write(range, value, unit_id = 1) → Promise<boolean>`
 
 For a Modicon string the function code is chosen from the table and the shape of `value`; for a
 structured range `func_code` names it, and must be one of `5, 6, 15, 16`.
@@ -84,7 +84,10 @@ Buffers carry big-endian register words and LSB-first packed coil bits.
 without a `,N` suffix, `length` is `value.length / 2`; a coil `Buffer` always needs `,N`, because
 a bit count cannot be derived from a byte count. Writing to a read-only table (discrete inputs
 `1…`, input registers `3…`) throws `Write operation not supported for this table`.
-Resolves/rejects like `read`.
+Resolves with whether the write was confirmed: a Modbus write response echoes its request (the
+function code, unit ID and address, plus the value for FC 5/6 or the quantity for FC 15/16).
+`true` when the echo matches the request, `false` when it does not. Rejects like `read` (timeout,
+exception response, connection lost).
 
 ### `connect() → Promise<void>`
 
@@ -105,7 +108,7 @@ Closes the transport.
 | `timeout`    | —                   | A transaction's `timeout` elapsed with no response.    |
 | `send`       | `Buffer`            | A frame was written to the wire (full frame incl. MBAP/CRC). |
 | `receive`    | `Buffer`            | A frame was parsed from the wire (per frame, before matching). |
-| `data`       | payload `Buffer`    | A transaction resolved successfully.                   |
+| `data`       | resolved value      | A transaction resolved: the payload `Buffer` of a read, or the `boolean` result of a write. |
 | `data_error` | —                   | A transaction was rejected (exception or explicit reject). |
 
 `send` / `receive` are the wire-trace hooks; `data` / `data_error` mirror Promise settlement.

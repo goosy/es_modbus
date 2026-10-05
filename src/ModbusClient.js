@@ -85,6 +85,33 @@ function check_write_value(func_code, length, value) {
     }
 }
 
+/**
+ * Returns the value a write response echoes after its address: the coil value (FC 5), the
+ * register value (FC 6) or the quantity (FC 15/16). Returns undefined for a read.
+ */
+function expected_echo(func_code, data, length) {
+    switch (func_code) {
+        case 5: return data ? 0xFF00 : 0x0000;
+        case 6: return data;
+        case 15:
+        case 16: return length;
+    }
+}
+
+/**
+ * Whether a write response echoes its request: function code, unit ID, address and value or
+ * quantity.
+ */
+function echo_matches(packet, response) {
+    const echoed = packet.func_code === 5 || packet.func_code === 6
+        ? response.data
+        : response.quantity;
+    return response.func_code === packet.func_code
+        && response.unit_id === packet.unit_id
+        && response.start_address === packet.address
+        && echoed === packet.echo;
+}
+
 export class Modbus_Client extends EventEmitter {
     // Numbering base of Modicon strings, fixed at construction
     #modicon_zero_based;
@@ -297,6 +324,8 @@ export class Modbus_Client extends EventEmitter {
             func_code,
             address,
             buffer,
+            // The value a write response must echo; undefined for a read
+            echo: expected_echo(func_code, data, length),
             status: 'init',
         };
         this.set_packet(tid, packet);
@@ -324,7 +353,8 @@ export class Modbus_Client extends EventEmitter {
                 continue;
             }
 
-            packet.resolve(response.data);
+            // A read resolves with its data, a write with whether the echo matches the request
+            packet.resolve(packet.echo === undefined ? response.data : echo_matches(packet, response));
         }
     }
 

@@ -88,7 +88,13 @@ A single routine builds every outgoing frame regardless of transport:
   `timeout_id`. `end_transaction` decrements the count, stamps `status`, clears the timer, and
   swaps `resolve`/`reject` for `DO_NOTHING` so a late/duplicate response is inert.
 - **Matching (`on_data`).** Parse → emit `receive` → skip `func_code === 0` → look up by `tid` →
-  ignore unless `status === 'pending'` → `reject` on `exception_code`, else `resolve(data)`.
+  ignore unless `status === 'pending'` → `reject` on `exception_code`, else resolve: a read with
+  `response.data`, a write with `echo_matches()`.
+- **Write echo.** `transact()` stores `packet.echo`, the value a write response must echo after
+  its address (`expected_echo()`: `0xFF00` / `0x0000` for FC 5, the value for FC 6, the quantity
+  for FC 15/16; `undefined` for a read). `echo_matches()` compares the response's function code,
+  unit ID, start address and echoed value or quantity with the request; the write resolves with
+  the result.
 
 ## Send queue / backpressure (`send` → `sending`)
 
@@ -244,8 +250,6 @@ path as well, not only RTU.
 
 - **Gap 3 — No lint config.** The automated test suite exists (`spec-test.md`); a lint
   configuration does not.
-- **Gap 10 — `write()` resolves with the wrong type.** The spec says `Promise<Buffer>`, but the
-  promise resolves with `response.data`: a `number` for FC 5/6 and `undefined` for FC 15/16.
 
 ---
 
@@ -272,8 +276,6 @@ Decisions the spec does not make yet. Settle them in the spec first, then implem
   (cable pulled, peer gone without a FIN), where no event fires and the client only ever sees
   timeouts. Decide whether to add (a) a minimum or growing reconnect delay, and (b) dead-link
   detection, such as closing the socket after N consecutive timeouts or enabling TCP keep-alive.
-- **Return value of `write()`.** Decide whether it resolves with a `Buffer` (spec today) or with
-  the echoed value (code today); see gap 10.
 - **`disconnect()` and auto-reconnect.** `disconnect()` ends the socket, the `close` event then
   triggers the reconnect timer, so with `reconnect_time > 0` the client reconnects by itself after
   an explicit `disconnect()` (this follows the spec's reconnect rule literally). Decide whether an

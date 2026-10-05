@@ -384,18 +384,39 @@ describe('Modbus_Client transactions', () => {
         assert.deepEqual(await client.read('00001,10'), hex('cd01'));
     });
 
-    test('write resolves with a Buffer', { todo: 'design.md gap 10' }, async () => {
-        assert.ok(Buffer.isBuffer(await client.write('40001', 1)));
-        assert.ok(Buffer.isBuffer(await client.write('00001', true)));
-        assert.ok(Buffer.isBuffer(await client.write('40001', hex('00010002'))));
-        assert.ok(Buffer.isBuffer(await client.write('00001,3', hex('07'))));
+    test('write resolves with true when the echo matches the request', async () => {
+        assert.equal(await client.write('40001', 1), true);
+        assert.equal(await client.write('00001', true), true);
+        assert.equal(await client.write('00001', false), true);
+        assert.equal(await client.write('40001', hex('00010002')), true);
+        assert.equal(await client.write('00001,3', hex('07')), true);
+        assert.equal(await client.write([6, 9, 1], 7, 5), true);
     });
 
-    test('write resolves on the echo of every write function', async () => {
+    test('write resolves with false when the echo does not match', async () => {
+        const echo = (body) => (request) => reply_to(request, body);
+        const cases = [
+            ['address', () => client.write('40001', 1), '010600010001'],
+            ['value', () => client.write('40001', 1), '010600000002'],
+            ['coil value', () => client.write('00001', true), '010500000000'],
+            ['quantity', () => client.write('40001', hex('00010002')), '011000000001'],
+            ['coil quantity', () => client.write('00001,3', hex('07')), '010f00000004'],
+            ['function code', () => client.write('40001', hex('0001')), '011000000001'],
+            ['unit ID', () => client.write('40001', 1), '020600000001'],
+        ];
+        for (const [name, call, body] of cases) {
+            responder = echo(body);
+            assert.equal(await call(), false, name);
+        }
+    });
+
+    test('a write emits data with its result', async () => {
+        const data = [];
+        client.on('data', (value) => data.push(value));
         await client.write('40001', 1);
-        await client.write('00001', true);
-        await client.write('40001', hex('00010002'));
-        await client.write('00001,3', hex('07'));
+        responder = (request) => reply_to(request, '010600000002');
+        await client.write('40001', 1);
+        assert.deepEqual(data, [true, false]);
     });
 
     test('an exception response rejects with "response error: <code>"', async () => {
@@ -720,6 +741,13 @@ describe('Modbus_Client RTU-over-TCP', () => {
     test('resolves with the payload of an RTU response', async () => {
         responder = () => rtu_frame('0103041234abcd');
         assert.deepEqual(await client.read('40001,2'), hex('1234abcd'));
+    });
+
+    test('a write resolves with the result of the echo check', async () => {
+        responder = (frame) => frame;
+        assert.equal(await client.write('40002', 0x1234), true);
+        responder = () => rtu_frame('010600010000');
+        assert.equal(await client.write('40002', 0x1234), false);
     });
 
     test('rejects on an RTU exception response', async () => {

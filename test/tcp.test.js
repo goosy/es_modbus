@@ -48,26 +48,26 @@ describe('TCP client <-> server', () => {
     });
 
     test('FC 5 writes a single coil', async () => {
-        await client.write('00008', true);
+        assert.equal(await client.write('00008', true), true);
         assert.equal(memory.unit(1).coils[7], 1);
-        await client.write('00008', false);
+        assert.equal(await client.write('00008', false), true);
         assert.equal(memory.unit(1).coils[7], 0);
     });
 
     test('FC 6 writes a single register', async () => {
-        await client.write('40010', 65535);
+        assert.equal(await client.write('40010', 65535), true);
         assert.equal(memory.unit(1).holding[9], 65535);
-        await client.write('40010', hex('0102'));
+        assert.equal(await client.write('40010', hex('0102')), true);
         assert.equal(memory.unit(1).holding[9], 0x0102);
     });
 
     test('FC 15 writes multiple coils', async () => {
-        await client.write('00201,10', hex('cd01'));
+        assert.equal(await client.write('00201,10', hex('cd01')), true);
         assert.deepEqual([...memory.unit(1).coils.subarray(200, 210)], [1, 0, 1, 1, 0, 0, 1, 1, 1, 0]);
     });
 
     test('FC 16 writes multiple registers', async () => {
-        await client.write('40101', hex('000a0102ffff'));
+        assert.equal(await client.write('40101', hex('000a0102ffff')), true);
         assert.deepEqual([...memory.unit(1).holding.subarray(100, 103)], [0x000a, 0x0102, 0xffff]);
     });
 
@@ -79,12 +79,12 @@ describe('TCP client <-> server', () => {
     test('maximum quantities', async () => {
         const words = Buffer.alloc(123 * 2);
         for (let i = 0; i < 123; i++) words.writeUInt16BE(i * 3, i * 2);
-        await client.write('41001,123', words);
+        assert.equal(await client.write('41001,123', words), true);
         assert.deepEqual((await client.read('41001,125')).subarray(0, 246), words);
         assert.equal((await client.read('41001,125')).length, 250);
 
         const bits = Buffer.alloc(1968 / 8, 0x5a);
-        await client.write('01001,1968', bits);
+        assert.equal(await client.write('01001,1968', bits), true);
         const read = await client.read('01001,2000');
         assert.equal(read.length, 250);
         assert.deepEqual(read.subarray(0, 246), bits);
