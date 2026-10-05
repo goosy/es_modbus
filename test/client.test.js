@@ -743,6 +743,35 @@ describe('Modbus_Client RTU-over-TCP', () => {
         assert.deepEqual(await client.read('40001,2'), hex('1234abcd'));
     });
 
+    test('a broadcast write resolves with true once sent, without waiting for a response', async () => {
+        client.timeout = 2000;
+        const started = performance.now();
+        assert.equal(await client.write('40001', 7, 0), true);
+        assert.equal(await client.write('00001,3', hex('05'), 0), true);
+        assert.ok(performance.now() - started < 500);
+        const received = () => Buffer.concat(fake.frames.map((f) => f.frame));
+        while (received().length < 18) await sleep(5);
+        assert.equal(received().toString('hex'),
+            Buffer.concat([rtu_frame('000600000007'), rtu_frame('000f0000000301 05')]).toString('hex'));
+    });
+
+    test('a broadcast read resolves with an empty Buffer once sent', async () => {
+        client.timeout = 2000;
+        const started = performance.now();
+        assert.deepEqual(await client.read('40001,2', 0), Buffer.alloc(0));
+        assert.ok(performance.now() - started < 500);
+    });
+
+    test('a broadcast write still rejects if the connection is lost before it is sent', async () => {
+        client.delay = 200;
+        client.timeout = 2000;
+        client.read('40001').catch(() => { });
+        const broadcast = client.write('40001', 7, 0);
+        await sleep(20);
+        for (const socket of fake.sockets) socket.destroy();
+        await assert.rejects(broadcast, { message: 'connection lost' });
+    });
+
     test('a write resolves with the result of the echo check', async () => {
         responder = (frame) => frame;
         assert.equal(await client.write('40002', 0x1234), true);

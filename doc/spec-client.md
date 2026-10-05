@@ -122,6 +122,12 @@ Closes the transport.
   responses with no matching pending transaction are ignored. RTU-family transports have no
   transaction ID, so only one request may be outstanding at a time and requests must be
   serialized.
+- **Broadcast (RTU, RTU-over-TCP).** On a serial bus every request to unit `0` is a broadcast:
+  slaves execute a broadcast write, ignore a broadcast read, and never answer. The promise
+  resolves as soon as the frame has been written, without waiting for a response: a write with
+  `true` (there is no echo to check), a read with an empty `Buffer` (there is no data). It still
+  rejects with `connection lost` if the connection is lost before the frame is written. On TCP
+  unit `0` is an ordinary unit.
 - **Ordering / pacing.** Outgoing frames are queued and written one at a time with at least
   `delay` ms between writes. The queue is bounded (256); on overflow the **oldest** queued frames
   are dropped.

@@ -85,7 +85,10 @@
 
 ## 发送队列 / 背压（`send` → `sending`）
 
-- `send_queue` 是一个数组，上限为 `send_queue_size`（256）；溢出时从**队首**切除（丢弃最旧的）。
+- `send_queue` 是 `{ buffer, on_sent }` 的数组，上限为 `send_queue_size`（256）；溢出时从**队首**切除
+  （丢弃最旧的）。`on_sent` 若存在，会在缓冲区交给 `_send` 后立即运行。广播 packet
+  （`packet.broadcast`：非 TCP 协议上发往单元 `0` 的任何请求）借它兑现，因为不会有应答：写以
+  `true` 兑现，读以空 `Buffer` 兑现。
 - `sending` 由 `#busy` 保护，队列为空时立即返回。已连接时，它取出一个缓冲区，调用 `_send`，然后在 `delay` 毫秒后
   清除 `#busy` 并重新进入。这样既串行化了写入，也实现了节流。
 - 未连接且没有处于重连退避时，`sending` 以自身作为成功回调触发 `_connect`。它不会在退避期间

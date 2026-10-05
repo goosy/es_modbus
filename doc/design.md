@@ -98,8 +98,11 @@ A single routine builds every outgoing frame regardless of transport:
 
 ## Send queue / backpressure (`send` → `sending`)
 
-- `send_queue` is an array capped at `send_queue_size` (256); overflow splices off the **front**
-  (oldest dropped).
+- `send_queue` is an array of `{ buffer, on_sent }` capped at `send_queue_size` (256); overflow
+  splices off the **front** (oldest dropped). `on_sent`, if given, runs right after the buffer
+  is passed to `_send`. A broadcast packet (`packet.broadcast`: any request to unit `0` on a
+  non-TCP protocol) resolves through it, since no response will come: a write with `true`, a
+  read with an empty `Buffer`.
 - `sending` is guarded by `#busy` and returns at once when the queue is empty. When connected it
   shifts one buffer, calls `_send`, then after
   `delay` ms clears `#busy` and re-enters. This serializes writes and paces them.

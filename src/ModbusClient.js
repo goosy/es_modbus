@@ -6,6 +6,8 @@ import {
     parse_rtu_response, parse_tcp_response
 } from './util.js';
 
+const BROADCAST_ID = 0;
+
 function check_unit_id(unit_id) {
     if (!Number.isInteger(unit_id) || unit_id < 0 || unit_id > 255) {
         throw new Error(`Invalid unit ID: ${unit_id}`);
@@ -182,8 +184,9 @@ export class Modbus_Client extends EventEmitter {
 
     send_queue = [];
     send_queue_size = 256;
-    send(data) {
-        this.send_queue.push(data);
+    // `on_sent` runs once the frame has been written to the transport
+    send(data, on_sent) {
+        this.send_queue.push({ buffer: data, on_sent });
         const overflow = this.send_queue.length - this.send_queue_size;
         if (overflow > 0) {
             this.send_queue.splice(0, overflow);
@@ -195,9 +198,10 @@ export class Modbus_Client extends EventEmitter {
     sending() {
         if (this.#busy || this.send_queue.length === 0) return;
         if (this.is_connected) {
-            const buffer = this.send_queue.shift();
+            const { buffer, on_sent } = this.send_queue.shift();
             this.#busy = true;
             this._send(buffer);
+            on_sent?.();
             setTimeout(() => {
                 this.#busy = false;
                 this.sending();
@@ -260,7 +264,12 @@ export class Modbus_Client extends EventEmitter {
                 reject(reason);
             };
         });
-        this.send(packet.buffer);
+        // A broadcast is never answered: it resolves as soon as its frame is written, a write
+        // with true and a read with an empty Buffer
+        const on_sent = packet.broadcast
+            ? () => packet.resolve(packet.echo === undefined ? Buffer.alloc(0) : true)
+            : undefined;
+        this.send(packet.buffer, on_sent);
         return promise;
     }
     /**
@@ -326,6 +335,8 @@ export class Modbus_Client extends EventEmitter {
             buffer,
             // The value a write response must echo; undefined for a read
             echo: expected_echo(func_code, data, length),
+            // On a serial bus every request to unit 0 is a broadcast
+            broadcast: this.protocol !== 'tcp' && unit_id === BROADCAST_ID,
             status: 'init',
         };
         this.set_packet(tid, packet);
