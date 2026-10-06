@@ -55,6 +55,7 @@ export class Modbus_Server extends EventEmitter {
 	port = null;
 	serial_settings = null; // serial port settings, for a serial device path `port`
 	serial_port = null; // the serial port, created by the first start()
+	protocol = 'tcp'; // the framing: 'tcp', 'rtu_over_tcp' or 'rtu'
 	unit_ids = null;
 	accept_all_units = true;
 
@@ -64,6 +65,8 @@ export class Modbus_Server extends EventEmitter {
      * @param {Object} [options] - Options for the server:
      * @param {string} [options.host='0.0.0.0'] - The host to listen on (default: '0.0.0.0')
      * @param {number|string} [options.port=502] - The TCP port to listen on (default: 502) or a serial port path (for RTU mode).
+     * @param {boolean} [options.rtu=false] - With a TCP port, use RTU framing on the accepted sockets (RTU-over-TCP);
+     *   ignored for a serial port path.
      * @param {number} [options.baud_rate=9600] - Serial baud rate, used with a serial port path.
      * @param {'none'|'odd'|'even'|0|1|2} [options.parity='none'] - Serial parity, used with a serial port path.
      * @param {number} [options.data_bits=8] - Serial data bits, used with a serial port path.
@@ -81,7 +84,10 @@ export class Modbus_Server extends EventEmitter {
 			// A serial device path; the options are checked here, the port is created by start()
 			const { baud_rate, parity, data_bits, stop_bits } = options;
 			this.serial_settings = serial_settings({ port, baud_rate, parity, data_bits, stop_bits });
-		} else if (typeof port !== 'number') {
+			this.protocol = 'rtu';
+		} else if (typeof port === 'number') {
+			this.protocol = options.rtu ? 'rtu_over_tcp' : 'tcp';
+		} else {
 			throw new Error(`Invalid port: ${port}`);
 		}
 		this.port = port;
@@ -196,9 +202,8 @@ export class Modbus_Server extends EventEmitter {
 
 	_on_data(request, socket) {
 		const { tid, pid, unit_id, func_code } = request;
-		// RTU framing means a serial bus; RTU-over-TCP will join it once it is served
-		// (see doc/design.md, "RTU / serial: unfinished work")
-		const serial_bus = socket === undefined;
+		// RTU framing means a serial bus, over a serial port or over TCP
+		const serial_bus = this.protocol !== 'tcp';
 
 		if (serial_bus && unit_id === BROADCAST_ID) {
 			// A broadcast is never answered; only an accepted write is executed
@@ -281,7 +286,7 @@ export class Modbus_Server extends EventEmitter {
 	}
 
 	on_data(buffer, socket) {
-		const requests = socket
+		const requests = this.protocol === 'tcp'
 			? parse_tcp_request(buffer)
 			: parse_rtu_request(buffer);
 
@@ -297,25 +302,28 @@ export class Modbus_Server extends EventEmitter {
 		}
 	}
 
+	/**
+     * Frames a response PDU for the configured protocol and writes it to `socket`, or to the
+     * serial port when there is no `socket`.
+     */
 	send_response(response, socket, transaction_id, protocol_id) {
 		const data_length = response.length;
-		if (socket) {
+		let full_response;
+		if (this.protocol === 'tcp') {
 			// Modbus TCP: add MBAP header
-			const full_response = Buffer.alloc(data_length + 6);
+			full_response = Buffer.alloc(data_length + 6);
 			full_response.writeUInt16BE(transaction_id, 0);
 			full_response.writeUInt16BE(protocol_id, 2);
 			full_response.writeUInt16BE(response.length, 4);
 			response.copy(full_response, 6, 0);
-			this.emit('send', full_response);
-			socket.write(full_response);
 		} else {
-			// Modbus RTU: add CRC
+			// Modbus RTU, over a serial port or TCP: add CRC
 			const crc = modbus_crc16(response);
-			const full_response = Buffer.alloc(data_length + 2, response);
+			full_response = Buffer.alloc(data_length + 2, response);
 			full_response.writeUInt16LE(crc, data_length);
-			this.emit('send', full_response);
-			this.serial_port.write(full_response);
 		}
+		this.emit('send', full_response);
+		(socket ?? this.serial_port).write(full_response);
 	}
 
 	handle_read_bits(function_code, start_address, quantity, unit_id) {

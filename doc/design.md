@@ -14,7 +14,9 @@ into `design-<topic>.md` files when it grows.
   decoded with the RTU parser (`parse_rtu_response`).
 - **Server.** The constructor keeps `port` as given: a `number` (TCP) or a `string` device path,
   whose options `serial_settings` checks into `this.serial_settings`; anything else throws.
-  `is_tcp` is a getter: `typeof this.port === 'number'`. The serial port is
+  It sets `this.protocol` with the client's values: `tcp`, `rtu_over_tcp` (number port with
+  `rtu: true`), or `rtu` (string port; `rtu` is ignored). `is_tcp` is a getter:
+  `typeof this.port === 'number'`, true for both TCP-family transports. The serial port is
   `this.serial_port`, created by the first `start()` (`start_serial`, which shares one pending
   creation and resets it on failure so a later `start()` retries); `send_response` and `stop`
   use it.
@@ -277,18 +279,19 @@ the move into `CONNECTING`; a caller that arrives while `CONNECTING` is added to
 
 ## Server dispatch notes
 
-- `on_data` chooses the parser by the **presence of a `socket` argument**, not by `is_tcp`.
+- Framing follows `this.protocol`: `on_data` chooses the parser, `send_response` the framing,
+  and `_on_data` the serial-bus semantics from it. The `socket` argument only says where the
+  response is written: a socket for both TCP-family transports, the serial port when absent.
 - `handle_read_bits` serves FC 1 and FC 2; `handle_read_registers` serves FC 3 (holding) and
   FC 4 (input), branching on `function_code === 3`.
-- `send_response` frames by the same `socket`-present test: MBAP for TCP, CRC for serial.
 
 ### Request flow
 
-1. `on_data(buffer, socket?)` — parse with `parse_tcp_request` when a `socket` is present, else
+1. `on_data(buffer, socket?)` — parse with `parse_tcp_request` for `tcp`, else
    `parse_rtu_request`. Emit `receive` per frame. A frame with `func_code: 0` is dropped, unless
    the parser set `illegal_function`; then it goes on with that function code.
-2. `_on_data(request, socket?)` — `serial_bus` is true for RTU framing (no `socket`; it is to
-   include RTU-over-TCP once that is served). On a serial bus a broadcast (unit `0`) is never
+2. `_on_data(request, socket?)` — `serial_bus` is true for RTU framing (`rtu` and
+   `rtu_over_tcp`). On a serial bus a broadcast (unit `0`) is never
    answered: if unit `0` is accepted and the function is a write (5, 6, 15, 16) it is served and
    the response discarded, anything else is dropped; a non-accepted unit ID is dropped silently.
    On TCP unit `0` is ordinary and a non-accepted unit ID gets `0x0B`. Otherwise `serve()` calls
@@ -305,8 +308,9 @@ the move into `CONNECTING`; a caller that arrives while `CONNECTING` is added to
      `Vector_Error`. `serve()` catches only `Vector_Error`: it emits `vector_error` with the
      original error and the request, and answers exception `0x04`. A `vector_error` with no
      listener is ignored. Any other exception is a bug and propagates.
-3. `send_response(pdu, socket?, tid, pid)` — TCP: prepend a fresh MBAP header and `socket.write`.
-   Serial: append CRC-16 (LE) and `port.write`. Emit `send`.
+3. `send_response(pdu, socket?, tid, pid)` — `tcp`: prepend a fresh MBAP header. `rtu` and
+   `rtu_over_tcp`: append CRC-16 (LE). Emit `send`, then write to `socket`, or to the serial port
+   when there is none.
 
 
 ---
@@ -331,10 +335,6 @@ Each item is a defect or missing piece, not intended behavior.
 
 ### Server
 
-- [ ] **No `rtu_over_tcp` mode.** The constructor has no `rtu` option (see `spec-server.md`), and
-  `on_data` / `send_response` choose framing by the presence of a `socket`, so every TCP socket is
-  decoded as MBAP. RTU framing over TCP cannot be served. Framing must be chosen from the
-  configured transport, not from the presence of a `socket`.
 - [ ] **No RTU frame delimiting.** `spec-protocol.md` ("Frame delimiting") requires serial frames
   to be delimited by a silence of at least 3.5 character times, and RTU-over-TCP frames by the
   length implied by the function code and byte count. `on_data` instead passes each received

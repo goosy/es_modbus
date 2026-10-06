@@ -22,6 +22,7 @@ describe('Modbus_Server construction', () => {
 		assert.equal(server.host, '0.0.0.0');
 		assert.equal(server.port, 502);
 		assert.equal(server.is_tcp, true);
+		assert.equal(server.protocol, 'tcp');
 		assert.ok(server.sockets instanceof Set);
 		assert.equal(server.initialized, false);
 		assert.equal(server.is_valid_unit_id(0), true);
@@ -33,11 +34,20 @@ describe('Modbus_Server construction', () => {
 		assert.equal(server.host, HOST);
 		assert.equal(server.port, 1502);
 		assert.equal(server.is_tcp, true);
+		assert.equal(server.protocol, 'tcp');
+	});
+
+	test('a number port with rtu: true selects RTU-over-TCP', () => {
+		const server = new Modbus_Server({}, { port: 1502, rtu: true });
+		assert.equal(server.is_tcp, true);
+		assert.equal(server.protocol, 'rtu_over_tcp');
+		assert.ok(server.sockets instanceof Set);
 	});
 
 	test('a string port selects serial RTU on that device path, with default serial settings', () => {
 		const server = new Modbus_Server({}, { port: 'COM_NONEXISTENT' });
 		assert.equal(server.is_tcp, false);
+		assert.equal(server.protocol, 'rtu');
 		assert.equal(server.port, 'COM_NONEXISTENT');
 		assert.equal(server.sockets, null);
 		assert.equal(server.serial_port, null);
@@ -701,7 +711,42 @@ describe('Modbus_Server TCP lifecycle', () => {
 });
 
 describe('Modbus_Server RTU-over-TCP', () => {
-	test('rtu: true serves RTU frames on TCP sockets', { todo: 'design.md RTU / serial: no rtu_over_tcp mode' }, async () => {
+	test('rtu is ignored for a serial port', () => {
+		const server = new Modbus_Server({}, { port: 'COM_NONEXISTENT', rtu: true });
+		assert.equal(server.protocol, 'rtu');
+		assert.equal(server.sockets, null);
+	});
+
+	/** Sends one RTU request body through a fake socket; returns the written responses as hex. */
+	const rtu_socket_exchange = (server, body) => {
+		const socket = fake_socket();
+		server.on_data(rtu_frame(body), socket);
+		return socket.written.map((b) => b.toString('hex'));
+	};
+
+	test('responses carry a CRC and go to the socket', () => {
+		const memory = create_memory_vector();
+		memory.unit(1).holding[0] = 5;
+		const server = new Modbus_Server(memory.vector, { port: 1502, rtu: true });
+		assert.deepEqual(rtu_socket_exchange(server, '010300000001'), [rtu_frame('0103020005').toString('hex')]);
+	});
+
+	test('an MBAP frame is not served', () => {
+		const server = new Modbus_Server(create_memory_vector().vector, { port: 1502, rtu: true });
+		const socket = fake_socket();
+		server.on_data(tcp_frame(1, '010300000001'), socket);
+		assert.deepEqual(socket.written, []);
+	});
+
+	test('serial bus semantics: a non-accepted unit and a broadcast are not answered', () => {
+		const memory = create_memory_vector();
+		const server = new Modbus_Server(memory.vector, { port: 1502, rtu: true, unit_id: [0, 1] });
+		assert.deepEqual(rtu_socket_exchange(server, '020300000001'), []);
+		assert.deepEqual(rtu_socket_exchange(server, '000600010005'), []);
+		assert.equal(memory.unit(0).holding[1], 5);
+	});
+
+	test('rtu: true serves RTU frames on TCP sockets', async () => {
 		const memory = create_memory_vector();
 		memory.unit(1).holding[0] = 5;
 		const { server, port } = await start_tcp_server(memory.vector, { rtu: true });

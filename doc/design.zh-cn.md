@@ -14,8 +14,9 @@
 - **解码。** 响应解码**仅**按 `protocol === 'tcp'` 分支，因此 `rtu_over_tcp` 使用 RTU 解析器
   （`parse_rtu_response`）解码。
 - **服务端。** 构造函数原样保存 `port`：`number`（TCP）或 `string` 设备路径；后者的选项由
-  `serial_settings` 校验后存入 `this.serial_settings`；其他值抛出异常。`is_tcp` 是一个 getter：
-  `typeof this.port === 'number'`。串口是 `this.serial_port`，由首次 `start()` 创建
+  `serial_settings` 校验后存入 `this.serial_settings`；其他值抛出异常。构造函数按与客户端相同的
+  取值设置 `this.protocol`：`tcp`、`rtu_over_tcp`（数字端口且 `rtu: true`）或 `rtu`（字符串端口，
+  忽略 `rtu`）。`is_tcp` 是一个 getter：`typeof this.port === 'number'`，对两种 TCP 系列传输都为真。串口是 `this.serial_port`，由首次 `start()` 创建
   （`start_serial`：共用同一个待决的创建，失败时将其重置，使之后的 `start()` 重试）；
   `send_response` 和 `stop` 使用它。
 - **`src/serial.js`。** `serial_settings` 校验 snake_case 选项，并转换为 `serialport` 的参数
@@ -241,18 +242,18 @@
 
 ## 服务端分发说明
 
-- `on_data` 依据**是否存在 `socket` 参数**来选择解析器，而不是依据 `is_tcp`。
+- 帧格式取决于 `this.protocol`：`on_data` 据此选择解析器，`send_response` 据此组帧，`_on_data`
+  据此确定串行总线语义。`socket` 参数只表示响应写到哪里：两种 TCP 系列传输写入套接字，没有
+  `socket` 时写入串口。
 - `handle_read_bits` 服务 FC 1 和 FC 2；`handle_read_registers` 服务 FC 3（保持）和 FC 4（输入），
   通过 `function_code === 3` 分支。
-- `send_response` 依据同样的"是否存在 `socket`"判断来组帧：TCP 用 MBAP，串口用 CRC。
 
 ### 请求流程
 
-1. `on_data(buffer, socket?)` — 存在 `socket` 时用 `parse_tcp_request` 解析，否则用
+1. `on_data(buffer, socket?)` — `tcp` 时用 `parse_tcp_request` 解析，否则用
    `parse_rtu_request`。逐帧发出 `receive`。`func_code: 0` 的帧被丢弃，除非解析器设置了
    `illegal_function`；此时以该功能码继续处理。
-2. `_on_data(request, socket?)` — RTU 帧格式（没有 `socket`）时 `serial_bus` 为真；待 RTU-over-TCP
-   得到服务后也应包含它。在串行总线上，广播（单元 `0`）从不应答：若单元 `0` 被接受且功能为写
+2. `_on_data(request, socket?)` — RTU 帧格式（`rtu` 和 `rtu_over_tcp`）时 `serial_bus` 为真。在串行总线上，广播（单元 `0`）从不应答：若单元 `0` 被接受且功能为写
    （5、6、15、16），则执行并丢弃响应，其余一律丢弃；未被接受的单元 ID 静默丢弃。在 TCP 上单元
    `0` 是普通单元，未被接受的单元 ID 得到 `0x0B`。否则由 `serve()` 调用 `dispatch()`，按
    `func_code` 分支到对应的 `handle_*` 方法，由其调用 `vector` 并构造响应 PDU。不支持的功能码 →
@@ -264,8 +265,8 @@
    - 每次 `vector` 调用都经过 `call_vector`，它把抛出的异常包装为私有的 `Vector_Error`。
      `serve()` 只捕获 `Vector_Error`：以原始错误和请求发出 `vector_error`，并应答异常 `0x04`。
      没有监听者的 `vector_error` 会被忽略。其他异常属于程序缺陷，会向外传播。
-3. `send_response(pdu, socket?, tid, pid)` — TCP：前置新的 MBAP 头并 `socket.write`。
-   串口：追加 CRC-16（小端）并 `port.write`。发出 `send`。
+3. `send_response(pdu, socket?, tid, pid)` — `tcp`：前置新的 MBAP 头。`rtu` 和 `rtu_over_tcp`：
+   追加 CRC-16（小端）。发出 `send`，然后写入 `socket`；没有 `socket` 时写入串口。
 
 ---
 
@@ -288,10 +289,6 @@
 
 ### 服务端
 
-- [ ] **没有 `rtu_over_tcp` 模式。** 构造函数没有 `rtu` 选项（见 `spec-server.zh-cn.md`），
-  且 `on_data` / `send_response` 依据是否存在 `socket` 来选择帧格式，因此每个 TCP 套接字都被当作
-  MBAP 解码。无法提供 TCP 上的 RTU 帧服务。帧格式必须依据所配置的传输方式选择，而不是依据是否
-  存在 `socket`。
 - [ ] **没有 RTU 帧界定。** `spec-protocol.zh-cn.md`（“帧的界定”）要求串口帧以至少 3.5 个字符
   时间的静默来界定，RTU-over-TCP 的帧则由功能码和字节数隐含的长度来界定。`on_data` 却把每个收到
   的数据块直接交给 `parse_rtu_request`，因此跨数据块拆分的帧，或一个数据块里的多个帧，会被丢弃
