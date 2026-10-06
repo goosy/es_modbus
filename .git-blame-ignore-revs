@@ -1,0 +1,5 @@
+# Bulk reformatting commits, skipped by `git blame`.
+# Enable locally with: git config blame.ignoreRevsFile .git-blame-ignore-revs
+
+# style: apply ESLint @stylistic fixes
+b6394c765f06f302b53cf004516fc15cfec6001e
