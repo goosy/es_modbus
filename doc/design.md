@@ -391,4 +391,7 @@ Each item is a defect or missing piece, not intended behavior.
 - [ ] **Serial path not verified end to end.** `test/serial.test.js` exercises the RTU server and
   client over a serial port pair, but on the development machine the com0com pair fails the
   suite's pre-check and the serial tests are skipped (see `spec-test.md`, "Serial test
-  environment"). The RTU server path is covered only by unit tests with a fake serial port.
+  environment"). The serial paths of the client and the server are instead exercised over a
+  simulated serial line, `test/serial-bridge.js` (usage at the top of the file), with an
+  RTU-over-TCP peer or a raw socket on its other end; what stays unverified is `serialport` with
+  a real driver and hardware.

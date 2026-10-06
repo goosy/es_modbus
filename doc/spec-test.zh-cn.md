@@ -34,6 +34,7 @@
 | `test/server.test.js` | `Modbus_Server`：构造、单元 ID、TCP 与 RTU 帧格式下的每个功能码（通过伪套接字 / 伪串口）、帧的界定、异常、事件，以及真实套接字上的 TCP 生命周期。 |
 | `test/tcp.test.js`    | 端到端：`Modbus_Client` 与 `Modbus_Server` 在回环地址上通过 Modbus TCP 互测。 |
 | `test/serial.test.js` | 通过一对串口的端到端测试：RTU 模式的 `Modbus_Server` 对接原始串口对端，以及 RTU 模式的 `Modbus_Client` 对接 `Modbus_Server`。 |
+| `test/serial-bridge.test.js` | 通过模拟串行线路（`test/serial-bridge.js`）测试串口路径，总是运行：串口端的 `Modbus_Client` 对接 RTU-over-TCP 的 `Modbus_Server`，串口端的 `Modbus_Server` 对接原始套接字或 RTU-over-TCP 客户端；覆盖按波特率逐字节到达和分块、字节损坏、丢帧、延迟、帧中停顿、噪声以及拔出设备。 |
 | `test/bundle.test.js` | 构建产物 `dist/modbus.js`：恰好导出 `Modbus_Client` 和 `Modbus_Server`，`package.json` 的 `exports` 指向它，`serialport` 已被打包且没有对外的导入、没有 `__dirname`，`prebuilds/` 和 `THIRD_PARTY_LICENSES` 已就位，导入它不会加载原生绑定而首次串口 `start()` 会，且打包后的类能完成一次 TCP 往返。 |
 
 ## TCP 测试
