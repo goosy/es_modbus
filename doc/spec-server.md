@@ -16,9 +16,17 @@ server.start();
 | Option    | Default     | Meaning                                                                       |
 | --------- | ----------- | -------------------------------------------------------------------------- |
 | `host`    | `'0.0.0.0'` | Bind address (TCP only).                                                    |
-| `port`    | `502`       | `number` → listen on that TCP port. `string` → open as a serial device path. A `SerialPort` instance → use it directly (serial). |
+| `port`    | `502`       | `number` → listen on that TCP port. `string` → open as a serial device path. Anything else throws `Invalid port`; a port instance is not accepted. |
 | `rtu`     | `false`     | With a `number` port, use RTU framing on the accepted TCP sockets (RTU-over-TCP). Ignored for serial ports. |
 | `unit_id` | all         | Which Modbus unit IDs to answer; every ID when omitted (see `set_unit_ids`). |
+| `baud_rate` | `9600`    | Serial baud rate, a positive integer (else `Invalid baud rate`). |
+| `parity`  | `'none'`    | Serial parity: `'none'`, `'odd'`, `'even'`, or `0` = none, `1` = odd, `2` = even. Anything else throws `Invalid parity`. |
+| `data_bits` | `8`       | Serial data bits: `5`, `6`, `7` or `8` (else `Invalid data bits`). |
+| `stop_bits` | `1`       | Serial stop bits: `1`, `1.5` or `2` (else `Invalid stop bits`). |
+
+The serial options (`baud_rate`, `parity`, `data_bits`, `stop_bits`) apply only when `port` is a
+serial device path and are ignored for a TCP port. They are checked at construction, which throws
+on an invalid one; the serial port itself is created and opened by `start()`.
 
 ### Transport selection
 
@@ -28,7 +36,7 @@ The server's transport is chosen at construction from `port` and `rtu`:
 | ----------------------------- | ------- | -------------- | --------------------------------------------------------------- |
 | `number`                      | `false` | TCP            | Listens on `host:port`; each connection speaks MBAP-framed Modbus TCP. |
 | `number`                      | `true`  | RTU-over-TCP   | Listens on `host:port`; each connection speaks RTU frames (unit ID + PDU + CRC16). |
-| `string` or `SerialPort`      | ignored | RTU            | Opens the serial port and answers as a Modbus RTU slave.         |
+| `string`                      | ignored | RTU            | Opens the serial port and answers as a Modbus RTU slave.         |
 
 An RTU server is a Modbus slave on a serial line: it has no connections and frames its responses
 with CRC-16. Request handling (unit ID routing, the `vector`, exception responses) is identical
@@ -92,7 +100,9 @@ with an exception and the `vector` is not called.
 ## Methods
 
 - `start()` — begins listening (TCP) or opens the serial port. Safe to call again after a prior
-  `start()`: it closes and re-opens the listener/port.
+  `start()`: it closes and re-opens the listener/port. The first serial `start()` creates the
+  serial port, which loads `serialport` and its native binding; a failure to create or open the
+  port is emitted as `error`, and a later `start()` tries again.
 - `stop()` — TCP: destroys all live sockets and closes the server. Serial: closes the port.
 - `is_valid_unit_id(unit_id)` — whether the server accepts the given unit ID.
 

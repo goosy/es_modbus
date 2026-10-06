@@ -1,6 +1,6 @@
 import { createServer } from 'node:net';
 import { EventEmitter } from 'node:events';
-import { SerialPort } from 'serialport';
+import { serial_settings, create_serial_port } from './serial.js';
 import { MAX_QUANTITY, modbus_crc16, parse_tcp_request, parse_rtu_request } from './util.js';
 
 /**
@@ -53,6 +53,8 @@ export class Modbus_Server extends EventEmitter {
 	sockets = null;
 	host = null;
 	port = null;
+	serial_settings = null; // serial port settings, for a serial device path `port`
+	serial_port = null; // the serial port, created by the first start()
 	unit_ids = null;
 	accept_all_units = true;
 
@@ -61,7 +63,11 @@ export class Modbus_Server extends EventEmitter {
      * @param {ModbusVector} vector - Modbus request handler functions.
      * @param {Object} [options] - Options for the server:
      * @param {string} [options.host='0.0.0.0'] - The host to listen on (default: '0.0.0.0')
-     * @param {number|string|SerialPort} [options.port=502] - The TCP port to listen on (default: 502) or a serial port path (for RTU mode).
+     * @param {number|string} [options.port=502] - The TCP port to listen on (default: 502) or a serial port path (for RTU mode).
+     * @param {number} [options.baud_rate=9600] - Serial baud rate, used with a serial port path.
+     * @param {'none'|'odd'|'even'|0|1|2} [options.parity='none'] - Serial parity, used with a serial port path.
+     * @param {number} [options.data_bits=8] - Serial data bits, used with a serial port path.
+     * @param {number} [options.stop_bits=1] - Serial stop bits, used with a serial port path.
      * @param {number|number[]|'all'|'*'} [options.unit_id] - The Modbus unit ID(s) to accept and respond to;
      *   every ID when omitted (see `set_unit_ids()` for details)
      */
@@ -71,16 +77,14 @@ export class Modbus_Server extends EventEmitter {
 		this.set_unit_ids(options.unit_id);
 		this.host = options.host ?? '0.0.0.0';
 		const port = options.port ?? 502;
-		if (typeof port === 'number' || port instanceof SerialPort) {
-			// a TCP port or a SerialPort instance
-			this.port = port;
-		} else if (typeof port === 'string') {
-			// A serial port path
-			this.port = new SerialPort(port);
-		} else {
-			// Default to TCP port 502
-			this.port = 502;
+		if (typeof port === 'string') {
+			// A serial device path; the options are checked here, the port is created by start()
+			const { baud_rate, parity, data_bits, stop_bits } = options;
+			this.serial_settings = serial_settings({ port, baud_rate, parity, data_bits, stop_bits });
+		} else if (typeof port !== 'number') {
+			throw new Error(`Invalid port: ${port}`);
 		}
+		this.port = port;
 		if (this.is_tcp) this.sockets = new Set();
 	}
 
@@ -120,34 +124,55 @@ export class Modbus_Server extends EventEmitter {
 	}
 
 	start() {
-		if (this.initialized) {
-			if (this.is_tcp) {
-				if (this.server.listening) this.server.close();
-				this.server.listen(this.port, this.host);
-			} else {
-				if (this.port.isOpen) this.port.close();
-				this.port.open();
-			}
+		if (!this.is_tcp) {
+			this.start_serial();
 			return;
 		}
-
-		if (this.is_tcp) {
-			this.set_tcp();
+		if (this.initialized) {
+			if (this.server.listening) this.server.close();
 			this.server.listen(this.port, this.host);
-		} else {
-			this.set_rtu();
-			this.port.open();
+			return;
 		}
+		this.set_tcp();
+		this.server.listen(this.port, this.host);
 		this.initialized = true;
 	}
 
+	// The serial port creation, done once
+	#creating = null;
+
+	/**
+	 * Creates the serial port on the first start, then (re)opens it. A failure, including a
+	 * serialport native binding that cannot be loaded, is emitted as `error`.
+	 */
+	async start_serial() {
+		try {
+			this.#creating ??= create_serial_port(this.serial_settings).then((serial_port) => {
+				this.serial_port = serial_port;
+				this.set_rtu();
+				this.initialized = true;
+				return serial_port;
+			});
+			const serial_port = await this.#creating;
+			if (serial_port.isOpen) {
+				await new Promise((resolve) => serial_port.close(() => resolve()));
+			}
+			// An open failure is emitted as `error` by the port
+			serial_port.open();
+		} catch (error) {
+			this.#creating = null;
+			this.emit('error', error);
+		}
+	}
+
 	set_rtu() {
-		this.port.on('open', () => {
+		const serial_port = this.serial_port;
+		serial_port.on('open', () => {
 			this.emit('start');
 		});
-		this.port.on('data', (data) => this.on_data(data));
-		this.port.on('error', (err) => this.emit('error', err));
-		this.port.on('close', () => {
+		serial_port.on('data', (data) => this.on_data(data));
+		serial_port.on('error', (err) => this.emit('error', err));
+		serial_port.on('close', () => {
 			this.emit('stop');
 		});
 	}
@@ -289,7 +314,7 @@ export class Modbus_Server extends EventEmitter {
 			const full_response = Buffer.alloc(data_length + 2, response);
 			full_response.writeUInt16LE(crc, data_length);
 			this.emit('send', full_response);
-			this.port.write(full_response);
+			this.serial_port.write(full_response);
 		}
 	}
 
@@ -418,8 +443,8 @@ export class Modbus_Server extends EventEmitter {
 			}
 			this.sockets.clear();
 			this.server.close();
-		} else if (!this.is_tcp) {
-			this.port.close();
+		} else if (this.serial_port?.isOpen) {
+			this.serial_port.close();
 		}
 	}
 }

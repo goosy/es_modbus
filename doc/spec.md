@@ -55,14 +55,20 @@ mix. The server works in PDU addresses only.
 
 - **Runtime:** Node.js with ES modules (`"type": "module"`). Only Node built-ins are used at
   runtime (`node:net`, `node:events`), plus `serialport` for the serial/RTU paths.
-  `serialport` is supplied by the user: it is an optional peer dependency
-  (`peerDependencies` + `peerDependenciesMeta.optional`), and TCP-only users must be able to use
-  the library without installing it.
+  The published package has **no runtime dependencies**: users install `es-modbus` alone.
+  `serialport` (its `@serialport/stream` and `@serialport/bindings-cpp` parts) is bundled into
+  `dist/modbus.js`, and the native prebuilds of `@serialport/bindings-cpp` ship in `prebuilds/`
+  (N-API, so one file per platform serves every Node.js version). The bundle loads `serialport`
+  only on the first use of a serial port, never at import: loading it loads the native binding,
+  and a platform without a prebuild (or a process that forbids native addons) must still be able
+  to use TCP. The licenses of the bundled packages ship in `THIRD_PARTY_LICENSES`.
+- **Node.js version:** `>=20.11` (`engines`), for `import.meta.dirname`.
 - **Package manager:** pnpm (required — see `AGENTS.md`).
-- **Bundler:** Rolldown (built-in node resolution, CommonJS interop and JSON import; no plugins).
-- **Tests:** the Node.js built-in test runner (`node:test`). During development `serialport` is
-  installed by pnpm's `auto-install-peers` (on by default), so the serial tests and the server
-  module can load; it is not listed in `devDependencies`.
+- **Bundler:** Rolldown, driven by `build.js` through its API (built-in node resolution and
+  CommonJS interop; no plugins).
+- **Tests:** the Node.js built-in test runner (`node:test`). `serialport`,
+  `@serialport/stream` and `@serialport/bindings-cpp` are `devDependencies`: the build bundles
+  them, and the serial tests use `serialport` for a raw peer port.
 - **Linter:** ESLint with `@stylistic/eslint-plugin` (`eslint.config.js`), all pinned to exact
   versions in `devDependencies`. ESLint's recommended rules find code problems; `@stylistic`
   normalizes whitespace (tab indent, spacing, quotes, semicolons) without re-wrapping lines, so
@@ -76,16 +82,22 @@ mix. The server works in PDU addresses only.
 | `src/ModbusClient.js` | Client class.                                                   |
 | `src/ModbusServer.js` | Server class.                                                   |
 | `src/util.js`         | Pure protocol codec (frame parsing, CRC, range parsing). No I/O. |
-| `rolldown.config.js`  | Bundles `src/index.js` → `modbus.js` (ESM).                     |
+| `src/serial.js`       | Serial options check, and serial port creation (loads `serialport` on first use). |
+| `build.js`            | The build: bundles `src/index.js` → `dist/modbus.js`, copies `prebuilds/`, writes `THIRD_PARTY_LICENSES`. |
 | `eslint.config.js`    | ESLint and `@stylistic` configuration.                          |
-| `modbus.js`           | Build output and the package `exports` entry. Git-ignored; produced by `pnpm build` / `prepare`. |
+| `dist/modbus.js`      | Build output (one ES module) and the package `exports` entry.   |
+| `prebuilds/`          | Build output: the `@serialport/bindings-cpp` native prebuilds, found by the bundle at `dist/../prebuilds`. |
+| `THIRD_PARTY_LICENSES` | Build output: the license texts of the bundled packages.       |
 | `test/*.test.js`      | Automated tests (see `spec-test.md`).                           |
 | `test/helpers.js`     | Shared test fixtures.                                           |
+
+The build outputs are git-ignored, produced by `pnpm build` / `prepare`, and published through
+`package.json` `files`.
 
 Commands:
 
 - `pnpm install`
-- `pnpm build` — run before anything that imports `../modbus.js`.
+- `pnpm build` — runs `build.js`; run it before anything that imports `../dist/modbus.js`.
 - `pnpm test` — builds, then runs the automated test suite (`node --test`).
 - `pnpm test:coverage` — the test suite with a coverage report for `src/`.
 - `pnpm lint` — runs ESLint (`eslint .`); `pnpm lint --fix` applies the fixable rules. It is
@@ -105,9 +117,6 @@ Commands:
 
 Decisions the spec does not make yet. Settle them in the spec first, then implement.
 
-- **Serial parameters.** A `string` server `port` is passed to `new SerialPort(port)`, but
-  `serialport` needs an options object (path, baud rate, parity, …). The spec defines no way to
-  give serial parameters except passing a ready-made `SerialPort` instance.
 - **Partial TCP frames.** For TCP the spec only requires splitting coalesced frames (for
   RTU-over-TCP it requires length-based delimiting). The code also drops an incomplete trailing
   frame instead of buffering it for the next read (the client's `unprocessed_buffer` field is

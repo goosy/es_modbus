@@ -5,7 +5,8 @@ Defines the automated test suite: what it covers, how it is run, and the environ
 ## Goals
 
 - Cover the three parts of the library: the codec in `src/util.js`, `Modbus_Server` and
-  `Modbus_Client`, plus the build output `modbus.js` that the package publishes.
+  `Modbus_Client`, plus the build output `dist/modbus.js` (with `prebuilds/`) that the package
+  publishes.
 - Test against the `spec-*` series, not against the current code. Where the code does not yet
   meet the spec (a gap listed in `design.md`), the test still states the spec behavior and is
   marked as a known gap (see "Known gaps"), so the suite shows what is missing without failing.
@@ -20,7 +21,7 @@ Defines the automated test suite: what it covers, how it is run, and the environ
 | `pnpm test`          | Runs `pnpm build`, then every `test/**/*.test.js` with `node --test`. |
 | `pnpm test:coverage` | Same, with the built-in coverage report limited to `src/**`.         |
 
-Running `node --test` directly also works; the bundle test is then skipped when `modbus.js` is
+Running `node --test` directly also works; the bundle test is then skipped when `dist/modbus.js` is
 missing or older than any file in `src/`.
 
 ## Layout
@@ -33,7 +34,7 @@ missing or older than any file in `src/`.
 | `test/server.test.js` | `Modbus_Server`: construction, unit IDs, every function code with TCP and RTU framing (through a fake socket / fake serial port), exceptions, events, and the TCP lifecycle on a real socket. |
 | `test/tcp.test.js`    | End to end: `Modbus_Client` against `Modbus_Server` over Modbus TCP on loopback. |
 | `test/serial.test.js` | End to end over a serial port pair: `Modbus_Server` in RTU mode against a raw serial peer, and `Modbus_Client` in RTU mode against `Modbus_Server`. |
-| `test/bundle.test.js` | The build output `modbus.js`: it exports exactly `Modbus_Client` and `Modbus_Server`, `package.json` `exports` points at it, `serialport` stays external, and the bundled classes complete a TCP round trip. |
+| `test/bundle.test.js` | The build output `dist/modbus.js`: it exports exactly `Modbus_Client` and `Modbus_Server`, `package.json` `exports` points at it, `serialport` is bundled with no outside import and no `__dirname`, `prebuilds/` and `THIRD_PARTY_LICENSES` are in place, importing it does not load the native binding while the first serial `start()` does, and the bundled classes complete a TCP round trip. |
 
 ## TCP tests
 
@@ -43,6 +44,9 @@ missing or older than any file in `src/`.
   can be checked and malformed or out-of-order replies can be produced.
 - Server-only tests feed frames to `on_data` through a fake socket or a fake serial port where
   no network is needed, and use a raw `node:net` socket where the real transport matters.
+- Serial lifecycle tests replace the serial port factory of `src/serial.js` with one that makes
+  a fake serial port (`set_serial_port_factory`, not part of the public API), so no serial
+  hardware or native binding is needed.
 - End-to-end tests connect the two classes to each other.
 
 ## Serial tests

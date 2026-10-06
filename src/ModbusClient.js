@@ -5,6 +5,7 @@ import {
 	modbus_crc16, parse_modicon_range, parse_pdu_range,
 	parse_rtu_response, parse_tcp_response,
 } from './util.js';
+import { serial_settings, create_serial_port } from './serial.js';
 
 const BROADCAST_ID = 0;
 
@@ -167,6 +168,7 @@ export class Modbus_Client extends EventEmitter {
 			port = 502,
 			rtu = false,
 			reconnect_time = 10000,
+			baud_rate, parity, data_bits, stop_bits,
 		} = options;
 		this.reconnect_time = reconnect_time;
 		this.#modicon_zero_based = options.modicon_zero_based ?? false;
@@ -178,7 +180,9 @@ export class Modbus_Client extends EventEmitter {
 			this.set_tcp(address, port);
 			this.protocol = rtu ? 'rtu_over_tcp' : 'tcp';
 		} else {
-			this.set_serial(address);
+			// The serial device path is `port`; the options are checked here, the port is
+			// created when first opened
+			this.set_serial(serial_settings({ port, baud_rate, parity, data_bits, stop_bits }));
 			this.protocol = 'rtu';
 		}
 
@@ -449,19 +453,70 @@ export class Modbus_Client extends EventEmitter {
 	};
 
 	/**
-     * Initializes a new SerialPort and sets up some function.
-     * @todo not finished
+     * Sets up the serial transport. The port is created and opened by `_connect` (at
+     * construction when `reconnect_time > 0`, otherwise on demand) and is never re-opened
+     * automatically after it closes.
      *
-     * @param {SerialPort} serialport - a SerialPort instance.
+     * @param {Object} settings - serial port settings made by serial_settings().
      * @return {void}
      */
-	set_serial(serialport) {
-		this.stream = serialport;
+	set_serial(settings) {
+		// Created by the first `_connect`
+		this.stream = null;
 
-		this._send = async (data) => {
-			serialport.write(data);
+		this._send = (data) => {
+			this.stream.write(data);
 			this.emit('send', data);
 		};
+
+		// The port creation, done once
+		let creating = null;
+		const get_port = () => {
+			creating ??= create_serial_port(settings).then((serialport) => {
+				this.stream = serialport;
+				this.listen_serial(serialport);
+				return serialport;
+			}, (error) => {
+				creating = null; // let a later attempt retry
+				throw error;
+			});
+			return creating;
+		};
+
+		// The open in progress, shared by concurrent callers
+		let opening = null;
+		this._connect = (on_connect = DO_NOTHING, on_error = DO_NOTHING) => {
+			if (this.stream?.isOpen) {
+				on_connect();
+				return;
+			}
+			opening ??= get_port()
+				.then((serialport) => new Promise((resolve, reject) => {
+					serialport.open((error) => (error ? reject(error) : resolve()));
+				}))
+				.catch((error) => {
+					this.abort_pending();
+					this.emit('error', error);
+					throw error;
+				})
+				.finally(() => {
+					opening = null;
+				});
+			opening.then(on_connect, on_error);
+		};
+		this.disconnect = () => {
+			if (this.stream?.isOpen) this.stream.close();
+		};
+	}
+
+	/**
+     * Follows the events of the serial port created by `set_serial`.
+     */
+	listen_serial(serialport) {
+		serialport.on('open', () => {
+			this.is_connected = true;
+			this.emit('connect');
+		});
 
 		serialport.on('data', (data) => {
 			this.on_data(data);
@@ -478,9 +533,6 @@ export class Modbus_Client extends EventEmitter {
 			this.abort_pending();
 			this.emit('disconnect');
 		});
-
-		this.connect = () => serialport.open();
-		this.disconnect = () => serialport.close();
 	}
 
 	/**

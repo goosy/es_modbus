@@ -18,7 +18,7 @@ const open_port = (port) => new Promise((resolve, reject) => {
 	port.open((error) => (error ? reject(error) : resolve()));
 });
 const close_port = (port) => new Promise((resolve) => {
-	if (!port.isOpen) return resolve();
+	if (!port?.isOpen) return resolve();
 	port.close(() => resolve());
 });
 const new_port = (path) => new SerialPort({ path, baudRate: BAUD_RATE, autoOpen: false });
@@ -37,8 +37,7 @@ async function probe_ports() {
 		await sleep(100); // let the read on the peer become pending
 		ports[0].write(Buffer.from([0x55]));
 		if ((await received).length === 0) {
-			return `serial pair ${SERVER_PATH}/${PEER_PATH} does not deliver data to a pending read`
-                + ' (see doc/spec-test.md, "Serial test environment")';
+			return `serial pair ${SERVER_PATH}/${PEER_PATH} does not deliver data to a pending read (see doc/spec-test.md, "Serial test environment")`;
 		}
 		return false;
 	} catch (error) {
@@ -65,7 +64,7 @@ describe(`Modbus RTU server on ${SERVER_PATH}, raw peer on ${PEER_PATH}`, { skip
 	let peer;
 	before(async () => {
 		memory = create_memory_vector();
-		server = new Modbus_Server(memory.vector, { port: new_port(SERVER_PATH), unit_id: [1, 2, 0x11] });
+		server = new Modbus_Server(memory.vector, { port: SERVER_PATH, baud_rate: BAUD_RATE, unit_id: [1, 2, 0x11] });
 		server.on('error', () => { });
 		const started = once(server, 'start');
 		server.start();
@@ -75,7 +74,7 @@ describe(`Modbus RTU server on ${SERVER_PATH}, raw peer on ${PEER_PATH}`, { skip
 	});
 	after(async () => {
 		await close_port(peer);
-		if (server.port.isOpen) {
+		if (server.serial_port.isOpen) {
 			const stopped = once(server, 'stop');
 			server.stop();
 			await stopped;
@@ -89,7 +88,7 @@ describe(`Modbus RTU server on ${SERVER_PATH}, raw peer on ${PEER_PATH}`, { skip
 
 	test('the serial server is started', () => {
 		assert.equal(server.is_tcp, false);
-		assert.equal(server.port.isOpen, true);
+		assert.equal(server.serial_port.isOpen, true);
 	});
 
 	test('FC 3 reads holding registers', async () => {
@@ -199,11 +198,11 @@ describe(`Modbus RTU server on ${SERVER_PATH}, raw peer on ${PEER_PATH}`, { skip
 		const stopped = once(server, 'stop');
 		server.stop();
 		await stopped;
-		assert.equal(server.port.isOpen, false);
+		assert.equal(server.serial_port.isOpen, false);
 		const started = once(server, 'start');
 		server.start();
 		await started;
-		assert.equal(server.port.isOpen, true);
+		assert.equal(server.serial_port.isOpen, true);
 		const response = await exchange(peer, '010300000001', 7);
 		assert.equal(response.length, 7);
 	});
@@ -214,7 +213,7 @@ describe(`Modbus RTU client on ${PEER_PATH} <-> server on ${SERVER_PATH}`, { ski
 	let server;
 	before(async () => {
 		memory = create_memory_vector();
-		server = new Modbus_Server(memory.vector, { port: new_port(SERVER_PATH) });
+		server = new Modbus_Server(memory.vector, { port: SERVER_PATH, baud_rate: BAUD_RATE });
 		server.on('error', () => { });
 		const started = once(server, 'start');
 		server.start();
@@ -226,11 +225,10 @@ describe(`Modbus RTU client on ${PEER_PATH} <-> server on ${SERVER_PATH}`, { ski
 		await stopped;
 	});
 
-	test('reads and writes every table', { todo: 'design.md RTU / serial: serial constructor path' }, async () => {
-		const port = new_port(PEER_PATH);
+	test('reads and writes every table', async () => {
+		const client = new Modbus_Client(null, { port: PEER_PATH, baud_rate: BAUD_RATE, timeout: 1000 });
+		client.on('error', () => { });
 		try {
-			const client = new Modbus_Client(port, { timeout: 1000 });
-			client.on('error', () => { });
 			await client.connect();
 			memory.unit(1).holding.set([1, 2], 0);
 			memory.unit(1).input[0] = 3;
@@ -245,15 +243,14 @@ describe(`Modbus RTU client on ${PEER_PATH} <-> server on ${SERVER_PATH}`, { ski
 			assert.deepEqual(await client.read('00001,4'), hex('0b'));
 			assert.deepEqual(await client.read('10001,4'), hex('0b'));
 		} finally {
-			await close_port(port);
+			await close_port(client.stream);
 		}
 	});
 
 	test('concurrent requests are serialized', { todo: 'design.md RTU / serial: fixed transaction ID' }, async () => {
-		const port = new_port(PEER_PATH);
+		const client = new Modbus_Client(null, { port: PEER_PATH, baud_rate: BAUD_RATE, timeout: 1000 });
+		client.on('error', () => { });
 		try {
-			const client = new Modbus_Client(port, { timeout: 1000 });
-			client.on('error', () => { });
 			await client.connect();
 			memory.unit(1).holding.set([10, 20, 30], 100);
 			const values = await Promise.all([
@@ -261,7 +258,7 @@ describe(`Modbus RTU client on ${PEER_PATH} <-> server on ${SERVER_PATH}`, { ski
 			]);
 			assert.deepEqual(values.map((v) => v.readUInt16BE(0)), [10, 20, 30]);
 		} finally {
-			await close_port(port);
+			await close_port(client.stream);
 		}
 	});
 });

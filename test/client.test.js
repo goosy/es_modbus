@@ -2,10 +2,11 @@ import { describe, test, before, after, beforeEach, afterEach } from 'node:test'
 import assert from 'node:assert/strict';
 import { once } from 'node:events';
 import { Modbus_Client } from '../src/ModbusClient.js';
+import { set_serial_port_factory } from '../src/serial.js';
 import {
 	HOST, sleep, hex, rtu_frame, tcp_frame, reply_to,
 	start_fake_server, closed_port,
-	create_client, connect_client, close_client,
+	create_client, connect_client, close_client, Fake_Serial_Port,
 } from './helpers.js';
 
 /** A default slave reply for every TCP request frame in a received chunk. */
@@ -58,6 +59,20 @@ describe('Modbus_Client construction', () => {
 		assert.equal(tcp.protocol, 'tcp');
 		const rtu = new Modbus_Client(HOST, { reconnect_time: 0, rtu: true });
 		assert.equal(rtu.protocol, 'rtu_over_tcp');
+	});
+
+	test('a non-string address selects serial RTU on the device path `port`', () => {
+		const client = new Modbus_Client(null, {
+			reconnect_time: 0, port: 'COM_NONEXISTENT', baud_rate: 19200, parity: 2, stop_bits: 2,
+		});
+		assert.equal(client.protocol, 'rtu');
+		// Created when first opened
+		assert.equal(client.stream, null);
+	});
+
+	test('a serial client with an invalid serial option throws at construction', () => {
+		assert.throws(() => new Modbus_Client(null, { reconnect_time: 0 }), /Invalid serial port/);
+		assert.throws(() => new Modbus_Client(null, { reconnect_time: 0, port: 'COM9', parity: 3 }), /Invalid parity/);
 	});
 
 	test('option defaults', () => {
@@ -707,6 +722,102 @@ describe('Modbus_Client connection', () => {
 			close_client(client);
 			await fake.close();
 		}
+	});
+});
+
+describe('Modbus_Client serial port', () => {
+	let created;
+	// Records every port it creates in `created`
+	const recording_factory = async (settings) => {
+		const port = new Fake_Serial_Port(settings);
+		created.push(port);
+		return port;
+	};
+	before(() => set_serial_port_factory(recording_factory));
+	after(() => set_serial_port_factory(null));
+	beforeEach(() => {
+		created = [];
+	});
+
+	const serial_client = (options = {}) => new Modbus_Client(null, { port: 'COM9', ...options });
+
+	test('reconnect_time > 0 creates and opens the port at construction', async () => {
+		const client = serial_client({ baud_rate: 19200, parity: 'even' });
+		await once(client, 'connect');
+		assert.equal(created.length, 1);
+		assert.equal(client.stream, created[0]);
+		assert.deepEqual(created[0].settings, {
+			path: 'COM9', baudRate: 19200, parity: 'even', dataBits: 8, stopBits: 1,
+		});
+		assert.equal(created[0].opens, 1);
+		assert.equal(client.is_connected, true);
+	});
+
+	test('reconnect_time 0 creates and opens the port on the first request', async () => {
+		const client = serial_client({ reconnect_time: 0 });
+		await sleep(10);
+		assert.equal(created.length, 0);
+		const pending = client.read('40001', 1);
+		await once(client, 'send');
+		assert.equal(created[0].opens, 1);
+		assert.deepEqual(created[0].written, [rtu_frame('010300000001')]);
+		client.on_data(rtu_frame('0103020007'));
+		assert.deepEqual(await pending, hex('0007'));
+	});
+
+	test('connect() creates and opens the port once for concurrent callers', async () => {
+		const client = serial_client({ reconnect_time: 0 });
+		await Promise.all([client.connect(), client.connect()]);
+		assert.equal(created.length, 1);
+		assert.equal(created[0].opens, 1);
+		assert.equal(client.is_connected, true);
+		await client.connect();
+		assert.equal(created[0].opens, 1);
+	});
+
+	test('a failed open rejects connect(), emits error and fails the request', async () => {
+		set_serial_port_factory(async (settings) => Object.assign(new Fake_Serial_Port(settings), { fail_open: true }));
+		try {
+			const client = serial_client({ reconnect_time: 0 });
+			const errors = [];
+			client.on('error', (error) => errors.push(error));
+			await assert.rejects(client.connect(), /open failed/);
+			await assert.rejects(client.read('40001'), /connection lost/);
+			assert.ok(errors.some((error) => error.message === 'open failed'));
+		} finally {
+			set_serial_port_factory(recording_factory);
+		}
+	});
+
+	test('a port that cannot be created rejects connect(), and a later connect() retries', async () => {
+		let attempts = 0;
+		set_serial_port_factory(async (settings) => {
+			if (++attempts === 1) throw new Error('no native binding');
+			return new Fake_Serial_Port(settings);
+		});
+		try {
+			const client = serial_client({ reconnect_time: 0 });
+			client.on('error', () => { });
+			await assert.rejects(client.connect(), /no native binding/);
+			await client.connect();
+			assert.equal(attempts, 2);
+			assert.equal(client.is_connected, true);
+		} finally {
+			set_serial_port_factory(recording_factory);
+		}
+	});
+
+	test('disconnect() closes the port, which is not re-opened automatically', async () => {
+		const client = serial_client();
+		await once(client, 'connect');
+		const pending = client.read('40001');
+		assert.equal(created[0].written.length, 1);
+		client.disconnect();
+		await once(client, 'disconnect');
+		assert.equal(client.is_connected, false);
+		await assert.rejects(pending, /connection lost/);
+		await sleep(20);
+		assert.equal(created[0].opens, 1);
 	});
 });
 

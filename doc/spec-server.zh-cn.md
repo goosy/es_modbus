@@ -18,9 +18,16 @@ server.start();
 | 选项      | 默认值      | 含义                                                                          |
 | --------- | ----------- | ----------------------------------------------------------------------------- |
 | `host`    | `'0.0.0.0'` | 绑定地址（仅 TCP）。                                                          |
-| `port`    | `502`       | `number` → 监听该 TCP 端口。`string` → 作为串口设备路径打开。`SerialPort` 实例 → 直接使用（串口）。 |
+| `port`    | `502`       | `number` → 监听该 TCP 端口。`string` → 作为串口设备路径打开。其他值抛出 `Invalid port`；不接受串口实例。 |
 | `rtu`     | `false`     | `port` 为 `number` 时，在接受的 TCP 套接字上使用 RTU 帧格式（RTU-over-TCP）。串口忽略此项。 |
 | `unit_id` | 全部        | 应答哪些 Modbus 单元 ID；省略时为所有 ID（见 `set_unit_ids`）。              |
+| `baud_rate` | `9600`    | 串口波特率，正整数（否则抛出 `Invalid baud rate`）。 |
+| `parity`  | `'none'`    | 串口校验位：`'none'`、`'odd'`、`'even'`，或 `0` = 无、`1` = 奇、`2` = 偶。其他值抛出 `Invalid parity`。 |
+| `data_bits` | `8`       | 串口数据位：`5`、`6`、`7` 或 `8`（否则抛出 `Invalid data bits`）。 |
+| `stop_bits` | `1`       | 串口停止位：`1`、`1.5` 或 `2`（否则抛出 `Invalid stop bits`）。 |
+
+串口选项（`baud_rate`、`parity`、`data_bits`、`stop_bits`）只在 `port` 为串口设备路径时生效，对 TCP
+端口会被忽略。它们在构造时校验，无效时构造函数抛出异常；串口本身由 `start()` 创建并打开。
 
 ### 传输方式选择
 
@@ -30,7 +37,7 @@ server.start();
 | ----------------------------- | ------- | -------------- | --------------------------------------------------------------- |
 | `number`                      | `false` | TCP            | 监听 `host:port`；每个连接使用带 MBAP 的 Modbus TCP 帧格式。     |
 | `number`                      | `true`  | RTU-over-TCP   | 监听 `host:port`；每个连接使用 RTU 帧（单元 ID + PDU + CRC16）。 |
-| `string` 或 `SerialPort`      | 忽略    | RTU            | 打开串口，作为 Modbus RTU 从站应答。                             |
+| `string`                      | 忽略    | RTU            | 打开串口，作为 Modbus RTU 从站应答。                             |
 
 RTU 服务端就是串行线路上的 Modbus 从站：它没有连接，并以 CRC-16 封装响应。三种传输方式的请求
 处理（单元 ID 路由、`vector`、异常响应）完全相同；只有帧格式和生命周期事件不同。
@@ -85,7 +92,8 @@ Modicon 表示法（服务端只使用 PDU 地址）。始终会提供 `unit_id`
 ## 方法
 
 - `start()` — 开始监听（TCP）或打开串口。在先前已 `start()` 之后再次调用是安全的：它会关闭并
-  重新打开监听器/端口。
+  重新打开监听器/端口。首次串口 `start()` 会创建串口，此时才加载 `serialport` 及其原生绑定；
+  创建或打开串口失败时发出 `error`，之后的 `start()` 会重试。
 - `stop()` — TCP：销毁所有存活的套接字并关闭服务器。串口：关闭端口。
 - `is_valid_unit_id(unit_id)` — 服务端是否接受给定的单元 ID。
 

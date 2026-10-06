@@ -12,18 +12,32 @@ const client = new Modbus_Client(address, options);
 
 - `address`
   - **string** → TCP-family transport: TCP, or RTU-over-TCP when `options.rtu` is true.
-  - **non-string** (expected: a `SerialPort` instance) → serial RTU transport.
+  - **non-string** (for example `null`) → serial RTU transport on the device path
+    `options.port`, with the serial options below. The client creates the serial port itself;
+    it does not accept a port instance.
+
+```js
+const client = new Modbus_Client(null, { port: 'COM3', baud_rate: 19200, parity: 'even' });
+```
 
 ### options
 
 | Option           | Default | Meaning                                                                 |
 | ---------------- | ------- | --------------------------------------------------------------------- |
-| `port`           | `502`   | TCP port (ignored for serial).                                        |
+| `port`           | `502`   | TCP port. For a serial client, the serial device path (a non-empty `string`; anything else throws `Invalid serial port`). |
 | `rtu`            | `false` | With a string address, use RTU framing over the TCP socket.           |
 | `timeout`        | `1000`  | Per-transaction response timeout, ms. On expiry the request rejects and `timeout` is emitted. |
 | `delay`          | `20`    | Minimum gap between consecutive frame writes, ms (send pacing).       |
-| `reconnect_time` | `10000` | Reconnect delay for TCP and RTU-over-TCP, ms. `> 0` also makes the constructor connect immediately; `0` disables automatic reconnection. |
+| `reconnect_time` | `10000` | Reconnect delay for TCP and RTU-over-TCP, ms. `> 0` also makes the constructor connect immediately (for serial, open the port); `0` disables automatic reconnection. |
 | `modicon_zero_based` | `false` | `true` selects 0-based Modicon point numbering (see below). |
+| `baud_rate`      | `9600`  | Serial baud rate, a positive integer (else `Invalid baud rate`). |
+| `parity`         | `'none'` | Serial parity: `'none'`, `'odd'`, `'even'`, or `0` = none, `1` = odd, `2` = even. Anything else throws `Invalid parity`. |
+| `data_bits`      | `8`     | Serial data bits: `5`, `6`, `7` or `8` (else `Invalid data bits`). |
+| `stop_bits`      | `1`     | Serial stop bits: `1`, `1.5` or `2` (else `Invalid stop bits`). |
+
+The serial options (`baud_rate`, `parity`, `data_bits`, `stop_bits`) apply only to a serial
+client and are ignored for a TCP-family client. They are checked at construction, which throws on
+an invalid one; the serial port itself is created when it is first opened (see "Serial port").
 
 The constructor opens the connection automatically when `reconnect_time > 0`. With
 `reconnect_time = 0` the client does not reconnect by itself after the connection is lost, but
@@ -141,3 +155,11 @@ Closes the transport.
 - **Reconnect (TCP and RTU-over-TCP).** On `close` or `error`, if `reconnect_time > 0` the client
   retries after that delay; `connect()` called during the back-off rejects with
   `ERR_ILLEGAL_STATE`.
+- **Serial port.** The port is created and opened at construction when `reconnect_time > 0`,
+  otherwise on demand by the first request or `connect()`; concurrent callers share one open.
+  Creating the port loads `serialport` and its native binding, so a platform where the binding
+  cannot load fails here, not at import. A failed creation or open emits `error`, rejects
+  `connect()`, and rejects every pending request with `connection lost`; a later request or
+  `connect()` tries again. A closed serial port is never re-opened automatically (a close usually
+  means the device is gone); the next request or `connect()` opens it again. `disconnect()`
+  closes the port when it is open.

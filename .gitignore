@@ -23,7 +23,9 @@ yarn.lock
 # production
 .vscode/
 .vs/
-/modbus.js
+/dist/
+/prebuilds/
+/THIRD_PARTY_LICENSES
 
 # AI guidance (local only; canonical rules live in doc/ and the ancestor AGENTS.md)
 /CLAUDE.md

@@ -8,12 +8,48 @@ into `design-<topic>.md` files when it grows.
 ## Transport selection
 
 - **Client.** The constructor sets `this.protocol`: `tcp`, `rtu_over_tcp` (string address with
-  `rtu: true`), or `rtu` (non-string address).
+  `rtu: true`), or `rtu` (non-string address). For `rtu` it checks the serial options with
+  `serial_settings` and calls `set_serial` with the result; the port is created later.
 - **Decoding.** Response decoding branches on `protocol === 'tcp'` **only**, so `rtu_over_tcp` is
   decoded with the RTU parser (`parse_rtu_response`).
-- **Server.** The constructor stores a `number` port or a `SerialPort` instance as given, and
-  wraps a `string` port in a new `SerialPort`. `is_tcp` is a getter:
-  `typeof this.port === 'number'`.
+- **Server.** The constructor keeps `port` as given: a `number` (TCP) or a `string` device path,
+  whose options `serial_settings` checks into `this.serial_settings`; anything else throws.
+  `is_tcp` is a getter: `typeof this.port === 'number'`. The serial port is
+  `this.serial_port`, created by the first `start()` (`start_serial`, which shares one pending
+  creation and resets it on failure so a later `start()` retries); `send_response` and `stop`
+  use it.
+- **`src/serial.js`.** `serial_settings` validates the snake_case options and maps them to the
+  `serialport` settings (`port` → `path`, `baud_rate` → `baudRate`, `parity` with `0`/`1`/`2`
+  mapped to `none`/`odd`/`even`, `data_bits` → `dataBits`, `stop_bits` → `stopBits`).
+  `create_serial_port` makes a closed `SerialPortStream` (`@serialport/stream`) with the
+  `autoDetect()` binding of `@serialport/bindings-cpp` and `autoOpen: false`. It reaches both
+  packages through dynamic `import()`, never a static one: Rolldown turns a static import of a
+  CommonJS package into a top-level `require` that would run at import and load the native
+  binding, while a dynamic import becomes a deferred `require` inside the same file
+  (`codeSplitting: false`). Importing the two packages instead of `serialport` leaves its unused
+  parsers out of the bundle. `set_serial_port_factory` swaps the factory for tests.
+- **Client serial lifecycle.** `set_serial` assigns `_connect`, which creates the port once (a
+  failed creation is forgotten, so the next attempt retries), attaches its events
+  (`listen_serial`), and opens it once (concurrent calls share one pending open). A failure runs
+  `abort_pending()` and emits `error`. `is_connected` follows the port's `open` / `close`
+  events. The serial `close` / `error` handlers never call `reconnect()`, so `_conn_failed`
+  stays unset and a closed port is re-opened only on demand.
+
+## Build (`build.js`)
+
+- Bundles `src/index.js` with the Rolldown API into the single ES module `dist/modbus.js`.
+  `transform.define` replaces `__dirname` with `import.meta.dirname`: the bindings locate their
+  prebuilds with `path.join(__dirname, "../")`, and an ES module has no `__dirname`. The bundle
+  therefore finds them at `dist/../prebuilds`, the package root. `__dirname` appears only there
+  in the bundled code, so the replacement touches nothing else.
+- Replaces `prebuilds/` with a copy of `@serialport/bindings-cpp`'s `prebuilds/`, unchanged:
+  `node-gyp-build` picks `prebuilds/<platform>-<arch>/` and, on Linux, the glibc or musl file.
+- Writes `THIRD_PARTY_LICENSES` from the bundle's module IDs: every `node_modules` package in
+  the bundle with its name, version, license and license file, packages with the same license
+  text sharing an entry. The native prebuilds belong to `@serialport/bindings-cpp`, which is
+  among them.
+- A user who bundles es-modbus again moves `import.meta.dirname` to their own bundle; they must
+  copy `prebuilds/` next to it, or keep es-modbus external.
 
 ## Client range argument (`read` / `write`)
 
@@ -204,10 +240,6 @@ Each item is a defect or missing piece, not intended behavior.
 
 ### Client
 
-- [ ] **Serial constructor path.** `set_serial` is marked `@todo not finished` and never assigns
-  `this._connect`, yet the constructor calls `this._connect()` when `reconnect_time > 0`.
-  Constructing a serial client throws. Serial reconnect/`is_connected` handling is also not
-  defined.
 - [ ] **Fixed transaction ID.** RTU has no transaction field, so every RTU request shares
   `TRANSACTION_START`; concurrent requests overwrite each other's packet slot. RTU needs strict
   request/response serialization (one outstanding request at a time) which is not implemented.
@@ -227,14 +259,3 @@ Each item is a defect or missing piece, not intended behavior.
   client over a serial port pair, but on the development machine the com0com pair fails the
   suite's pre-check and the serial tests are skipped (see `spec-test.md`, "Serial test
   environment"). The RTU server path is covered only by unit tests with a fake serial port.
-
-### Dependency
-
-- [ ] **`serialport` is imported unconditionally.** It is declared as an optional peer dependency
-  (`peerDependencies` `>=10.0.0` + `peerDependenciesMeta.optional`) and kept `external` in
-  `rolldown.config.js`, but `src/ModbusServer.js` still does `import { SerialPort } from
-  'serialport'` at module top level. Importing the package without `serialport` installed
-  therefore throws for **every** user, including TCP-only ones. Making it truly optional needs a
-  lazy `import('serialport')` on the serial path only (and `instanceof SerialPort` replaced by a
-  duck-type check). Note: pnpm's `autoInstallPeers` installs it into this repository's own
-  `node_modules` during development, which hides the problem locally.

@@ -14,18 +14,30 @@ const client = new Modbus_Client(address, options);
 
 - `address`
   - **字符串** → TCP 系列传输：TCP；当 `options.rtu` 为真时为 RTU-over-TCP。
-  - **非字符串**（预期为 `SerialPort` 实例）→ 串口 RTU 传输。
+  - **非字符串**（例如 `null`）→ 在设备路径 `options.port` 上的串口 RTU 传输，使用下文的串口选项。
+    串口由客户端自行创建；不接受传入的串口实例。
+
+```js
+const client = new Modbus_Client(null, { port: 'COM3', baud_rate: 19200, parity: 'even' });
+```
 
 ### options
 
 | 选项             | 默认值  | 含义                                                                    |
 | ---------------- | ------- | ----------------------------------------------------------------------- |
-| `port`           | `502`   | TCP 端口（串口忽略）。                                                  |
+| `port`           | `502`   | TCP 端口。串口客户端中为串口设备路径（非空 `string`；否则抛出 `Invalid serial port`）。 |
 | `rtu`            | `false` | 地址为字符串时，在 TCP 套接字上使用 RTU 帧格式。                        |
 | `timeout`        | `1000`  | 单事务响应超时，毫秒。到期时请求被拒绝，并发出 `timeout` 事件。         |
 | `delay`          | `20`    | 连续两次帧写入之间的最小间隔，毫秒（发送节流）。                        |
-| `reconnect_time` | `10000` | TCP 和 RTU-over-TCP 的重连延迟，毫秒。`> 0` 同时使构造函数立即连接；`0` 禁用自动重连。 |
+| `reconnect_time` | `10000` | TCP 和 RTU-over-TCP 的重连延迟，毫秒。`> 0` 同时使构造函数立即连接（串口则打开端口）；`0` 禁用自动重连。 |
 | `modicon_zero_based` | `false` | `true` 选择 0 起始的 Modicon 点号编号（见下文）。 |
+| `baud_rate`      | `9600`  | 串口波特率，正整数（否则抛出 `Invalid baud rate`）。 |
+| `parity`         | `'none'` | 串口校验位：`'none'`、`'odd'`、`'even'`，或 `0` = 无、`1` = 奇、`2` = 偶。其他值抛出 `Invalid parity`。 |
+| `data_bits`      | `8`     | 串口数据位：`5`、`6`、`7` 或 `8`（否则抛出 `Invalid data bits`）。 |
+| `stop_bits`      | `1`     | 串口停止位：`1`、`1.5` 或 `2`（否则抛出 `Invalid stop bits`）。 |
+
+串口选项（`baud_rate`、`parity`、`data_bits`、`stop_bits`）只对串口客户端生效，对 TCP 系列客户端
+会被忽略。它们在构造时校验，无效时构造函数抛出异常；串口本身在首次打开时才创建（见“串口”）。
 
 当 `reconnect_time > 0` 时，构造函数会自动打开连接。`reconnect_time = 0` 时，连接丢失后客户端不会
 自行重连，但仍会按需连接：第一个请求（或 `connect()`）会打开连接。
@@ -126,3 +138,9 @@ FC 15/16 的数量）。回显与请求一致时为 `true`，不一致时为 `fa
   期间发出的请求会被立即拒绝，而不是入队。
 - **重连（TCP 和 RTU-over-TCP）。** 发生 `close` 或 `error` 时，若 `reconnect_time > 0`，客户端
   在该延迟后重试；退避期间调用 `connect()` 会以 `ERR_ILLEGAL_STATE` 拒绝。
+- **串口。** `reconnect_time > 0` 时串口在构造时创建并打开，否则由第一个请求或 `connect()` 按需
+  创建并打开；并发的调用者共用同一次打开。创建串口时才加载 `serialport` 及其原生绑定，因此在原生
+  绑定无法加载的平台上，失败发生在这里，而不是在导入时。创建或打开失败时发出 `error`、拒绝
+  `connect()`，并以 `connection lost` 拒绝所有待决请求；之后的请求或 `connect()` 会重试。已关闭的
+  串口绝不自动重新打开（关闭通常意味着设备已不在）；下一个请求或 `connect()` 会再次打开它。
+  `disconnect()` 在串口打开时将其关闭。

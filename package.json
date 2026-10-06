@@ -4,25 +4,28 @@
   "description": "",
   "type": "module",
   "exports": {
-    ".": "./modbus.js"
+    ".": "./dist/modbus.js"
+  },
+  "files": [
+    "dist",
+    "prebuilds",
+    "THIRD_PARTY_LICENSES"
+  ],
+  "engines": {
+    "node": ">=20.11"
   },
   "devDependencies": {
     "@eslint/js": "10.0.1",
+    "@serialport/bindings-cpp": "13.0.0",
+    "@serialport/stream": "13.0.0",
     "@stylistic/eslint-plugin": "5.10.0",
     "eslint": "10.12.0",
     "globals": "17.13.0",
-    "rolldown": "^1.2.12"
-  },
-  "peerDependencies": {
-    "serialport": ">=10.0.0"
-  },
-  "peerDependenciesMeta": {
-    "serialport": {
-      "optional": true
-    }
+    "rolldown": "^1.2.12",
+    "serialport": "13.0.0"
   },
   "scripts": {
-    "build": "rolldown -c",
+    "build": "node build.js",
     "test": "pnpm build && node --test \"test/**/*.test.js\"",
     "test:coverage": "pnpm build && node --test --experimental-test-coverage --test-coverage-include=\"src/**\" \"test/**/*.test.js\"",
     "prepare": "pnpm build",

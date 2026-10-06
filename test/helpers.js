@@ -1,6 +1,6 @@
 // Shared test fixtures: in-memory vector, frame builders, fake peers.
 import { createServer, Socket } from 'node:net';
-import { once } from 'node:events';
+import { once, EventEmitter } from 'node:events';
 import { Modbus_Client } from '../src/ModbusClient.js';
 import { Modbus_Server } from '../src/ModbusServer.js';
 import { modbus_crc16 } from '../src/util.js';
@@ -82,6 +82,49 @@ export function fake_socket() {
 			this.written.push(Buffer.from(buffer));
 		},
 	};
+}
+
+/**
+ * A serial port stand-in for set_serial_port_factory(): open(callback) / close(callback)
+ * complete asynchronously like the real port, and writes are recorded. `settings` holds what
+ * it was created with; `fail_open` makes the next open fail.
+ */
+export class Fake_Serial_Port extends EventEmitter {
+	isOpen = false;
+	opens = 0;
+	written = [];
+	fail_open = false;
+	constructor(settings) {
+		super();
+		this.settings = settings;
+	}
+
+	open(callback) {
+		this.opens++;
+		setImmediate(() => {
+			if (this.fail_open) {
+				const error = new Error('open failed');
+				if (callback) callback(error);
+				else this.emit('error', error);
+				return;
+			}
+			this.isOpen = true;
+			this.emit('open');
+			callback?.(null);
+		});
+	}
+
+	close(callback) {
+		setImmediate(() => {
+			this.isOpen = false;
+			this.emit('close');
+			callback?.(null);
+		});
+	}
+
+	write(buffer) {
+		this.written.push(Buffer.from(buffer));
+	}
 }
 
 /**

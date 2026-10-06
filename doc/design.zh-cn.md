@@ -9,11 +9,42 @@
 ## 传输方式选择
 
 - **客户端。** 构造函数设置 `this.protocol`：`tcp`、`rtu_over_tcp`（字符串地址且 `rtu: true`）
-  或 `rtu`（非字符串地址）。
+  或 `rtu`（非字符串地址）。对 `rtu`，先用 `serial_settings` 校验串口选项，再以结果调用
+  `set_serial`；串口在之后才创建。
 - **解码。** 响应解码**仅**按 `protocol === 'tcp'` 分支，因此 `rtu_over_tcp` 使用 RTU 解析器
   （`parse_rtu_response`）解码。
-- **服务端。** 构造函数对 `number` 端口或 `SerialPort` 实例原样保存，对 `string` 端口则包装成新的
-  `SerialPort`。`is_tcp` 是一个 getter：`typeof this.port === 'number'`。
+- **服务端。** 构造函数原样保存 `port`：`number`（TCP）或 `string` 设备路径；后者的选项由
+  `serial_settings` 校验后存入 `this.serial_settings`；其他值抛出异常。`is_tcp` 是一个 getter：
+  `typeof this.port === 'number'`。串口是 `this.serial_port`，由首次 `start()` 创建
+  （`start_serial`：共用同一个待决的创建，失败时将其重置，使之后的 `start()` 重试）；
+  `send_response` 和 `stop` 使用它。
+- **`src/serial.js`。** `serial_settings` 校验 snake_case 选项，并转换为 `serialport` 的参数
+  （`port` → `path`，`baud_rate` → `baudRate`，`parity` 中 `0`/`1`/`2` 映射为 `none`/`odd`/`even`，
+  `data_bits` → `dataBits`，`stop_bits` → `stopBits`）。`create_serial_port` 以
+  `@serialport/bindings-cpp` 的 `autoDetect()` 绑定和 `autoOpen: false` 创建一个未打开的
+  `SerialPortStream`（`@serialport/stream`）。它通过动态 `import()` 引用这两个包，绝不静态导入：
+  Rolldown 会把对 CommonJS 包的静态导入变成顶层的 `require`，在导入时就执行并加载原生绑定；动态
+  导入则变成同一文件内延迟执行的 `require`（`codeSplitting: false`）。只导入这两个包而不导入
+  `serialport`，可以把用不到的 parser 排除在打包产物之外。`set_serial_port_factory` 供测试替换工厂。
+- **客户端串口生命周期。** `set_serial` 为 `_connect` 赋值：它只创建一次串口（创建失败会被遗忘，
+  下次尝试会重试），挂接串口事件（`listen_serial`），并只打开一次（并发调用共用同一个待决的
+  打开）。失败时执行 `abort_pending()` 并发出 `error`。`is_connected` 跟随串口的 `open` /
+  `close` 事件。串口的 `close` / `error` 处理从不调用 `reconnect()`，因此 `_conn_failed` 不会被
+  设置，已关闭的串口只会按需重新打开。
+
+## 构建（`build.js`）
+
+- 用 Rolldown API 把 `src/index.js` 打包为单个 ES 模块 `dist/modbus.js`。`transform.define` 把
+  `__dirname` 替换为 `import.meta.dirname`：绑定以 `path.join(__dirname, "../")` 查找预编译文件，
+  而 ES 模块没有 `__dirname`。因此打包产物在 `dist/../prebuilds`（即包根目录）处找到它们。打包代码
+  中只有这一处 `__dirname`，替换不会影响其他代码。
+- 用 `@serialport/bindings-cpp` 的 `prebuilds/` 原样替换 `prebuilds/`：`node-gyp-build` 会选择
+  `prebuilds/<平台>-<架构>/`，在 Linux 上再按 glibc 或 musl 选择文件。
+- 依据打包产物的模块 ID 生成 `THIRD_PARTY_LICENSES`：列出产物中每个来自 `node_modules` 的包的
+  名称、版本、许可证和许可证文件，许可证文本相同的包共用一项。原生预编译文件属于
+  `@serialport/bindings-cpp`，它也在其中。
+- 用户若再次打包 es-modbus，`import.meta.dirname` 会变成其自身产物的目录；他们需要把
+  `prebuilds/` 复制到产物旁边，或把 es-modbus 设为 external。
 
 ## 客户端区间参数（`read` / `write`）
 
@@ -176,9 +207,6 @@
 
 ### 客户端
 
-- [ ] **串口构造路径。** `set_serial` 标记为 `@todo not finished`，且从未给 `this._connect`
-  赋值，而构造函数在 `reconnect_time > 0` 时会调用 `this._connect()`。构造串口客户端会抛出异常。
-  串口的重连和 `is_connected` 处理也尚未定义。
 - [ ] **固定的事务 ID。** RTU 没有事务字段，因此所有 RTU 请求共用 `TRANSACTION_START`；并发请求
   会互相覆盖各自的 packet 槽位。RTU 需要严格的请求/响应串行化（同一时刻只有一个未完成的请求），
   目前尚未实现。
@@ -196,13 +224,3 @@
 - [ ] **串口路径未经端到端验证。** `test/serial.test.js` 通过一对串口测试 RTU 服务端和客户端，
   但在开发机上 com0com 端口对未通过套件的预检，串口测试被跳过（见 `spec-test.zh-cn.md`
   “串口测试环境”）。RTU 服务端路径目前只由使用伪串口的单元测试覆盖。
-
-### 依赖
-
-- [ ] **`serialport` 被无条件导入。** 它已声明为可选 peer 依赖（`peerDependencies` `>=10.0.0` +
-  `peerDependenciesMeta.optional`），并在 `rolldown.config.js` 中保持 `external`，但
-  `src/ModbusServer.js` 仍在模块顶层执行 `import { SerialPort } from 'serialport'`。因此在未安装
-  `serialport` 时导入本包，会对**所有**用户抛出异常，包括只用 TCP 的用户。要做到真正可选，需要
-  仅在串口路径上惰性执行 `import('serialport')`（并把 `instanceof SerialPort` 换成鸭子类型判断）。
-  注意：开发时 pnpm 的 `autoInstallPeers` 会把它装进本仓库自己的 `node_modules`，这会在本地掩盖
-  这个问题。

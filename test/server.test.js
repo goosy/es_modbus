@@ -1,23 +1,13 @@
-import { describe, test, beforeEach, afterEach } from 'node:test';
+import { describe, test, before, after, beforeEach, afterEach } from 'node:test';
 import assert from 'node:assert/strict';
 import { once } from 'node:events';
-import { SerialPort } from 'serialport';
 import { Modbus_Server } from '../src/ModbusServer.js';
+import { set_serial_port_factory } from '../src/serial.js';
 import {
 	HOST, sleep, hex, rtu_frame, tcp_frame, collect,
-	create_memory_vector, fake_socket,
+	create_memory_vector, fake_socket, Fake_Serial_Port,
 	start_tcp_server, stop_tcp_server, raw_connect,
 } from './helpers.js';
-
-/** A SerialPort stand-in that records writes and is never opened. */
-function fake_serial_port() {
-	return Object.assign(Object.create(SerialPort.prototype), {
-		written: [],
-		write(buffer) {
-			this.written.push(Buffer.from(buffer));
-		},
-	});
-}
 
 /** Sends one TCP request to a server through a fake socket; returns the written responses. */
 function tcp_exchange(server, frame) {
@@ -45,24 +35,136 @@ describe('Modbus_Server construction', () => {
 		assert.equal(server.is_tcp, true);
 	});
 
-	test('a SerialPort instance selects serial RTU', () => {
-		const port = new SerialPort({ path: 'COM_NONEXISTENT', baudRate: 9600, autoOpen: false });
-		const server = new Modbus_Server({}, { port });
-		assert.equal(server.port, port);
-		assert.equal(server.is_tcp, false);
-		assert.equal(server.sockets, null);
-	});
-
-	test('a string port selects serial RTU on that device path', { todo: 'spec.md open question: serial parameters' }, () => {
+	test('a string port selects serial RTU on that device path, with default serial settings', () => {
 		const server = new Modbus_Server({}, { port: 'COM_NONEXISTENT' });
 		assert.equal(server.is_tcp, false);
-		assert.equal(server.port.path, 'COM_NONEXISTENT');
+		assert.equal(server.port, 'COM_NONEXISTENT');
+		assert.equal(server.sockets, null);
+		assert.equal(server.serial_port, null);
+		assert.deepEqual(server.serial_settings, {
+			path: 'COM_NONEXISTENT', baudRate: 9600, parity: 'none', dataBits: 8, stopBits: 1,
+		});
 	});
 
-	test('an unsupported port type falls back to TCP port 502', () => {
-		const server = new Modbus_Server({}, { port: {} });
-		assert.equal(server.port, 502);
-		assert.equal(server.is_tcp, true);
+	test('the flat serial options set the serial settings', () => {
+		const server = new Modbus_Server({}, {
+			port: 'COM_NONEXISTENT', baud_rate: 19200, parity: 'even', data_bits: 7, stop_bits: 2,
+		});
+		assert.deepEqual(server.serial_settings, {
+			path: 'COM_NONEXISTENT', baudRate: 19200, parity: 'even', dataBits: 7, stopBits: 2,
+		});
+	});
+
+	test('parity accepts 0 = none, 1 = odd, 2 = even', () => {
+		for (const [code, name] of [[0, 'none'], [1, 'odd'], [2, 'even']]) {
+			const server = new Modbus_Server({}, { port: 'COM_NONEXISTENT', parity: code });
+			assert.equal(server.serial_settings.parity, name);
+		}
+	});
+
+	test('an invalid serial option throws at construction', () => {
+		const cases = [
+			...[3, -1, 'EVEN', 'mark', true].map((parity) => [{ parity }, /Invalid parity/]),
+			...[0, 9600.5, '9600'].map((baud_rate) => [{ baud_rate }, /Invalid baud rate/]),
+			...[4, 9, '8'].map((data_bits) => [{ data_bits }, /Invalid data bits/]),
+			...[0, 3, '1'].map((stop_bits) => [{ stop_bits }, /Invalid stop bits/]),
+			[{ port: '' }, /Invalid serial port/],
+		];
+		for (const [options, error] of cases) {
+			assert.throws(
+				() => new Modbus_Server({}, { port: 'COM_NONEXISTENT', ...options }),
+				error,
+				JSON.stringify(options),
+			);
+		}
+	});
+
+	test('a port that is neither a number nor a string throws', () => {
+		for (const port of [{}, [], true]) {
+			assert.throws(() => new Modbus_Server({}, { port }), /Invalid port/);
+		}
+	});
+});
+
+describe('Modbus_Server serial lifecycle', () => {
+	let created;
+	// Records every port it creates in `created`
+	const recording_factory = async (settings) => {
+		const port = new Fake_Serial_Port(settings);
+		created.push(port);
+		return port;
+	};
+	before(() => set_serial_port_factory(recording_factory));
+	after(() => set_serial_port_factory(null));
+	beforeEach(() => {
+		created = [];
+	});
+
+	test('start() creates the serial port from the settings and opens it', async () => {
+		const server = new Modbus_Server({}, { port: 'COM9', baud_rate: 19200 });
+		server.start();
+		await once(server, 'start');
+		assert.equal(created.length, 1);
+		assert.equal(server.serial_port, created[0]);
+		assert.equal(created[0].settings.path, 'COM9');
+		assert.equal(created[0].settings.baudRate, 19200);
+		assert.equal(created[0].isOpen, true);
+		assert.equal(server.initialized, true);
+	});
+
+	test('stop() closes the port; start() re-opens the same port', async () => {
+		const server = new Modbus_Server({}, { port: 'COM9' });
+		server.start();
+		await once(server, 'start');
+		server.stop();
+		await once(server, 'stop');
+		assert.equal(created[0].isOpen, false);
+		server.start();
+		await once(server, 'start');
+		assert.equal(created.length, 1);
+		assert.equal(created[0].opens, 2);
+	});
+
+	test('start() on an open port closes and re-opens it', async () => {
+		const server = new Modbus_Server({}, { port: 'COM9' });
+		server.start();
+		await once(server, 'start');
+		const stopped = once(server, 'stop');
+		server.start();
+		await stopped;
+		await once(server, 'start');
+		assert.equal(created[0].opens, 2);
+	});
+
+	test('an open failure is emitted as error', async () => {
+		set_serial_port_factory(async (settings) => Object.assign(new Fake_Serial_Port(settings), { fail_open: true }));
+		try {
+			const server = new Modbus_Server({}, { port: 'COM9' });
+			server.start();
+			const [error] = await once(server, 'error');
+			assert.equal(error.message, 'open failed');
+		} finally {
+			set_serial_port_factory(recording_factory);
+		}
+	});
+
+	test('a port that cannot be created is emitted as error, and a later start() retries', async () => {
+		let attempts = 0;
+		set_serial_port_factory(async (settings) => {
+			if (++attempts === 1) throw new Error('no native binding');
+			return new Fake_Serial_Port(settings);
+		});
+		try {
+			const server = new Modbus_Server({}, { port: 'COM9' });
+			server.start();
+			const [error] = await once(server, 'error');
+			assert.equal(error.message, 'no native binding');
+			server.start();
+			await once(server, 'start');
+			assert.equal(attempts, 2);
+		} finally {
+			set_serial_port_factory(recording_factory);
+		}
 	});
 });
 
@@ -366,8 +468,9 @@ describe('Modbus_Server request handling (RTU framing)', () => {
 	let server;
 	beforeEach(() => {
 		memory = create_memory_vector();
-		port = fake_serial_port();
-		server = new Modbus_Server(memory.vector, { port });
+		port = new Fake_Serial_Port();
+		server = new Modbus_Server(memory.vector, { port: 'COM9' });
+		server.serial_port = port;
 	});
 
 	test('responses carry a CRC and no MBAP', () => {

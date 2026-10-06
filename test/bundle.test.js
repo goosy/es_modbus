@@ -1,4 +1,4 @@
-// Checks the build output `modbus.js` (the package entry), not `src/`.
+// Checks the build output `dist/modbus.js` (the package entry) and `prebuilds/`, not `src/`.
 // Skipped when the bundle is missing or older than `src/`; run `pnpm build` first.
 import { describe, test, before, after } from 'node:test';
 import assert from 'node:assert/strict';
@@ -6,7 +6,8 @@ import { once } from 'node:events';
 import { readFile, readdir, stat } from 'node:fs/promises';
 import { HOST, hex, create_memory_vector } from './helpers.js';
 
-const bundle_url = new URL('../modbus.js', import.meta.url);
+const bundle_url = new URL('../dist/modbus.js', import.meta.url);
+const root_url = new URL('../', import.meta.url);
 const src_url = new URL('../src/', import.meta.url);
 
 async function check_bundle() {
@@ -14,11 +15,11 @@ async function check_bundle() {
 	try {
 		bundle_time = (await stat(bundle_url)).mtimeMs;
 	} catch {
-		return 'modbus.js not found; run `pnpm build` first';
+		return 'dist/modbus.js not found; run `pnpm build` first';
 	}
 	for (const name of await readdir(src_url)) {
 		if ((await stat(new URL(name, src_url))).mtimeMs > bundle_time) {
-			return `modbus.js is older than src/${name}; run \`pnpm build\` first`;
+			return `dist/modbus.js is older than src/${name}; run \`pnpm build\` first`;
 		}
 	}
 	return false;
@@ -26,7 +27,12 @@ async function check_bundle() {
 
 const skip = await check_bundle();
 
-describe('build output modbus.js', { skip }, () => {
+/** Whether the serialport native binding is loaded in this process. */
+function native_binding_loaded() {
+	return process.report.getReport().sharedObjects.some((file) => /bindings-cpp.*\.node$/.test(file));
+}
+
+describe('build output dist/modbus.js', { skip }, () => {
 	let bundle;
 	before(async () => {
 		bundle = await import(bundle_url);
@@ -40,13 +46,35 @@ describe('build output modbus.js', { skip }, () => {
 
 	test('package.json exports points at the bundle', async () => {
 		const pkg = JSON.parse(await readFile(new URL('../package.json', import.meta.url), 'utf8'));
-		assert.equal(pkg.exports['.'], './modbus.js');
+		assert.equal(pkg.exports['.'], './dist/modbus.js');
 	});
 
-	test('serialport is kept external, not bundled', async () => {
+	test('serialport is bundled, not imported from outside', async () => {
 		const code = await readFile(bundle_url, 'utf8');
-		assert.match(code, /from\s*["']serialport["']/);
-		assert.doesNotMatch(code, /class SerialPortStream/);
+		assert.match(code, /SerialPortStream = class extends/);
+		assert.doesNotMatch(code, /from\s*["']@?serialport/);
+		assert.doesNotMatch(code, /require\(\s*["']@?serialport/);
+		// ES modules have no __dirname; the bindings find prebuilds/ from the bundle's directory
+		assert.doesNotMatch(code, /\b__dirname\b/);
+	});
+
+	test('the native prebuilds and the third-party licenses are next to dist/', async () => {
+		const platforms = await readdir(new URL('prebuilds/', root_url));
+		assert.ok(platforms.some((name) => name.startsWith(`${process.platform}-`)), platforms.join());
+		const licenses = await readFile(new URL('THIRD_PARTY_LICENSES', root_url), 'utf8');
+		for (const name of ['@serialport/stream', '@serialport/bindings-cpp', 'debug', 'node-gyp-build']) {
+			assert.match(licenses, new RegExp(`^${name}@`, 'm'), name);
+		}
+	});
+
+	test('importing the bundle does not load the native binding; the first serial start does', async () => {
+		assert.equal(native_binding_loaded(), false);
+		const server = new bundle.Modbus_Server({}, { port: 'COM_NONEXISTENT_ES_MODBUS' });
+		server.start();
+		const [error] = await once(server, 'error');
+		// Opening a missing device fails in the native binding, which therefore loaded
+		assert.doesNotMatch(error.message, /native build/);
+		assert.equal(native_binding_loaded(), true);
 	});
 
 	describe('TCP round trip with the bundled classes', () => {

@@ -49,13 +49,19 @@
 
 - **运行时：** 使用 ES 模块的 Node.js（`"type": "module"`）。运行时只使用 Node 内置模块
   （`node:net`、`node:events`），串口/RTU 路径另外使用 `serialport`。
-  `serialport` 由用户自行提供：它是可选的 peer 依赖
-  （`peerDependencies` + `peerDependenciesMeta.optional`），只用 TCP 的用户无需安装它就能使用本库。
+  发布的包**没有任何运行时依赖**：用户只需安装 `es-modbus`。`serialport`（其中的
+  `@serialport/stream` 和 `@serialport/bindings-cpp` 两部分）被打包进 `dist/modbus.js`，
+  `@serialport/bindings-cpp` 的原生预编译文件随包放在 `prebuilds/` 中（基于 N-API，每个平台一份文件
+  即可用于所有 Node.js 版本）。打包产物只在首次使用串口时才加载 `serialport`，绝不在导入时加载：
+  加载它会加载原生绑定，而在没有预编译文件的平台上（或禁止原生模块的进程中），TCP 也必须可用。
+  被打包的包的许可证随包放在 `THIRD_PARTY_LICENSES` 中。
+- **Node.js 版本：** `>=20.11`（`engines`），因为用到了 `import.meta.dirname`。
 - **包管理器：** pnpm（必须使用 — 见 `AGENTS.md`）。
-- **打包器：** Rolldown（内置 Node 模块解析、CommonJS 互操作与 JSON 导入，无需插件）。
-- **测试：** Node.js 内置测试运行器（`node:test`）。开发时 `serialport` 由 pnpm 的
-  `auto-install-peers`（默认开启）安装，使串口测试和服务端模块可以加载；它不列在
-  `devDependencies` 中。
+- **打包器：** Rolldown，由 `build.js` 通过其 API 调用（内置 Node 模块解析与 CommonJS 互操作，
+  无需插件）。
+- **测试：** Node.js 内置测试运行器（`node:test`）。`serialport`、`@serialport/stream` 和
+  `@serialport/bindings-cpp` 列在 `devDependencies` 中：构建时打包它们，串口测试用 `serialport`
+  作为原始对端串口。
 - **代码检查：** ESLint 加 `@stylistic/eslint-plugin`（`eslint.config.js`），均在 `devDependencies`
   中锁定精确版本。ESLint 推荐规则负责发现代码问题；`@stylistic` 只统一空白（Tab 缩进、空格、引号、
   分号），不重新折行，因此手工排版的表格保持原样。不使用会重排代码的格式化工具（Prettier、Biome）。
@@ -68,16 +74,21 @@
 | `src/ModbusClient.js` | 客户端类。                                                       |
 | `src/ModbusServer.js` | 服务端类。                                                       |
 | `src/util.js`         | 纯协议编解码（帧解析、CRC、区间解析）。无 I/O。                  |
-| `rolldown.config.js`  | 将 `src/index.js` 打包为 `modbus.js`（ESM）。                    |
+| `src/serial.js`       | 串口选项校验，以及串口创建（首次使用时才加载 `serialport`）。    |
+| `build.js`            | 构建：将 `src/index.js` 打包为 `dist/modbus.js`，复制 `prebuilds/`，生成 `THIRD_PARTY_LICENSES`。 |
 | `eslint.config.js`    | ESLint 与 `@stylistic` 配置。                                    |
-| `modbus.js`           | 构建产物，也是包 `exports` 的入口。已被 git 忽略；由 `pnpm build` / `prepare` 生成。 |
+| `dist/modbus.js`      | 构建产物（单个 ES 模块），也是包 `exports` 的入口。              |
+| `prebuilds/`          | 构建产物：`@serialport/bindings-cpp` 的原生预编译文件，打包产物在 `dist/../prebuilds` 处查找它们。 |
+| `THIRD_PARTY_LICENSES` | 构建产物：被打包的包的许可证文本。                              |
 | `test/*.test.js`      | 自动化测试（见 `spec-test.zh-cn.md`）。                          |
 | `test/helpers.js`     | 共享的测试夹具。                                                 |
+
+构建产物已被 git 忽略，由 `pnpm build` / `prepare` 生成，并通过 `package.json` 的 `files` 发布。
 
 命令：
 
 - `pnpm install`
-- `pnpm build` — 在导入 `../modbus.js` 的任何操作之前运行。
+- `pnpm build` — 运行 `build.js`；在导入 `../dist/modbus.js` 的任何操作之前运行。
 - `pnpm test` — 先构建，再运行自动化测试套件（`node --test`）。
 - `pnpm test:coverage` — 运行测试套件并输出 `src/` 的覆盖率报告。
 - `pnpm lint` — 运行 ESLint（`eslint .`）；`pnpm lint --fix` 应用可自动修复的规则。它与 `pnpm test`
@@ -94,9 +105,6 @@
 
 spec 尚未做出的决定。先在 spec 中定下来，再去实现。
 
-- **串口参数。** 服务端 `string` 类型的 `port` 被传给 `new SerialPort(port)`，但 `serialport` 需要
-  一个选项对象（路径、波特率、校验位……）。除了直接传入现成的 `SerialPort` 实例，spec 没有定义
-  给出串口参数的方法。
 - **不完整的 TCP 帧。** 对 TCP，spec 只要求拆分被合并的帧（对 RTU-over-TCP 则要求按长度界定）。
   代码还会丢弃末尾不完整的帧，而不是缓冲到下一次读取（客户端的 `unprocessed_buffer` 字段未被
   使用）。需要决定 TCP 是否也要求缓冲。
