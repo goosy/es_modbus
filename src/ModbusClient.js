@@ -9,6 +9,16 @@ import { serial_settings, create_serial_port } from './serial.js';
 
 const BROADCAST_ID = 0;
 
+// Connection phases: the client is in exactly one at a time (see design.md, "Client connection state")
+const STATE = Object.freeze({
+	IDLE: 0,
+	CONNECTING: 1,
+	CONNECTED: 2,
+	DISCONNECTING: 3,
+	DISCONNECTED: 4,
+	BACKING_OFF: 5,
+});
+
 function check_unit_id(unit_id) {
 	if (!Number.isInteger(unit_id) || unit_id < 0 || unit_id > 255) {
 		throw new Error(`Invalid unit ID: ${unit_id}`);
@@ -122,7 +132,45 @@ export class Modbus_Client extends EventEmitter {
 		return this.#modicon_zero_based;
 	}
 
-	is_connected = false;
+	#state = STATE.IDLE;
+	get is_idle() {
+		return this.#state === STATE.IDLE;
+	}
+
+	get is_connecting() {
+		return this.#state === STATE.CONNECTING;
+	}
+
+	get is_connected() {
+		return this.#state === STATE.CONNECTED;
+	}
+
+	get is_disconnecting() {
+		return this.#state === STATE.DISCONNECTING;
+	}
+
+	get is_disconnected() {
+		return this.#state === STATE.DISCONNECTED;
+	}
+
+	get is_backing_off() {
+		return this.#state === STATE.BACKING_OFF;
+	}
+
+	// Whether the client may open the connection by itself
+	get enable_reconnect() {
+		return !(this.is_disconnecting || this.is_disconnected);
+	}
+
+	// Non-null exactly while backing off
+	#reconnect_timer = null;
+	// Callbacks of the connect attempt in progress: { on_connect, on_error }
+	#connect_waiters = [];
+	// connect() calls waiting for a disconnect to complete: { resolve, reject }
+	#waiting_connects = [];
+	// Resolvers of the disconnect() calls waiting for the transport to close
+	#disconnect_waiters = [];
+
 	timeout; // response timeout
 	delay; // delay between pools
 
@@ -186,7 +234,7 @@ export class Modbus_Client extends EventEmitter {
 			this.protocol = 'rtu';
 		}
 
-		if (this.reconnect_time > 0) this._connect();
+		if (this.reconnect_time > 0) this.#start_connect();
 	}
 
 	send_queue = [];
@@ -213,8 +261,8 @@ export class Modbus_Client extends EventEmitter {
 				this.#busy = false;
 				this.sending();
 			}, this.delay);
-		} else if (!this._conn_failed) {
-			this._connect(
+		} else if (this.is_idle || this.is_connecting) {
+			this.#start_connect(
 				() => this.sending(),
 				() => this.emit('error', 'send failed!'),
 			);
@@ -233,11 +281,13 @@ export class Modbus_Client extends EventEmitter {
 	}
 
 	process_packet_transaction(packet) {
-		if (this._conn_failed) {
-			// A request issued during a reconnect back-off fails at once and is never queued
+		if (this.is_backing_off || !this.enable_reconnect) {
+			// A request issued during a reconnect back-off or after disconnect() fails at once
+			// and is never queued
 			packet.status = 'rejected';
-			// Emitted only when listened to, so a valid call never throws synchronously
-			if (this.listenerCount('error') > 0) {
+			// Emitted only for a back-off (after disconnect() the caller closed the connection),
+			// and only when listened to, so a valid call never throws synchronously
+			if (this.is_backing_off && this.listenerCount('error') > 0) {
 				this.emit('error', 'Attempting to transfer data when a connection could not be established.');
 			}
 			return Promise.reject(new Error('connection lost'));
@@ -429,31 +479,106 @@ export class Modbus_Client extends EventEmitter {
 
 	connect() {
 		return new Promise((resolve, reject) => {
-			if (this.is_connected) {
-				resolve();
-			} else if (this._conn_failed) {
+			if (this.is_backing_off) {
 				reject(new Error('ERR_ILLEGAL_STATE'));
+			} else if (this.is_disconnecting) {
+				// Starts once the close completes
+				this.#waiting_connects.push({ resolve, reject });
 			} else {
-				this._connect(resolve, reject);
+				this.#start_connect(resolve, reject);
 			}
 		});
 	};
 
-	reconnect() {
-		if (this.reconnect_time > 0) {
-			if (this._conn_failed) return;
-			this._conn_failed = true;
-			setTimeout(() => {
-				this._conn_failed = false;
-				this._connect();
-			}, this.reconnect_time);
-		} else {
-			this._conn_failed = false;
+	/**
+     * Closes the transport and keeps it closed: no reconnect and no on-demand connect until
+     * the next `connect()`. Resolves once the transport has closed, never rejects.
+     */
+	disconnect() {
+		for (const { reject } of this.#waiting_connects.splice(0)) {
+			reject(new Error('connection lost'));
 		}
-	};
+		if (this.is_disconnecting) {
+			return new Promise((resolve) => this.#disconnect_waiters.push(resolve));
+		}
+		if (this.is_connecting || this.is_connected) {
+			this.#state = STATE.DISCONNECTING;
+			const closed = new Promise((resolve) => this.#disconnect_waiters.push(resolve));
+			this._close();
+			return closed;
+		}
+		// IDLE, BACKING_OFF or DISCONNECTED: no transport event will follow
+		clearTimeout(this.#reconnect_timer);
+		this.#reconnect_timer = null;
+		this.#state = STATE.DISCONNECTED;
+		this.abort_pending();
+		return Promise.resolve();
+	}
+
+	// Connects from IDLE, DISCONNECTED or BACKING_OFF, or joins the attempt in progress
+	#start_connect(on_connect = DO_NOTHING, on_error = DO_NOTHING) {
+		if (this.is_connected) {
+			on_connect();
+			return;
+		}
+		this.#connect_waiters.push({ on_connect, on_error });
+		if (this.is_connecting) return;
+		this.#state = STATE.CONNECTING;
+		this._open();
+	}
+
+	#back_off() {
+		this.#state = STATE.BACKING_OFF;
+		this.#reconnect_timer = setTimeout(() => {
+			this.#reconnect_timer = null;
+			this.#start_connect();
+		}, this.reconnect_time);
+	}
+
+	// Called by the transport once it is open
+	#transport_opened() {
+		// A serial open that settles after disconnect() is closed by `_close`
+		if (!this.is_connecting) return;
+		this.#state = STATE.CONNECTED;
+		this.emit('connect');
+		for (const { on_connect } of this.#connect_waiters.splice(0)) on_connect();
+	}
 
 	/**
-     * Sets up the serial transport. The port is created and opened by `_connect` (at
+     * Called by the transport when it closed or failed to open. Pending requests fail, and
+     * the phase moves only from CONNECTING, CONNECTED or DISCONNECTING, so a second event for
+     * the same loss changes nothing.
+     *
+     * @param {Error|null} error - the cause, passed to the callers of the failed connect.
+     * @param {boolean} emit_disconnect - whether to emit `disconnect`.
+     */
+	#transport_lost(error, emit_disconnect) {
+		this.abort_pending();
+		const was_disconnecting = this.is_disconnecting;
+		// Taken before any event, so a listener that connects again keeps its own callbacks
+		const connect_waiters = this.#connect_waiters.splice(0);
+		if (was_disconnecting) {
+			this.#state = STATE.DISCONNECTED;
+		} else if (this.is_connecting || this.is_connected) {
+			if (this.protocol !== 'rtu' && this.reconnect_time > 0) {
+				this.#back_off();
+			} else {
+				this.#state = STATE.IDLE;
+			}
+		}
+		if (emit_disconnect) this.emit('disconnect');
+		const reason = error ?? new Error('connection lost');
+		for (const { on_error } of connect_waiters) on_error(reason);
+		if (was_disconnecting) {
+			for (const resolve of this.#disconnect_waiters.splice(0)) resolve();
+			for (const { resolve, reject } of this.#waiting_connects.splice(0)) {
+				this.#start_connect(resolve, reject);
+			}
+		}
+	}
+
+	/**
+     * Sets up the serial transport. The port is created and opened by `_open` (at
      * construction when `reconnect_time > 0`, otherwise on demand) and is never re-opened
      * automatically after it closes.
      *
@@ -461,7 +586,7 @@ export class Modbus_Client extends EventEmitter {
      * @return {void}
      */
 	set_serial(settings) {
-		// Created by the first `_connect`
+		// Created by the first `_open`
 		this.stream = null;
 
 		this._send = (data) => {
@@ -483,29 +608,27 @@ export class Modbus_Client extends EventEmitter {
 			return creating;
 		};
 
-		// The open in progress, shared by concurrent callers
+		// The open in progress; `_close` waits for it, since an open cannot be aborted
 		let opening = null;
-		this._connect = (on_connect = DO_NOTHING, on_error = DO_NOTHING) => {
-			if (this.stream?.isOpen) {
-				on_connect();
-				return;
-			}
-			opening ??= get_port()
-				.then((serialport) => new Promise((resolve, reject) => {
-					serialport.open((error) => (error ? reject(error) : resolve()));
-				}))
-				.catch((error) => {
-					this.abort_pending();
-					this.emit('error', error);
-					throw error;
-				})
-				.finally(() => {
-					opening = null;
-				});
-			opening.then(on_connect, on_error);
+		this._open = () => {
+			opening = get_port().then((serialport) => new Promise((resolve, reject) => {
+				serialport.open((error) => (error ? reject(error) : resolve()));
+			}));
+			opening.then(() => this.#transport_opened(), (error) => {
+				this.#transport_lost(error, false);
+				this.emit('error', error);
+			}).finally(() => {
+				opening = null;
+			});
 		};
-		this.disconnect = () => {
-			if (this.stream?.isOpen) this.stream.close();
+
+		// A close that fails emits no `close`, so it ends the connection here
+		const close_port = () => this.stream.close((error) => {
+			if (error) this.#transport_lost(error, false);
+		});
+		this._close = () => {
+			if (opening) opening.then(close_port, DO_NOTHING);
+			else close_port();
 		};
 	}
 
@@ -513,25 +636,23 @@ export class Modbus_Client extends EventEmitter {
      * Follows the events of the serial port created by `set_serial`.
      */
 	listen_serial(serialport) {
-		serialport.on('open', () => {
-			this.is_connected = true;
-			this.emit('connect');
-		});
-
 		serialport.on('data', (data) => {
 			this.on_data(data);
 		});
 
 		serialport.on('error', (error) => {
-			this.is_connected = false;
-			this.abort_pending();
+			// A port still open is closed, and its `close` ends the connection; one already
+			// closed emits no `close`, so the error ends it
+			if (!serialport.isOpen) {
+				this.#transport_lost(error, false);
+			} else if (!this.is_disconnecting) {
+				this._close();
+			}
 			this.emit('error', error);
 		});
 
 		serialport.on('close', () => {
-			this.is_connected = false;
-			this.abort_pending();
-			this.emit('disconnect');
+			this.#transport_lost(null, true);
 		});
 	}
 
@@ -547,55 +668,34 @@ export class Modbus_Client extends EventEmitter {
 		const stream = new Socket();
 		this.stream = stream;
 
-		Object.defineProperty(this, 'connecting', {
-			get: () => stream.connecting,
-			configurable: true,
-			enumerable: true,
-		});
-
 		this._send = (data) => {
 			stream.write(data);
 			this.emit('send', data);
 		};
-		this._connect = (on_connect = DO_NOTHING, on_error = DO_NOTHING) => {
-			const _on_connect = () => {
-				stream.off('error', _on_error);
-				on_connect();
-			};
-			const _on_error = (error) => {
-				stream.off('connect', _on_connect);
-				on_error(error);
-			};
-			stream.once('connect', _on_connect);
-			stream.once('error', _on_error);
-			if (!this.connecting) {
-				stream.connect(port, ip_address);
-			}
-		};
-		this.disconnect = () => stream.end();
+		this._open = () => stream.connect(port, ip_address);
+		// Not `end()`: on a dead link the peer's FIN never comes, and the close would hang
+		this._close = () => stream.destroy();
 
 		stream.on('data', (data) => {
 			this.on_data(data);
 		});
 
-		stream.on('close', () => {
-			this.is_connected = false;
-			this.abort_pending();
-			this.reconnect();
-			this.emit('disconnect');
-		});
-
 		stream.on('connect', () => {
-			this.is_connected = true;
-			this._conn_failed = false;
-			this.emit('connect');
+			this.#transport_opened();
 		});
 
+		// A socket always emits `close` after `error`, so only `close` ends the connection;
+		// the error is kept for the callers of a failed connect
+		let last_error = null;
 		stream.on('error', (error) => {
-			this.is_connected = false;
-			this.abort_pending();
-			this.reconnect();
+			last_error = error;
 			this.emit('error', error);
+		});
+
+		stream.on('close', () => {
+			const error = last_error;
+			last_error = null;
+			this.#transport_lost(error, true);
 		});
 	}
 }

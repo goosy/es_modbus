@@ -918,3 +918,289 @@ describe('Modbus_Client RTU-over-TCP', () => {
 		assert.ok(fake.frames[1].time >= answered[0], 'the second request was sent before the first was answered');
 	});
 });
+
+const PHASES = ['idle', 'connecting', 'connected', 'disconnecting', 'disconnected', 'backing_off'];
+
+/** The client's connection phase; asserts that exactly one phase getter is true. */
+function phase(client) {
+	const on = PHASES.filter((name) => client[`is_${name}`]);
+	assert.equal(on.length, 1, `phases true at once: ${on.join(', ')}`);
+	return on[0];
+}
+
+describe('Modbus_Client connection phases (TCP)', () => {
+	let fake;
+	beforeEach(async () => {
+		fake = await start_fake_server(auto_reply);
+	});
+	afterEach(async () => {
+		await fake.close();
+	});
+
+	const drop_connection = () => {
+		for (const socket of fake.sockets) socket.destroy();
+	};
+
+	test('construction: IDLE with reconnect_time 0, CONNECTING with reconnect_time > 0', async () => {
+		const idle = create_client(fake.port);
+		assert.equal(phase(idle), 'idle');
+		assert.equal(idle.enable_reconnect, true);
+		const auto = create_client(fake.port, { reconnect_time: 1000 });
+		assert.equal(phase(auto), 'connecting');
+		await once(auto, 'connect');
+		assert.equal(phase(auto), 'connected');
+		await close_client(auto);
+	});
+
+	test('IDLE → CONNECTING → CONNECTED by connect()', async () => {
+		const client = create_client(fake.port);
+		const connected = client.connect();
+		assert.equal(phase(client), 'connecting');
+		await connected;
+		assert.equal(phase(client), 'connected');
+		await close_client(client);
+	});
+
+	test('IDLE → CONNECTING by an on-demand request', async () => {
+		const client = create_client(fake.port);
+		const pending = client.read('40001');
+		assert.equal(phase(client), 'connecting');
+		await pending;
+		assert.equal(phase(client), 'connected');
+		await close_client(client);
+	});
+
+	test('CONNECTED → BACKING_OFF → CONNECTING → CONNECTED on a connection loss', async () => {
+		const client = await connect_client(fake.port, { reconnect_time: 50 });
+		drop_connection();
+		await once(client, 'disconnect');
+		assert.equal(phase(client), 'backing_off');
+		assert.equal(client.enable_reconnect, true);
+		await sleep(70);
+		assert.notEqual(phase(client), 'backing_off');
+		if (client.is_connecting) await once(client, 'connect');
+		assert.equal(phase(client), 'connected');
+		await close_client(client);
+	});
+
+	test('CONNECTED → IDLE on a connection loss with reconnect_time 0', async () => {
+		const client = await connect_client(fake.port);
+		drop_connection();
+		await once(client, 'disconnect');
+		assert.equal(phase(client), 'idle');
+	});
+
+	test('CONNECTING → BACKING_OFF, or IDLE with reconnect_time 0, when the connect fails', async () => {
+		const port = await closed_port();
+		const backing = create_client(port, { reconnect_time: 1000 });
+		await assert.rejects(backing.connect(), { code: 'ECONNREFUSED' });
+		assert.equal(phase(backing), 'backing_off');
+		await close_client(backing);
+		const idle = create_client(port);
+		await assert.rejects(idle.connect(), { code: 'ECONNREFUSED' });
+		assert.equal(phase(idle), 'idle');
+	});
+
+	test('CONNECTED → DISCONNECTING → DISCONNECTED by disconnect()', async () => {
+		const client = await connect_client(fake.port);
+		const events = [];
+		client.on('disconnect', () => events.push('event'));
+		const closed = client.disconnect().then(() => events.push('resolved'));
+		assert.equal(phase(client), 'disconnecting');
+		assert.equal(client.enable_reconnect, false);
+		await closed;
+		assert.equal(phase(client), 'disconnected');
+		assert.deepEqual(events, ['event', 'resolved']);
+	});
+
+	test('CONNECTING → DISCONNECTING → DISCONNECTED: disconnect() abandons the connect', async () => {
+		const client = create_client(fake.port);
+		const connecting = client.connect();
+		client.disconnect();
+		assert.equal(phase(client), 'disconnecting');
+		await assert.rejects(connecting, { message: 'connection lost' });
+		assert.equal(phase(client), 'disconnected');
+	});
+
+	test('BACKING_OFF → DISCONNECTED: disconnect() cancels the reconnect timer', async () => {
+		const client = await connect_client(fake.port, { reconnect_time: 50 });
+		drop_connection();
+		await once(client, 'disconnect');
+		assert.equal(phase(client), 'backing_off');
+		await client.disconnect();
+		assert.equal(phase(client), 'disconnected');
+		await sleep(100);
+		assert.equal(phase(client), 'disconnected');
+		assert.equal(fake.sockets.size, 0);
+	});
+
+	test('IDLE → DISCONNECTED by disconnect(), which resolves at once', async () => {
+		const client = create_client(fake.port);
+		await client.disconnect();
+		assert.equal(phase(client), 'disconnected');
+	});
+
+	test('DISCONNECTED → CONNECTING → CONNECTED by connect()', async () => {
+		const client = await connect_client(fake.port);
+		await client.disconnect();
+		const connected = client.connect();
+		assert.equal(phase(client), 'connecting');
+		assert.equal(client.enable_reconnect, true);
+		await connected;
+		assert.equal(phase(client), 'connected');
+		assert.deepEqual(await client.read('40001'), hex('0001'));
+		await close_client(client);
+	});
+
+	test('a connect() during DISCONNECTING waits for the close, then connects', async () => {
+		const client = await connect_client(fake.port);
+		const closed = client.disconnect();
+		const connected = client.connect();
+		assert.equal(phase(client), 'disconnecting');
+		assert.equal(client.enable_reconnect, false);
+		await assert.rejects(client.read('40001'), { message: 'connection lost' });
+		await closed;
+		assert.equal(phase(client), 'connecting');
+		await connected;
+		assert.equal(phase(client), 'connected');
+		await close_client(client);
+	});
+
+	test('a disconnect() cancels a connect() waiting for the close', async () => {
+		const client = await connect_client(fake.port);
+		client.disconnect();
+		const connected = client.connect();
+		const closed = client.disconnect();
+		await assert.rejects(connected, { message: 'connection lost' });
+		await closed;
+		assert.equal(phase(client), 'disconnected');
+	});
+
+	test('triggers outside the transition table leave the phase unchanged', async () => {
+		const client = create_client(fake.port);
+		// CONNECTING: connect() joins the attempt in progress
+		await Promise.all([client.connect(), client.connect()]);
+		assert.equal(fake.sockets.size, 1);
+		// CONNECTED: connect() resolves at once
+		await client.connect();
+		assert.equal(phase(client), 'connected');
+		// DISCONNECTING: disconnect() shares the close in progress
+		await Promise.all([client.disconnect(), client.disconnect()]);
+		// DISCONNECTED: disconnect() resolves at once
+		await client.disconnect();
+		assert.equal(phase(client), 'disconnected');
+		// BACKING_OFF: connect() rejects (covered by "connect() rejects with ERR_ILLEGAL_STATE")
+	});
+
+	test('after disconnect() a request is rejected at once, with no error event and no connect', async () => {
+		const client = await connect_client(fake.port, { reconnect_time: 50 });
+		await client.disconnect();
+		const errors = [];
+		client.on('error', (error) => errors.push(error));
+		await assert.rejects(client.read('40001'), { message: 'connection lost' });
+		await sleep(100);
+		assert.deepEqual(errors, []);
+		assert.equal(phase(client), 'disconnected');
+		assert.equal(fake.sockets.size, 0);
+	});
+});
+
+describe('Modbus_Client connection phases (serial)', () => {
+	let created;
+	const recording_factory = async (settings) => {
+		const port = new Fake_Serial_Port(settings);
+		created.push(port);
+		return port;
+	};
+	before(() => set_serial_port_factory(recording_factory));
+	after(() => set_serial_port_factory(null));
+	beforeEach(() => {
+		created = [];
+	});
+
+	const serial_client = (options = {}) => {
+		const client = new Modbus_Client(null, { port: 'COM9', reconnect_time: 0, ...options });
+		client.on('error', () => { });
+		return client;
+	};
+
+	test('IDLE → CONNECTING → CONNECTED by connect()', async () => {
+		const client = serial_client();
+		assert.equal(phase(client), 'idle');
+		const connected = client.connect();
+		assert.equal(phase(client), 'connecting');
+		await connected;
+		assert.equal(phase(client), 'connected');
+	});
+
+	test('a closed port goes to IDLE, never BACKING_OFF, even with reconnect_time > 0', async () => {
+		const client = serial_client({ reconnect_time: 50 });
+		await once(client, 'connect');
+		created[0].close();
+		await once(client, 'disconnect');
+		assert.equal(phase(client), 'idle');
+		await sleep(80);
+		assert.equal(phase(client), 'idle');
+		assert.equal(created[0].opens, 1);
+	});
+
+	test('CONNECTED → DISCONNECTING → DISCONNECTED by disconnect()', async () => {
+		const client = serial_client();
+		await client.connect();
+		const closed = client.disconnect();
+		assert.equal(phase(client), 'disconnecting');
+		await closed;
+		assert.equal(phase(client), 'disconnected');
+		assert.equal(created[0].isOpen, false);
+	});
+
+	test('CONNECTING → DISCONNECTING → DISCONNECTED: the port is closed once its open settles', async () => {
+		const client = serial_client();
+		const connecting = client.connect();
+		const closed = client.disconnect();
+		assert.equal(phase(client), 'disconnecting');
+		await assert.rejects(connecting, { message: 'connection lost' });
+		await closed;
+		assert.equal(phase(client), 'disconnected');
+		assert.equal(created[0].opens, 1);
+		assert.equal(created[0].isOpen, false);
+	});
+
+	test('a failed open during DISCONNECTING ends it as DISCONNECTED', async () => {
+		set_serial_port_factory(async (settings) => Object.assign(new Fake_Serial_Port(settings), { fail_open: true }));
+		try {
+			const client = serial_client();
+			const connecting = client.connect();
+			const closed = client.disconnect();
+			await assert.rejects(connecting, /open failed/);
+			await closed;
+			assert.equal(phase(client), 'disconnected');
+		} finally {
+			set_serial_port_factory(recording_factory);
+		}
+	});
+
+	test('an error on an open port closes it, and the close moves CONNECTED → IDLE', async () => {
+		const client = serial_client();
+		await client.connect();
+		created[0].emit('error', new Error('line fault'));
+		assert.equal(phase(client), 'connected');
+		await once(client, 'disconnect');
+		assert.equal(phase(client), 'idle');
+		assert.equal(created[0].isOpen, false);
+	});
+
+	test('DISCONNECTED → CONNECTING → CONNECTED by connect(); a request alone does not open', async () => {
+		const client = serial_client();
+		await client.connect();
+		await client.disconnect();
+		await assert.rejects(client.read('40001'), { message: 'connection lost' });
+		await sleep(10);
+		assert.equal(created[0].opens, 1);
+		const connected = client.connect();
+		assert.equal(phase(client), 'connecting');
+		await connected;
+		assert.equal(phase(client), 'connected');
+		assert.equal(created[0].opens, 2);
+	});
+});

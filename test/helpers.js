@@ -239,8 +239,7 @@ export async function connect_client(port, options = {}) {
 
 /** Tears a client down without triggering a reconnect. */
 export function close_client(client) {
-	client.reconnect_time = 0;
-	client.stream.destroy();
+	return client.disconnect();
 }
 
 /** Builds a TCP response to a TCP request frame from a PDU body (`unit_id + PDU`). */

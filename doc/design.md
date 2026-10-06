@@ -28,12 +28,12 @@ into `design-<topic>.md` files when it grows.
   binding, while a dynamic import becomes a deferred `require` inside the same file
   (`codeSplitting: false`). Importing the two packages instead of `serialport` leaves its unused
   parsers out of the bundle. `set_serial_port_factory` swaps the factory for tests.
-- **Client serial lifecycle.** `set_serial` assigns `_connect`, which creates the port once (a
+- **Client serial lifecycle.** `set_serial` assigns `_open`, which creates the port once (a
   failed creation is forgotten, so the next attempt retries), attaches its events
-  (`listen_serial`), and opens it once (concurrent calls share one pending open). A failure runs
-  `abort_pending()` and emits `error`. `is_connected` follows the port's `open` / `close`
-  events. The serial `close` / `error` handlers never call `reconnect()`, so `_conn_failed`
-  stays unset and a closed port is re-opened only on demand.
+  (`listen_serial`), and opens it (concurrent callers share one attempt). A failure runs
+  `abort_pending()` and emits `error`. The connection phase follows the port's `open` / `close`
+  / `error` events (see "Client connection state"). A serial port never enters `BACKING_OFF`:
+  after a close it goes to `IDLE`, and a closed port is re-opened only on demand.
 
 ## Build (`build.js`)
 
@@ -115,10 +115,11 @@ A single routine builds every outgoing frame regardless of transport:
   transaction field). TCP increments `#last_tid` and wraps back to `TRANSACTION_START` once it
   passes `packets_length + TRANSACTION_START`. With 256 slots and no check that a slot is free,
   more than 256 simultaneously-pending TCP transactions would collide.
-- **`process_packet_transaction`.** During a reconnect back-off (`_conn_failed`) it returns a
-  Promise already rejected with `Error('connection lost')`; the frame is never queued. It also
-  emits `error`, but only when the client has an `error` listener: emitting `error` with no
-  listener throws, and a call with valid arguments must not throw synchronously.
+- **`process_packet_transaction`.** While `BACKING_OFF`, `DISCONNECTING` or `DISCONNECTED` it
+  returns a Promise already rejected with `Error('connection lost')`; the frame is never queued.
+  For `BACKING_OFF` only, it also emits `error`, and only when the client has an `error`
+  listener: emitting `error` with no listener throws, and a call with valid arguments must not
+  throw synchronously.
   Otherwise it sets `status = 'pending'`, bumps `#trans_count`, creates the Promise,
   then enqueues the buffer and returns the Promise. It stores `resolve` / `reject` closures on the packet plus a
   `timeout_id`. `end_transaction` decrements the count, stamps `status`, clears the timer, and
@@ -142,23 +143,107 @@ A single routine builds every outgoing frame regardless of transport:
 - `sending` is guarded by `#busy` and returns at once when the queue is empty. When connected it
   shifts one buffer, calls `_send`, then after
   `delay` ms clears `#busy` and re-enters. This serializes writes and paces them.
-- When not connected and no reconnect back-off is active, `sending` triggers `_connect` with
-  itself as the success callback. It never runs during a back-off: a back-off starts only after
-  the connection is lost, when `abort_pending()` has emptied the queue, and requests issued
-  during the back-off are rejected before they are queued.
+- In `IDLE` (or joining a `CONNECTING`), `sending` starts a connect with itself as the success
+  callback. It never
+  connects from another phase: a back-off or a manual close starts only after `abort_pending()`
+  has emptied the queue, and requests issued then are rejected before they are queued.
 - **`abort_pending()`.** Empties `send_queue` and rejects every packet whose `status` is
   `'pending'` with `Error('connection lost')`. It runs on every transport `close` / `error`
-  (TCP socket and serial port), so a failed on-demand connect also fails its requests at once.
+  (through `#transport_lost`, for the TCP socket and the serial port) and on a `disconnect()`
+  from `IDLE` or `BACKING_OFF`, so a failed on-demand connect also fails its requests at once.
 
-## Connection state (TCP, `set_tcp`)
+## Client connection state
 
-- `_connect(on_connect, on_error)` attaches one-shot `connect` / `error` listeners that clean each
-  other up, and only calls `socket.connect` when not already `connecting`.
-- `stream` `connect` → `is_connected = true`, `_conn_failed = false`, emit `connect`.
-- `stream` `close` / `error` → `is_connected = false`, `abort_pending()`, call `reconnect()`,
-  emit `disconnect` / `error`.
-- `reconnect()` — if `reconnect_time > 0` and not already backing off, set `_conn_failed = true`
-  and after `reconnect_time` ms clear it and call `_connect()`.
+### Phases
+
+The connection is in exactly one of six phases, kept in one private integer `#state`. Setting a
+phase is a single assignment, so two phases can never be true at once and nothing has to be
+reset. The phase constants live in a module-level frozen object
+`STATE = Object.freeze({ IDLE, CONNECTING, CONNECTED, DISCONNECTING, DISCONNECTED, BACKING_OFF })`.
+
+| `#state`        | Read-only getter   | Meaning                                                     |
+| --------------- | ------------------ | ----------------------------------------------------------- |
+| `IDLE`          | `is_idle`          | Not connected; automatic and on-demand connects are allowed. |
+| `CONNECTING`    | `is_connecting`    | A connect (TCP) or open (serial) is in progress.            |
+| `CONNECTED`     | `is_connected`     | The transport is open.                                      |
+| `DISCONNECTING` | `is_disconnecting` | `disconnect()` was called; the transport has not closed yet. |
+| `DISCONNECTED`  | `is_disconnected`  | Closed by `disconnect()`; only `connect()` leaves it.       |
+| `BACKING_OFF`   | `is_backing_off`   | The connection was lost and a reconnect timer is pending.   |
+
+The getters are the only way the rest of the class reads the phase: no code compares `#state`
+outside them. `enable_reconnect` (see `spec-client.md`) is also a getter:
+`!(is_disconnecting || is_disconnected)`.
+
+`IDLE` and `DISCONNECTED` are both "not connected, nothing in progress". They differ only in who
+may connect next: anyone (`IDLE`), or only `connect()` (`DISCONNECTED`). The names follow the
+client's own vocabulary, `connect` → `CONNECTING` → `CONNECTED` and `disconnect` →
+`DISCONNECTING` → `DISCONNECTED`, not the transport's `close`.
+
+### Transitions
+
+| From                       | Trigger                                                   | To              |
+| -------------------------- | --------------------------------------------------------- | --------------- |
+| (construction)             | —                                                         | `IDLE`          |
+| `IDLE`                     | construction with `reconnect_time > 0`; on-demand connect by `sending`; `connect()` | `CONNECTING` |
+| `DISCONNECTED`             | `connect()`                                               | `CONNECTING`    |
+| `BACKING_OFF`              | reconnect timer fires                                     | `CONNECTING`    |
+| `CONNECTING`               | transport `connect` / `open`                              | `CONNECTED`     |
+| `CONNECTING` / `CONNECTED` | transport `close` / `error`, TCP-family, `reconnect_time > 0` | `BACKING_OFF` |
+| `CONNECTING` / `CONNECTED` | transport `close` / `error`, otherwise (serial, or `reconnect_time = 0`) | `IDLE` |
+| `CONNECTING` / `CONNECTED` | `disconnect()`                                            | `DISCONNECTING` |
+| `DISCONNECTING`            | transport `close` (or `error`)                            | `DISCONNECTED`, then `CONNECTING` if a `connect()` is waiting |
+| `IDLE` / `BACKING_OFF`     | `disconnect()` (cancels the timer when backing off)        | `DISCONNECTED`  |
+
+Any trigger not in the table leaves the phase unchanged: `connect()` while `CONNECTING` joins the
+attempt in progress, `connect()` while `CONNECTED` resolves at once, `connect()` while
+`BACKING_OFF` rejects with `ERR_ILLEGAL_STATE`, `disconnect()` while `DISCONNECTING` shares the
+close in progress, and `disconnect()` while `DISCONNECTED` resolves at once.
+
+### Rules
+
+- **One event per loss moves the phase.** The transports report to `#transport_opened()` and
+  `#transport_lost(error, emit_disconnect)`; the latter runs `abort_pending()` and moves the
+  phase only from `CONNECTING`, `CONNECTED` or `DISCONNECTING`, so a repeated report changes
+  nothing. Each transport makes sure one loss is reported once:
+  - **TCP.** A socket emits `close` after every `error`, so only `close` reports the loss;
+    `error` just keeps the error for the callers of a failed connect and emits it. Moving on
+    `error` would let the `close` that follows it be taken for the loss of a newer attempt. This
+    replaces the old de-duplication by `_conn_failed`.
+  - **Serial.** A port may emit `error` with no `close` after it. An `error` on a port that is
+    still open closes the port, and its `close` reports the loss; an `error` on a closed port
+    reports it at once. This is the only place the serial code reads `isOpen`.
+- **Reconnect timer.** `#reconnect_timer` holds the handle of the pending timer. It is a
+  resource, not a phase: it is non-null exactly while `BACKING_OFF`. Entering `BACKING_OFF`
+  starts it; the timer callback clears it before moving to `CONNECTING`; `disconnect()` clears it
+  with `clearTimeout`.
+- **Waiting `connect()`.** A `connect()` called while `DISCONNECTING` is kept as a pending
+  resolver, also a resource, not a phase. The `close` that ends `DISCONNECTING` starts it. A
+  `disconnect()` called before that rejects it with `connection lost`.
+- **Requests.** `process_packet_transaction` rejects a request at once with `connection lost`
+  while `BACKING_OFF`, `DISCONNECTING` or `DISCONNECTED`. It emits `error` (when listened to) only
+  for `BACKING_OFF`: in the other two the caller closed the connection. In `IDLE` the request is
+  queued and `sending` connects on demand; it never connects from any other phase.
+- **Closing the transport.** `disconnect()` from `CONNECTING` or `CONNECTED` calls the
+  transport's `_close()`. TCP destroys the socket (`socket.destroy()`), not `end()`: on a dead
+  link the peer's FIN never comes and the close would hang. Serial closes the port; a serial open
+  cannot be aborted, so from `CONNECTING` the port is closed as soon as the open settles, and an
+  open that fails instead reports the loss itself. The `disconnect()` promise resolves on the transition to `DISCONNECTED`,
+  after the `disconnect` event. From `IDLE` or `BACKING_OFF` no transport event follows, so
+  `disconnect()` runs `abort_pending()` itself and resolves at once.
+- **`#busy` is not a phase.** It marks the `delay` gap after a frame write and is independent of
+  the connection phase, so it stays a separate boolean.
+
+### Transport hooks
+
+Each transport assigns `_send(data)`, `_open()` and `_close()`. `_open()` is called only on
+the move into `CONNECTING`; a caller that arrives while `CONNECTING` is added to
+`#connect_waiters` instead, so concurrent callers share one attempt.
+
+- **TCP (`set_tcp`).** `_open()` is `socket.connect`; the socket's `connect` event reports
+  `#transport_opened()`. A socket is reused for every attempt.
+- **Serial (`set_serial`).** `_open()` creates the port once (the `creating` promise, a
+  lazy-creation cache, not a phase) and opens it; the `opening` promise lets `_close()` wait for
+  an open in progress. The open callback, not the `open` event, reports `#transport_opened()`.
 
 ## Parser notes (`src/util.js`)
 

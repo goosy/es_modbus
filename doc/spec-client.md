@@ -28,7 +28,7 @@ const client = new Modbus_Client(null, { port: 'COM3', baud_rate: 19200, parity:
 | `rtu`            | `false` | With a string address, use RTU framing over the TCP socket.           |
 | `timeout`        | `1000`  | Per-transaction response timeout, ms. On expiry the request rejects and `timeout` is emitted. |
 | `delay`          | `20`    | Minimum gap between consecutive frame writes, ms (send pacing).       |
-| `reconnect_time` | `10000` | Reconnect delay for TCP and RTU-over-TCP, ms. `> 0` also makes the constructor connect immediately (for serial, open the port); `0` disables automatic reconnection. |
+| `reconnect_time` | `10000` | Reconnect delay for TCP and RTU-over-TCP, ms. `> 0` also makes the constructor connect immediately (for serial, open the port); `0` disables the timed reconnect. Both apply only while `enable_reconnect` is true. |
 | `modicon_zero_based` | `false` | `true` selects 0-based Modicon point numbering (see below). |
 | `baud_rate`      | `9600`  | Serial baud rate, a positive integer (else `Invalid baud rate`). |
 | `parity`         | `'none'` | Serial parity: `'none'`, `'odd'`, `'even'`, or `0` = none, `1` = odd, `2` = even. Anything else throws `Invalid parity`. |
@@ -42,6 +42,21 @@ an invalid one; the serial port itself is created when it is first opened (see "
 The constructor opens the connection automatically when `reconnect_time > 0`. With
 `reconnect_time = 0` the client does not reconnect by itself after the connection is lost, but
 it still connects on demand: the first request (or `connect()`) opens the connection.
+
+### `enable_reconnect`
+
+A read-only `boolean` property that says whether the client may open the connection by itself.
+It is `false` from the moment `disconnect()` is called until a later `connect()` starts to
+connect again, and `true` at all other times, including after construction. It is not set
+directly: it follows from the client's connection phase (see `design.md`).
+
+- **`true`** — the automatic mechanisms work as described elsewhere: the timed reconnect after a
+  connection loss (`reconnect_time > 0`, TCP and RTU-over-TCP) and the on-demand connect by a
+  request (all transports).
+- **`false`** (manual close) — the client never opens the connection by itself: no reconnect
+  timer is started, and a request is rejected at once with `Error('connection lost')` instead of
+  being queued or opening the connection. No `error` event is emitted for such a request: the
+  connection is down because the caller closed it. Only `connect()` opens the connection again.
 
 The numbering base of Modicon addresses is also chosen at construction: 1-based by default, or
 0-based with `modicon_zero_based: true` (see "Numbering base" in `spec-protocol.md`). It applies
@@ -78,7 +93,8 @@ coil bytes) — the caller decodes them. Rejects with:
 - a message that identifies the transaction by its transaction ID, on timeout;
 - `` `response error: <exception_code>` `` on a Modbus exception;
 - an `Error` with the message `connection lost`, if the connection is lost while the request is
-  pending, or if the request is issued during a reconnect back-off (see "Connection loss").
+  pending, or if the request is issued during a reconnect back-off or while `enable_reconnect` is
+  false (see "Connection loss").
 
 ### `write(range, value, unit_id = 1) → Promise<boolean>`
 
@@ -106,11 +122,28 @@ exception response, connection lost).
 ### `connect() → Promise<void>`
 
 Resolves immediately if already connected; rejects with `Error('ERR_ILLEGAL_STATE')` while a
-reconnect back-off is pending; otherwise attempts to connect (for serial, opens the port).
+reconnect back-off is pending; otherwise attempts to connect (for serial, opens the port), which
+sets `enable_reconnect` back to `true`.
 
-### `disconnect()`
+If a `disconnect()` is still closing the transport, `connect()` first waits for that close to
+complete, so `disconnect()` followed by `connect()` never resolves on the connection being
+closed. `enable_reconnect` stays `false` while it waits, so requests issued in between are
+rejected. A `disconnect()` called while it waits cancels it: it rejects with
+`Error('connection lost')`.
 
-Closes the transport.
+### `disconnect() → Promise<void>`
+
+An explicit close, which suppresses every automatic reconnect until the next `connect()`:
+
+1. Makes `enable_reconnect` `false`, synchronously, before anything else.
+2. Cancels a pending reconnect timer and ends the back-off, so a later `connect()` is not
+   rejected with `ERR_ILLEGAL_STATE`.
+3. Closes the transport, abandoning a connect or open still in progress. Pending requests are
+   rejected with `connection lost`, as on any connection loss, and `disconnect` is emitted when
+   the transport closes.
+
+The promise resolves once the transport has closed (after the `disconnect` event), or at once if
+it is already closed. It never rejects. Concurrent calls settle together, on the same close.
 
 ## Events
 
@@ -150,16 +183,16 @@ Closes the transport.
 - **Connection loss.** When the connection is lost, every pending request, whether already sent
   or still queued, is rejected immediately with an `Error` (message `connection lost`) and the
   queued frames are discarded, so no request is executed after it was reported as failed. A
-  request issued while a reconnect back-off is pending is rejected at once instead of being
-  queued.
-- **Reconnect (TCP and RTU-over-TCP).** On `close` or `error`, if `reconnect_time > 0` the client
-  retries after that delay; `connect()` called during the back-off rejects with
-  `ERR_ILLEGAL_STATE`.
+  request issued while a reconnect back-off is pending, or while `enable_reconnect` is false, is
+  rejected at once instead of being queued.
+- **Reconnect (TCP and RTU-over-TCP).** On `close` or `error`, if `reconnect_time > 0` and
+  `enable_reconnect` is true, the client retries after that delay; `connect()` called during the
+  back-off rejects with `ERR_ILLEGAL_STATE`. After `disconnect()` no retry happens.
 - **Serial port.** The port is created and opened at construction when `reconnect_time > 0`,
   otherwise on demand by the first request or `connect()`; concurrent callers share one open.
   Creating the port loads `serialport` and its native binding, so a platform where the binding
   cannot load fails here, not at import. A failed creation or open emits `error`, rejects
   `connect()`, and rejects every pending request with `connection lost`; a later request or
   `connect()` tries again. A closed serial port is never re-opened automatically (a close usually
-  means the device is gone); the next request or `connect()` opens it again. `disconnect()`
-  closes the port when it is open.
+  means the device is gone); the next request (while `enable_reconnect` is true) or `connect()`
+  opens it again. After `disconnect()` a request does not open the port.

@@ -29,7 +29,7 @@ const client = new Modbus_Client(null, { port: 'COM3', baud_rate: 19200, parity:
 | `rtu`            | `false` | 地址为字符串时，在 TCP 套接字上使用 RTU 帧格式。                        |
 | `timeout`        | `1000`  | 单事务响应超时，毫秒。到期时请求被拒绝，并发出 `timeout` 事件。         |
 | `delay`          | `20`    | 连续两次帧写入之间的最小间隔，毫秒（发送节流）。                        |
-| `reconnect_time` | `10000` | TCP 和 RTU-over-TCP 的重连延迟，毫秒。`> 0` 同时使构造函数立即连接（串口则打开端口）；`0` 禁用自动重连。 |
+| `reconnect_time` | `10000` | TCP 和 RTU-over-TCP 的重连延迟，毫秒。`> 0` 同时使构造函数立即连接（串口则打开端口）；`0` 禁用定时重连。二者都只在 `enable_reconnect` 为真时生效。 |
 | `modicon_zero_based` | `false` | `true` 选择 0 起始的 Modicon 点号编号（见下文）。 |
 | `baud_rate`      | `9600`  | 串口波特率，正整数（否则抛出 `Invalid baud rate`）。 |
 | `parity`         | `'none'` | 串口校验位：`'none'`、`'odd'`、`'even'`，或 `0` = 无、`1` = 奇、`2` = 偶。其他值抛出 `Invalid parity`。 |
@@ -41,6 +41,18 @@ const client = new Modbus_Client(null, { port: 'COM3', baud_rate: 19200, parity:
 
 当 `reconnect_time > 0` 时，构造函数会自动打开连接。`reconnect_time = 0` 时，连接丢失后客户端不会
 自行重连，但仍会按需连接：第一个请求（或 `connect()`）会打开连接。
+
+### `enable_reconnect`
+
+只读的 `boolean` 属性，表示客户端是否可以自行打开连接。从调用 `disconnect()` 的那一刻起，到之后
+某次 `connect()` 重新开始连接为止，它为 `false`；其余时间（包括构造后）为 `true`。它不被直接设置，
+而是由客户端的连接阶段推出（见 `design.zh-cn.md`）。
+
+- **`true`** — 各处所述的自动机制照常生效：连接丢失后的定时重连（`reconnect_time > 0`，TCP 和
+  RTU-over-TCP），以及由请求触发的按需连接（所有传输）。
+- **`false`**（手动关闭）— 客户端绝不自行打开连接：不启动重连定时器；请求被立即以
+  `Error('connection lost')` 拒绝，既不入队，也不打开连接。此类请求不发出 `error` 事件：连接断开
+  是调用者自己关闭的结果。只有 `connect()` 会重新打开连接。
 
 Modicon 地址的编号起点同样在构造时选择：默认 1 起始，以 `modicon_zero_based: true` 选择 0 起始（见
 `spec-protocol.zh-cn.md` 的“编号起点”）。它只作用于 Modicon 字符串，绝不作用于结构化的 PDU
@@ -73,8 +85,8 @@ Modicon 地址的编号起点同样在构造时选择：默认 1 起始，以 `m
 
 - 超时：消息中以事务 ID 标识该事务；
 - Modbus 异常：`` `response error: <exception_code>` ``；
-- 请求待决期间连接丢失，或请求在重连退避期间发出：消息为 `connection lost` 的 `Error`（见
-  “连接丢失”）。
+- 请求待决期间连接丢失，或请求在重连退避期间、`enable_reconnect` 为假时发出：消息为
+  `connection lost` 的 `Error`（见“连接丢失”）。
 
 ### `write(range, value, unit_id = 1) → Promise<boolean>`
 
@@ -99,11 +111,25 @@ FC 15/16 的数量）。回显与请求一致时为 `true`，不一致时为 `fa
 
 ### `connect() → Promise<void>`
 
-已连接时立即兑现；重连退避期间以 `Error('ERR_ILLEGAL_STATE')` 拒绝；否则尝试连接（串口则打开端口）。
+已连接时立即兑现；重连退避期间以 `Error('ERR_ILLEGAL_STATE')` 拒绝；否则尝试连接（串口则打开
+端口），这会使 `enable_reconnect` 恢复为 `true`。
 
-### `disconnect()`
+若某次 `disconnect()` 仍在关闭传输，`connect()` 先等待该关闭完成，因此 `disconnect()` 之后紧接着
+的 `connect()` 绝不会以正在关闭的连接兑现。等待期间 `enable_reconnect` 保持为 `false`，因此其间
+发出的请求会被拒绝。等待期间调用 `disconnect()` 会取消这次 `connect()`：它以
+`Error('connection lost')` 拒绝。
 
-关闭传输。
+### `disconnect() → Promise<void>`
+
+显式关闭，在下一次 `connect()` 之前抑制一切自动重连：
+
+1. 首先同步地使 `enable_reconnect` 变为 `false`。
+2. 取消待决的重连定时器并结束退避，使之后的 `connect()` 不会以 `ERR_ILLEGAL_STATE` 拒绝。
+3. 关闭传输，放弃仍在进行中的连接或打开。待决请求与任何连接丢失时一样以 `connection lost`
+   拒绝，传输关闭时发出 `disconnect`。
+
+传输关闭后（在 `disconnect` 事件之后）兑现；传输本已关闭时立即兑现。它绝不拒绝。并发的多次调用在
+同一次关闭时一同兑现。
 
 ## 事件
 
@@ -135,12 +161,13 @@ FC 15/16 的数量）。回显与请求一致时为 `true`，不一致时为 `fa
 - **超时按事务计**，而非按连接计。超时之后到达的迟到响应会被丢弃。
 - **连接丢失。** 连接丢失时，每个待决请求（无论已发出还是仍在队列中）都被立即以 `Error`（消息为
   `connection lost`）拒绝，排队的帧被丢弃，因此不会有请求在被报告失败之后又被执行。在重连退避
-  期间发出的请求会被立即拒绝，而不是入队。
-- **重连（TCP 和 RTU-over-TCP）。** 发生 `close` 或 `error` 时，若 `reconnect_time > 0`，客户端
-  在该延迟后重试；退避期间调用 `connect()` 会以 `ERR_ILLEGAL_STATE` 拒绝。
+  期间或 `enable_reconnect` 为假时发出的请求会被立即拒绝，而不是入队。
+- **重连（TCP 和 RTU-over-TCP）。** 发生 `close` 或 `error` 时，若 `reconnect_time > 0` 且
+  `enable_reconnect` 为真，客户端在该延迟后重试；退避期间调用 `connect()` 会以
+  `ERR_ILLEGAL_STATE` 拒绝。`disconnect()` 之后不会重试。
 - **串口。** `reconnect_time > 0` 时串口在构造时创建并打开，否则由第一个请求或 `connect()` 按需
   创建并打开；并发的调用者共用同一次打开。创建串口时才加载 `serialport` 及其原生绑定，因此在原生
   绑定无法加载的平台上，失败发生在这里，而不是在导入时。创建或打开失败时发出 `error`、拒绝
   `connect()`，并以 `connection lost` 拒绝所有待决请求；之后的请求或 `connect()` 会重试。已关闭的
-  串口绝不自动重新打开（关闭通常意味着设备已不在）；下一个请求或 `connect()` 会再次打开它。
-  `disconnect()` 在串口打开时将其关闭。
+  串口绝不自动重新打开（关闭通常意味着设备已不在）；下一个请求（`enable_reconnect` 为真时）或
+  `connect()` 会再次打开它。`disconnect()` 之后，请求不会打开串口。

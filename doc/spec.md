@@ -133,7 +133,3 @@ Decisions the spec does not make yet. Settle them in the spec first, then implem
   (cable pulled, peer gone without a FIN), where no event fires and the client only ever sees
   timeouts. Decide whether to add (a) a minimum or growing reconnect delay, and (b) dead-link
   detection, such as closing the socket after N consecutive timeouts or enabling TCP keep-alive.
-- **`disconnect()` and auto-reconnect.** `disconnect()` ends the socket, the `close` event then
-  triggers the reconnect timer, so with `reconnect_time > 0` the client reconnects by itself after
-  an explicit `disconnect()` (this follows the spec's reconnect rule literally). Decide whether an
-  explicit `disconnect()` should suppress reconnecting.

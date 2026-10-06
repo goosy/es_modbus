@@ -26,11 +26,10 @@
   Rolldown 会把对 CommonJS 包的静态导入变成顶层的 `require`，在导入时就执行并加载原生绑定；动态
   导入则变成同一文件内延迟执行的 `require`（`codeSplitting: false`）。只导入这两个包而不导入
   `serialport`，可以把用不到的 parser 排除在打包产物之外。`set_serial_port_factory` 供测试替换工厂。
-- **客户端串口生命周期。** `set_serial` 为 `_connect` 赋值：它只创建一次串口（创建失败会被遗忘，
-  下次尝试会重试），挂接串口事件（`listen_serial`），并只打开一次（并发调用共用同一个待决的
-  打开）。失败时执行 `abort_pending()` 并发出 `error`。`is_connected` 跟随串口的 `open` /
-  `close` 事件。串口的 `close` / `error` 处理从不调用 `reconnect()`，因此 `_conn_failed` 不会被
-  设置，已关闭的串口只会按需重新打开。
+- **客户端串口生命周期。** `set_serial` 为 `_open` 赋值：它只创建一次串口（创建失败会被遗忘，
+  下次尝试会重试），挂接串口事件（`listen_serial`），并打开它（并发调用者共用一次尝试）。失败时执行 `abort_pending()` 并发出 `error`。连接阶段跟随串口的 `open` / `close` /
+  `error` 事件（见“客户端连接状态”）。串口绝不进入 `BACKING_OFF`：关闭后转入 `IDLE`，已关闭的
+  串口只会按需重新打开。
 
 ## 构建（`build.js`）
 
@@ -100,9 +99,10 @@
   则递增 `#last_tid`，一旦超过 `packets_length + TRANSACTION_START` 就回绕到
   `TRANSACTION_START`。由于只有 256 个槽位，且不检查槽位是否空闲，同时待决的 TCP 事务超过
   256 个就会冲突。
-- **`process_packet_transaction`。** 处于重连退避（`_conn_failed`）时，它返回一个已以
-  `Error('connection lost')` 拒绝的 Promise；帧从不入队。它同时发出 `error`，但仅当客户端有
-  `error` 监听者时：没有监听者时发出 `error` 会抛出异常，而参数合法的调用不得同步抛出。
+- **`process_packet_transaction`。** 处于 `BACKING_OFF`、`DISCONNECTING` 或 `DISCONNECTED` 时，
+  它返回一个已以 `Error('connection lost')` 拒绝的 Promise；帧从不入队。仅在 `BACKING_OFF` 时它
+  同时发出 `error`，且仅当客户端有 `error` 监听者时：没有监听者时发出 `error` 会抛出异常，而参数
+  合法的调用不得同步抛出。
   否则设置 `status = 'pending'`，递增
   `#trans_count`，创建 Promise，再将缓冲区入队并返回该 Promise。它把 `resolve` / `reject` 闭包以及 `timeout_id` 存放在 packet 上。
   `end_transaction` 递减计数，标记 `status`，清除定时器，并把 `resolve`/`reject` 换成
@@ -122,22 +122,97 @@
   `true` 兑现，读以空 `Buffer` 兑现。
 - `sending` 由 `#busy` 保护，队列为空时立即返回。已连接时，它取出一个缓冲区，调用 `_send`，然后在 `delay` 毫秒后
   清除 `#busy` 并重新进入。这样既串行化了写入，也实现了节流。
-- 未连接且没有处于重连退避时，`sending` 以自身作为成功回调触发 `_connect`。它不会在退避期间
-  运行：退避只在连接丢失后开始，此时 `abort_pending()` 已清空队列，而退避期间发出的请求在入队
-  之前就被拒绝。
+- 处于 `IDLE`（或加入进行中的 `CONNECTING`）时，`sending` 以自身作为成功回调发起连接。它绝不从其他阶段发起连接：退避
+  或手动关闭都在 `abort_pending()` 清空队列之后才开始，而此时发出的请求在入队之前就被拒绝。
 - **`abort_pending()`。** 清空 `send_queue`，并以 `Error('connection lost')` 拒绝每个 `status` 为
-  `'pending'` 的 packet。它在每次传输层 `close` / `error`（TCP 套接字和串口）时运行，因此按需连接
-  失败时，其请求也会立即失败。
+  `'pending'` 的 packet。它在每次传输层 `close` / `error`（经由 `#transport_lost`，TCP 套接字和
+  串口）时运行，也在从 `IDLE` 或 `BACKING_OFF` 调用 `disconnect()` 时运行，因此按需连接失败时，其
+  请求也会立即失败。
 
-## 连接状态（TCP，`set_tcp`）
+## 客户端连接状态
 
-- `_connect(on_connect, on_error)` 挂接一次性的 `connect` / `error` 监听器，二者互相清理；只有
-  在尚未处于 `connecting` 时才调用 `socket.connect`。
-- 流 `connect` → `is_connected = true`，`_conn_failed = false`，发出 `connect`。
-- 流 `close` / `error` → `is_connected = false`，`abort_pending()`，调用 `reconnect()`，发出
-  `disconnect` / `error`。
-- `reconnect()` — 若 `reconnect_time > 0` 且尚未处于退避，则设置 `_conn_failed = true`，并在
-  `reconnect_time` 毫秒后清除它并调用 `_connect()`。
+### 阶段
+
+连接恰好处于六个阶段之一，保存在一个私有整数 `#state` 中。设置阶段只需一次赋值，因此不可能有
+两个阶段同时为真，也无需复位任何东西。阶段常量位于模块级的冻结对象
+`STATE = Object.freeze({ IDLE, CONNECTING, CONNECTED, DISCONNECTING, DISCONNECTED, BACKING_OFF })`。
+
+| `#state`        | 只读 getter        | 含义                                                |
+| --------------- | ------------------ | --------------------------------------------------- |
+| `IDLE`          | `is_idle`          | 未连接；允许自动连接和按需连接。                    |
+| `CONNECTING`    | `is_connecting`    | 连接（TCP）或打开（串口）进行中。                   |
+| `CONNECTED`     | `is_connected`     | 传输已连通。                                        |
+| `DISCONNECTING` | `is_disconnecting` | 已调用 `disconnect()`，传输尚未关闭。               |
+| `DISCONNECTED`  | `is_disconnected`  | 由 `disconnect()` 关闭；只有 `connect()` 能离开它。 |
+| `BACKING_OFF`   | `is_backing_off`   | 连接已丢失，重连定时器在等待。                      |
+
+类中其余代码只通过这些 getter 读取阶段：除 getter 外没有代码直接比较 `#state`。
+`enable_reconnect`（见 `spec-client.zh-cn.md`）也是 getter：`!(is_disconnecting || is_disconnected)`。
+
+`IDLE` 和 `DISCONNECTED` 都是“未连接，也没有进行中的操作”。二者只在“下一次由谁连接”上不同：
+任何途径（`IDLE`），或只有 `connect()`（`DISCONNECTED`）。命名遵循客户端自己的词汇：`connect` →
+`CONNECTING` → `CONNECTED`，`disconnect` → `DISCONNECTING` → `DISCONNECTED`，而不用传输层的
+`close`。
+
+### 转移
+
+| 起始阶段                   | 触发                                                      | 目标阶段        |
+| -------------------------- | --------------------------------------------------------- | --------------- |
+| （构造）                   | —                                                         | `IDLE`          |
+| `IDLE`                     | `reconnect_time > 0` 时的构造；`sending` 的按需连接；`connect()` | `CONNECTING` |
+| `DISCONNECTED`             | `connect()`                                               | `CONNECTING`    |
+| `BACKING_OFF`              | 重连定时器触发                                            | `CONNECTING`    |
+| `CONNECTING`               | 传输的 `connect` / `open`                                 | `CONNECTED`     |
+| `CONNECTING` / `CONNECTED` | 传输的 `close` / `error`，TCP 系列且 `reconnect_time > 0` | `BACKING_OFF`   |
+| `CONNECTING` / `CONNECTED` | 传输的 `close` / `error`，其他情况（串口，或 `reconnect_time = 0`） | `IDLE` |
+| `CONNECTING` / `CONNECTED` | `disconnect()`                                            | `DISCONNECTING` |
+| `DISCONNECTING`            | 传输的 `close`（或 `error`）                              | `DISCONNECTED`；若有 `connect()` 在等待，随即 `CONNECTING` |
+| `IDLE` / `BACKING_OFF`     | `disconnect()`（退避时取消定时器）                        | `DISCONNECTED`  |
+
+表中没有的触发不改变阶段：`CONNECTING` 时调用 `connect()` 加入进行中的尝试；`CONNECTED` 时调用
+`connect()` 立即兑现；`BACKING_OFF` 时调用 `connect()` 以 `ERR_ILLEGAL_STATE` 拒绝；
+`DISCONNECTING` 时调用 `disconnect()` 共用进行中的关闭；`DISCONNECTED` 时调用 `disconnect()` 立即
+兑现。
+
+### 规则
+
+- **每次丢失由一个事件转移阶段。** 传输层向 `#transport_opened()` 和
+  `#transport_lost(error, emit_disconnect)` 报告；后者运行 `abort_pending()`，且只从
+  `CONNECTING`、`CONNECTED` 或 `DISCONNECTING` 转移阶段，因此重复的报告不做改变。各传输保证一次
+  丢失只报告一次：
+  - **TCP。** 套接字在每次 `error` 之后都会发出 `close`，因此只由 `close` 报告丢失；`error` 只
+    保存错误（供连接失败时的调用者使用）并发出它。若在 `error` 上转移，随后的 `close` 可能被当作
+    更新一次尝试的丢失。这取代了原先靠 `_conn_failed` 去重的做法。
+  - **串口。** 串口可能只发出 `error` 而之后没有 `close`。串口仍打开时的 `error` 会关闭串口，由
+    其 `close` 报告丢失；串口已关闭时的 `error` 立即报告。这是串口代码唯一读取 `isOpen` 的地方。
+- **重连定时器。** `#reconnect_timer` 保存待决定时器的句柄。它是资源，不是阶段：恰好在
+  `BACKING_OFF` 期间不为空。进入 `BACKING_OFF` 时启动它；定时器回调先清除它，再转入
+  `CONNECTING`；`disconnect()` 用 `clearTimeout` 清除它。
+- **等待中的 `connect()`。** `DISCONNECTING` 期间调用的 `connect()` 被保存为一个待决的兑现函数，
+  同样是资源而不是阶段。结束 `DISCONNECTING` 的 `close` 启动它。在此之前调用 `disconnect()` 会
+  以 `connection lost` 拒绝它。
+- **请求。** 处于 `BACKING_OFF`、`DISCONNECTING` 或 `DISCONNECTED` 时，`process_packet_transaction`
+  立即以 `connection lost` 拒绝请求。只有 `BACKING_OFF` 时才发出 `error`（有监听者时）：另外两种
+  情况是调用者自己关闭了连接。处于 `IDLE` 时请求入队，由 `sending` 按需连接；其他阶段绝不按需连接。
+- **关闭传输。** 从 `CONNECTING` 或 `CONNECTED` 调用 `disconnect()` 时调用传输层的 `_close()`。
+  TCP 销毁套接字（`socket.destroy()`），而不是 `end()`：链路已断时对端的 FIN 永远不会到来，关闭
+  会一直挂起。串口则关闭串口；串口的打开无法中止，因此从 `CONNECTING` 调用时，在打开有结果后立即
+  关闭串口，若打开失败则由失败自行报告丢失。`disconnect()` 的 Promise 在转入
+  `DISCONNECTED` 时兑现，晚于 `disconnect` 事件。从 `IDLE` 或 `BACKING_OFF` 调用时不会再有传输
+  事件，因此 `disconnect()` 自行运行 `abort_pending()` 并立即兑现。
+- **`#busy` 不是阶段。** 它标记一次帧写入之后的 `delay` 间隔，与连接阶段无关，因此仍是独立的
+  布尔值。
+
+### 传输钩子
+
+每种传输为 `_send(data)`、`_open()` 和 `_close()` 赋值。`_open()` 只在转入 `CONNECTING` 时
+调用；在 `CONNECTING` 期间到来的调用者被加入 `#connect_waiters`，因此并发调用者共用一次尝试。
+
+- **TCP（`set_tcp`）。** `_open()` 即 `socket.connect`；套接字的 `connect` 事件报告
+  `#transport_opened()`。每次尝试都复用同一个套接字。
+- **串口（`set_serial`）。** `_open()` 只创建一次串口（`creating` Promise，是懒创建缓存，不是
+  阶段）并打开它；`opening` Promise 让 `_close()` 能等待进行中的打开。由打开的回调（而不是 `open`
+  事件）报告 `#transport_opened()`。
 
 ## 解析器说明（`src/util.js`）
 
