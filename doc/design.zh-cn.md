@@ -95,7 +95,8 @@
 
 - **包表。** `#packets` 是一个普通数组，按 `tid - TRANSACTION_START` 索引
   （`TRANSACTION_START = 8000`）。`set_packet` / `get_packet` 封装了偏移计算。`packets_length`
-  为 256。
+  为 256。只有 TCP 使用它：RTU 系列最多只有一个已写出的请求，从帧写出到请求结束都保存在
+  `#current` 中。
 - **TID 分配（`get_tid`）。** 非 TCP 始终返回 `TRANSACTION_START`（RTU 没有事务字段）。TCP
   则递增 `#last_tid`，一旦超过 `packets_length + TRANSACTION_START` 就回绕到
   `TRANSACTION_START`。由于只有 256 个槽位，且不检查槽位是否空闲，同时待决的 TCP 事务超过
@@ -104,34 +105,47 @@
   它返回一个已以 `Error('connection lost')` 拒绝的 Promise；帧从不入队。仅在 `BACKING_OFF` 时它
   同时发出 `error`，且仅当客户端有 `error` 监听者时：没有监听者时发出 `error` 会抛出异常，而参数
   合法的调用不得同步抛出。
-  否则设置 `status = 'pending'`，递增
-  `#trans_count`，创建 Promise，再将缓冲区入队并返回该 Promise。它把 `resolve` / `reject` 闭包以及 `timeout_id` 存放在 packet 上。
-  `end_transaction` 递减计数，标记 `status`，清除定时器，并把 `resolve`/`reject` 换成
-  `DO_NOTHING`，使迟到/重复的响应无效。
+  否则设置 `status = 'pending'`，递增 `#trans_count`，创建 Promise，再将 packet 入队并返回该
+  Promise。它把 `resolve` / `reject` / `on_timeout` 闭包存放在 packet 上；定时器（`timeout_id`）
+  由 `#write` 在帧写出时启动，因此排队时间不计入超时。`end_transaction` 递减计数，标记 `status`，
+  清除定时器，把 `resolve`/`reject` 换成 `DO_NOTHING` 使迟到/重复的响应无效，并调用
+  `#transaction_ended`。RTU 超时还会清空 `unprocessed_buffer`，以免迟到应答的字节混到下一个响应
+  前面。
 - **界定（`on_data`）。** 数据块追加到 `unprocessed_buffer`，再用 `split_frames` 切分：`tcp` 用
   `mbap_frame_length`，否则用 `rtu_response_length`。`#keep` 把 `rest` 存入 `unprocessed_buffer`，
   不为空时重设 `#silence_timer`（`#silence`，见下文“静默”）。`#on_silence` 对残留字节调用 `resync_frames`，仍然剩下的字节在 TCP 上保留
   （不再重设定时器），在串口上丢弃。`#transport_opened` 和 `#transport_lost` 会清空缓冲区。响应
   的帧长不会是 `UNKNOWN`，所以客户端没有帧长未知的情况。
-- **匹配（`on_data`）。** 对每一帧：解析 → 发出 `receive` → 跳过 `func_code === 0` → 按 `tid` 查找 →
-  除非 `status === 'pending'` 否则忽略 → 有 `exception_code` 则 `reject`，否则兑现：读以
-  `response.data` 兑现，写以 `echo_matches()` 的结果兑现。
+- **匹配（`on_data`）。** 对每一帧：解析 → 发出 `receive` → 跳过 `func_code === 0` → 按 `tid`
+  查找（TCP）或取 `#current`（RTU 系列）→ 除非 `status === 'pending'` 否则忽略 → RTU 系列上，
+  除非 `response_fits()`（单元 ID 相同、去掉异常位后功能码相同，读还要求字节数与所请求的相符）
+  否则忽略 → 有 `exception_code` 则 `reject`，否则兑现：读以 `response.data` 兑现，写以
+  `echo_matches()` 的结果兑现。TCP 不检查 `response_fits()`：事务 ID 已经匹配，而且有些网关会以
+  别的单元 ID 应答。
 - **写回显。** `transact()` 保存 `packet.echo`，即写响应在地址之后必须回显的值（`expected_echo()`：
   FC 5 为 `0xFF00` / `0x0000`，FC 6 为值，FC 15/16 为数量；读为 `undefined`）。`echo_matches()` 把响应的
   功能码、单元 ID、起始地址以及回显的值或数量与请求比较；写以比较结果兑现。
 
 ## 发送队列 / 背压（`send` → `sending`）
 
-- `send_queue` 是 `{ buffer, on_sent }` 的数组，上限为 `send_queue_size`（256）；溢出时从**队首**切除
-  （丢弃最旧的）。`on_sent` 若存在，会在缓冲区交给 `_send` 后立即运行。广播 packet
-  （`packet.broadcast`：非 TCP 协议上发往单元 `0` 的任何请求）借它兑现，因为不会有应答：写以
-  `true` 兑现，读以空 `Buffer` 兑现。
-- `sending` 由 `#busy` 保护，队列为空时立即返回。已连接时，它取出一个缓冲区，调用 `_send`，然后在 `delay` 毫秒后
-  清除 `#busy` 并重新进入。这样既串行化了写入，也实现了节流。
+- `send_queue` 是 packet 的数组，上限为 `send_queue_size`（256）；溢出时从**队首**切除（丢弃最旧
+  的），并以 `Error('queue overflow')` 拒绝每个被丢弃的 packet。由于定时器在写出时才启动，被丢弃
+  而不拒绝的 packet 将永远不会结束。
+- `sending` 由 `#busy` 保护，队列为空时立即返回。已连接时，它设置 `#busy`，取出一个 packet 交给
+  `#write`，后者启动超时并调用 `_send`。`#release(gap)` 在 `gap` 毫秒后清除 `#busy` 并重新进入。
+  `#gap` 为 `delay`，串口上为 `max(delay, silence)`。
+  - **TCP：** `#write` 写出后立即调用 `#release(#gap)`，因此写入受节流，但可以有多个未完成的请求。
+  - **RTU 系列：** `#write` 把 packet 存入 `#current`，不释放；`end_transaction` 调用
+    `#transaction_ended`，后者清空 `#current` 并调用 `#release(#gap)`。因此下一帧在请求结束（响应、
+    异常、超时或 `abort_pending()`）之后才写出；每个已写出的请求都会结束，所以 `#busy` 不会一直
+    保持。
+  - **广播**（`packet.broadcast`：非 TCP 协议上发往单元 `0` 的任何请求）：不会有应答，因此
+    `#write` 在 `_send` 之后立即兑现它（写以 `true`，读以空 `Buffer`），不启动定时器，并调用
+    `#release(max(turnaround, #gap))`。
 - 处于 `IDLE`（或加入进行中的 `CONNECTING`）时，`sending` 以自身作为成功回调发起连接。它绝不从其他阶段发起连接：退避
   或手动关闭都在 `abort_pending()` 清空队列之后才开始，而此时发出的请求在入队之前就被拒绝。
 - **`abort_pending()`。** 清空 `send_queue`，并以 `Error('connection lost')` 拒绝每个 `status` 为
-  `'pending'` 的 packet。它在每次传输层 `close` / `error`（经由 `#transport_lost`，TCP 套接字和
+  `'pending'` 的 packet：排队的，以及已写出的（TCP 上为 `#packets`，RTU 系列上为 `#current`）。它在每次传输层 `close` / `error`（经由 `#transport_lost`，TCP 套接字和
   串口）时运行，也在从 `IDLE` 或 `BACKING_OFF` 调用 `disconnect()` 时运行，因此按需连接失败时，其
   请求也会立即失败。
 
@@ -206,8 +220,8 @@
   关闭串口，若打开失败则由失败自行报告丢失。`disconnect()` 的 Promise 在转入
   `DISCONNECTED` 时兑现，晚于 `disconnect` 事件。从 `IDLE` 或 `BACKING_OFF` 调用时不会再有传输
   事件，因此 `disconnect()` 自行运行 `abort_pending()` 并立即兑现。
-- **`#busy` 不是阶段。** 它标记一次帧写入之后的 `delay` 间隔，与连接阶段无关，因此仍是独立的
-  布尔值。
+- **`#busy` 不是阶段。** 它标记一次帧写入正在进行：直到写出之后（TCP）或请求结束之后（RTU 系列）
+  的间隔过去为止。它与连接阶段无关，因此仍是独立的布尔值。
 
 ### 传输钩子
 
@@ -313,12 +327,6 @@
 相关的行目前并不由代码保证，且清单清空时它们也不需要改动。
 
 每一项都是缺陷或缺失的部分，而不是预期行为。
-
-### 客户端
-
-- [ ] **固定的事务 ID。** RTU 没有事务字段，因此所有 RTU 请求共用 `TRANSACTION_START`；并发请求
-  会互相覆盖各自的 packet 槽位。RTU 需要严格的请求/响应串行化（同一时刻只有一个未完成的请求），
-  目前尚未实现。
 
 ### 服务端
 

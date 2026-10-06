@@ -113,6 +113,19 @@ function expected_echo(func_code, data, length) {
 }
 
 /**
+ * Whether an RTU response can answer the request (see spec-client.md, "Concurrency"): the same
+ * unit ID and function code (ignoring the exception bit), and for a read the requested byte
+ * count. A response that cannot is a late answer to an earlier request.
+ */
+function response_fits(packet, response) {
+	if (response.unit_id !== packet.unit_id) return false;
+	if ((response.func_code & 0x7F) !== packet.func_code) return false;
+	if (response.exception_code !== undefined || packet.echo !== undefined) return true;
+	const bytes = packet.func_code <= 2 ? Math.ceil(packet.length / 8) : packet.length * 2;
+	return response.data.length === bytes;
+}
+
+/**
  * Whether a write response echoes its request: function code, unit ID, address and value or
  * quantity.
  */
@@ -172,8 +185,9 @@ export class Modbus_Client extends EventEmitter {
 	// Resolvers of the disconnect() calls waiting for the transport to close
 	#disconnect_waiters = [];
 
-	timeout; // response timeout
-	delay; // delay between pools
+	timeout; // response timeout, from the frame write
+	delay; // minimum gap before the next frame write
+	turnaround; // RTU family: minimum wait after a broadcast
 
 	#packets = [];
 	get_packet(tid) {
@@ -196,6 +210,9 @@ export class Modbus_Client extends EventEmitter {
 		}
 		return this.#last_tid;
 	}
+
+	// RTU family: the one request whose frame is written and not yet answered
+	#current = null;
 
 	#trans_count = 0;
 	inc_trans_count() {
@@ -225,6 +242,7 @@ export class Modbus_Client extends EventEmitter {
 		this.unprocessed_buffer = Buffer.alloc(0);
 		this.timeout = options.timeout ?? 1000;
 		this.delay = options.delay ?? 20;
+		this.turnaround = options.turnaround ?? 100;
 		const silence = silence_option(options.silence);
 
 		if (typeof address === 'string') {
@@ -243,30 +261,39 @@ export class Modbus_Client extends EventEmitter {
 		if (this.reconnect_time > 0) this.#start_connect();
 	}
 
+	// Packets waiting for their frame to be written
 	send_queue = [];
 	send_queue_size = 256;
-	// `on_sent` runs once the frame has been written to the transport
-	send(data, on_sent) {
-		this.send_queue.push({ buffer: data, on_sent });
+	send(packet) {
+		this.send_queue.push(packet);
 		const overflow = this.send_queue.length - this.send_queue_size;
 		if (overflow > 0) {
-			this.send_queue.splice(0, overflow);
+			for (const dropped of this.send_queue.splice(0, overflow)) {
+				dropped.reject(new Error('queue overflow'));
+			}
 		}
 		this.sending();
 	};
 
+	// Set from a frame write until the gap after it (TCP) or after its request ended (RTU) elapses
 	#busy = false;
+	#release(gap) {
+		setTimeout(() => {
+			this.#busy = false;
+			this.sending();
+		}, gap);
+	}
+
+	// The minimum gap before the next write; on a serial line never shorter than its silence
+	get #gap() {
+		return this.protocol === 'rtu' ? Math.max(this.delay, this.#silence) : this.delay;
+	}
+
 	sending() {
 		if (this.#busy || this.send_queue.length === 0) return;
 		if (this.is_connected) {
-			const { buffer, on_sent } = this.send_queue.shift();
 			this.#busy = true;
-			this._send(buffer);
-			on_sent?.();
-			setTimeout(() => {
-				this.#busy = false;
-				this.sending();
-			}, this.delay);
+			this.#write(this.send_queue.shift());
 		} else if (this.is_idle || this.is_connecting) {
 			this.#start_connect(
 				() => this.sending(),
@@ -276,12 +303,39 @@ export class Modbus_Client extends EventEmitter {
 	}
 
 	/**
-     * Rejects every pending request with `Error('connection lost')` and discards the queued
-     * frames, so no request is executed after it was reported as failed.
+	 * Writes the frame of a queued packet and starts its timeout. On TCP the next write may
+	 * follow after the gap; on the RTU family only after the request ends (see `#transaction_ended`),
+	 * or after `turnaround` for a broadcast, which resolves at once since it is never answered.
+	 */
+	#write(packet) {
+		const rtu = this.protocol !== 'tcp';
+		if (packet.broadcast) {
+			this._send(packet.buffer);
+			packet.resolve(packet.echo === undefined ? Buffer.alloc(0) : true);
+			this.#release(Math.max(this.turnaround, this.#gap));
+			return;
+		}
+		if (rtu) this.#current = packet;
+		packet.timeout_id = setTimeout(packet.on_timeout, this.timeout);
+		this._send(packet.buffer);
+		if (!rtu) this.#release(this.#gap);
+	}
+
+	// Called once a request ends, however it ends
+	#transaction_ended(packet) {
+		if (packet !== this.#current) return;
+		this.#current = null;
+		this.#release(this.#gap);
+	}
+
+	/**
+     * Rejects every pending request, written or queued, with `Error('connection lost')` and
+     * discards the queued frames, so no request is executed after it was reported as failed.
      */
 	abort_pending() {
-		this.send_queue.length = 0;
-		for (const packet of this.#packets) {
+		const queued = this.send_queue.splice(0);
+		const written = this.protocol === 'tcp' ? this.#packets : [this.#current];
+		for (const packet of [...queued, ...written]) {
 			if (packet?.status === 'pending') packet.reject(new Error('connection lost'));
 		}
 	}
@@ -305,17 +359,21 @@ export class Modbus_Client extends EventEmitter {
 			packet.resolve = DO_NOTHING;
 			packet.reject = DO_NOTHING;
 			clearTimeout(packet.timeout_id);
+			this.#transaction_ended(packet);
 		};
 
 		packet.status = 'pending';
 		this.inc_trans_count();
 
 		const promise = new Promise((resolve, reject) => {
-			packet.timeout_id = setTimeout(() => {
+			// Armed by `#write`, when the frame is written
+			packet.on_timeout = () => {
+				// Bytes of a late answer must not prefix the next response
+				if (this.protocol !== 'tcp') this.#keep(Buffer.alloc(0));
 				end_transaction('rejected');
 				this.emit('timeout');
 				reject(`transaction 0x${packet.tid.toString(16)} timeout`);
-			}, this.timeout);
+			};
 			packet.resolve = (value) => {
 				end_transaction('fulfilled');
 				this.emit('data', value);
@@ -327,12 +385,7 @@ export class Modbus_Client extends EventEmitter {
 				reject(reason);
 			};
 		});
-		// A broadcast is never answered: it resolves as soon as its frame is written, a write
-		// with true and a read with an empty Buffer
-		const on_sent = packet.broadcast
-			? () => packet.resolve(packet.echo === undefined ? Buffer.alloc(0) : true)
-			: undefined;
-		this.send(packet.buffer, on_sent);
+		this.send(packet);
 		return promise;
 	}
 
@@ -396,6 +449,7 @@ export class Modbus_Client extends EventEmitter {
 			unit_id,
 			func_code,
 			address,
+			length,
 			buffer,
 			// The value a write response must echo; undefined for a read
 			echo: expected_echo(func_code, data, length),
@@ -403,7 +457,8 @@ export class Modbus_Client extends EventEmitter {
 			broadcast: this.protocol !== 'tcp' && unit_id === BROADCAST_ID,
 			status: 'init',
 		};
-		this.set_packet(tid, packet);
+		// The RTU family has no transaction ID: its one written request is `#current`
+		if (this.protocol === 'tcp') this.set_packet(tid, packet);
 
 		return this.process_packet_transaction(packet);
 	}
@@ -453,10 +508,9 @@ export class Modbus_Client extends EventEmitter {
 
 			if (response.func_code === 0) continue; // Invalid data
 
-			const packet = this.get_packet(response.tid);
-			if (packet === undefined || packet.status !== 'pending') {
-				continue;
-			}
+			const packet = tcp ? this.get_packet(response.tid) : this.#current;
+			if (!packet || packet.status !== 'pending') continue;
+			if (!tcp && !response_fits(packet, response)) continue;
 
 			if (response.exception_code) {
 				packet.reject(`response error: ${response.exception_code}`);

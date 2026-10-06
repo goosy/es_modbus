@@ -569,16 +569,25 @@ describe('Modbus_Client transactions', () => {
 		assert.ok(times[2] - times[1] >= 55, `gap ${times[2] - times[1]}`);
 	});
 
-	test('the oldest queued frames are dropped on queue overflow', async () => {
+	test('the oldest queued requests are rejected with "queue overflow"', async () => {
 		client.delay = 100;
 		client.timeout = 400;
 		client.send_queue_size = 2;
-		const results = await Promise.allSettled([
-			client.read('40001'), client.read('40002'), client.read('40003'), client.read('40004'),
-		]);
+		const started = performance.now();
+		const reads = [client.read('40001'), client.read('40002'), client.read('40003'), client.read('40004')];
+		await assert.rejects(reads[1], { message: 'queue overflow' });
+		assert.ok(performance.now() - started < 50);
+		const results = await Promise.allSettled(reads);
 		assert.deepEqual(results.map((r) => r.status), ['fulfilled', 'rejected', 'fulfilled', 'fulfilled']);
 		const addresses = split_frames(fake.frames).map((f) => f.readUInt16BE(8));
 		assert.deepEqual(addresses, [0, 2, 3]);
+	});
+
+	test('the timeout starts when the frame is written, not when it is queued', async () => {
+		client.delay = 150;
+		client.timeout = 100;
+		const values = await Promise.all([client.read('40001'), client.read('40002'), client.read('40003')]);
+		assert.equal(values.length, 3);
 	});
 
 	test('many concurrent requests', async () => {
@@ -805,6 +814,20 @@ describe('Modbus_Client serial port', () => {
 		await client.disconnect();
 	});
 
+	test('the gap before the next frame is never shorter than the line silence', async () => {
+		// 3.5 characters of 10 bits at 1200 baud: about 29 ms
+		const client = serial_client({ reconnect_time: 0, baud_rate: 1200, delay: 0 });
+		await client.connect();
+		const times = [];
+		client.on('send', () => {
+			times.push(performance.now());
+			setImmediate(() => client.on_data(rtu_frame('0103020007')));
+		});
+		await Promise.all([client.read('40001'), client.read('40002')]);
+		assert.ok(times[1] - times[0] >= 27, `gap ${times[1] - times[0]}`);
+		await client.disconnect();
+	});
+
 	test('connect() creates and opens the port once for concurrent callers', async () => {
 		const client = serial_client({ reconnect_time: 0 });
 		await Promise.all([client.connect(), client.connect()]);
@@ -999,7 +1022,7 @@ describe('Modbus_Client RTU-over-TCP', () => {
 		await assert.rejects(client.read('40001'), /timeout/);
 	});
 
-	test('only one request is outstanding at a time', { todo: 'design.md RTU / serial: fixed transaction ID' }, async () => {
+	test('only one request is outstanding at a time', async () => {
 		const answered = [];
 		responder = (frame) => {
 			setTimeout(() => {
@@ -1010,6 +1033,59 @@ describe('Modbus_Client RTU-over-TCP', () => {
 		const values = await Promise.all([client.read('40001'), client.read('40002')]);
 		assert.deepEqual(values.map((d) => d.readUInt16BE(0)), [1, 2]);
 		assert.ok(fake.frames[1].time >= answered[0], 'the second request was sent before the first was answered');
+	});
+
+	test('a request waiting behind an outstanding one does not time out in the queue', async () => {
+		client.timeout = 120;
+		responder = (frame) => {
+			setTimeout(() => {
+				for (const socket of fake.sockets) socket.write(rtu_frame(Buffer.from([1, 3, 2, 0, frame[3]])));
+			}, 70);
+		};
+		const values = await Promise.all([client.read('40001'), client.read('40002'), client.read('40003')]);
+		assert.deepEqual(values.map((d) => d.readUInt16BE(0)), [0, 1, 2]);
+	});
+
+	test('a timeout ends the outstanding request and lets the next one go', async () => {
+		client.timeout = 100;
+		responder = (frame) => (frame[0] === 2 ? rtu_frame('0203020005') : undefined);
+		const first = client.read('40001', 1);
+		const second = client.read('40001', 2);
+		await assert.rejects(first, /timeout/);
+		assert.deepEqual(await second, hex('0005'));
+		assert.ok(fake.frames[1].time - fake.frames[0].time >= 90);
+	});
+
+	test('a response for another unit, function code or length is ignored', async () => {
+		responder = () => Buffer.concat([
+			rtu_frame('0203020009'), // unit
+			rtu_frame('0104020009'), // function code
+			rtu_frame('018402'), // exception of another function code
+			rtu_frame('01030400090009'), // byte count
+			rtu_frame('0103020007'),
+		]);
+		assert.deepEqual(await client.read('40001'), hex('0007'));
+	});
+
+	test('the frame after a broadcast waits turnaround ms', async () => {
+		client.turnaround = 150;
+		responder = (frame) => (frame[0] === 1 ? rtu_frame('0103020007') : undefined);
+		assert.equal(await client.write('40001', 7, 0), true);
+		assert.deepEqual(await client.read('40001'), hex('0007'));
+		assert.equal(fake.frames.length, 2);
+		assert.ok(fake.frames[1].time - fake.frames[0].time >= 140,
+			`gap ${fake.frames[1].time - fake.frames[0].time}`);
+	});
+
+	test('connection loss rejects the outstanding and every queued request', async () => {
+		client.timeout = 2000;
+		const reads = [client.read('40001'), client.read('40002'), client.read('40003')];
+		await sleep(30);
+		const started = performance.now();
+		for (const socket of fake.sockets) socket.destroy();
+		for (const read of reads) await assert.rejects(read, { message: 'connection lost' });
+		assert.ok(performance.now() - started < 500);
+		assert.equal(fake.frames.length, 1);
 	});
 });
 

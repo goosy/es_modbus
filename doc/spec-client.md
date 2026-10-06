@@ -26,8 +26,9 @@ const client = new Modbus_Client(null, { port: 'COM3', baud_rate: 19200, parity:
 | ---------------- | ------- | --------------------------------------------------------------------- |
 | `port`           | `502`   | TCP port. For a serial client, the serial device path (a non-empty `string`; anything else throws `Invalid serial port`). |
 | `rtu`            | `false` | With a string address, use RTU framing over the TCP socket.           |
-| `timeout`        | `1000`  | Per-transaction response timeout, ms. On expiry the request rejects and `timeout` is emitted. |
-| `delay`          | `20`    | Minimum gap between consecutive frame writes, ms (send pacing).       |
+| `timeout`        | `1000`  | Per-transaction response timeout, ms, counted from when the request's frame is written. On expiry the request rejects and `timeout` is emitted. |
+| `delay`          | `20`    | Minimum gap before the next frame write, ms (send pacing; see "Ordering / pacing"). |
+| `turnaround`     | `100`   | RTU and RTU-over-TCP: minimum wait after a broadcast before the next frame write, ms (the serial line "turnaround delay"). Ignored on TCP. |
 | `reconnect_time` | `10000` | Reconnect delay for TCP and RTU-over-TCP, ms. `> 0` also makes the constructor connect immediately (for serial, open the port); `0` disables the timed reconnect. Both apply only while `enable_reconnect` is true. |
 | `silence`        | `50`    | Silence in ms after which the bytes left of an incomplete frame are resolved (see "Frame delimiting" in `spec-protocol.md`). A finite positive number (else `Invalid silence`). On a serial port at least 3.5 character times (1.75 ms above 19200 baud). |
 | `modicon_zero_based` | `false` | `true` selects 0-based Modicon point numbering (see below). |
@@ -95,7 +96,9 @@ coil bytes) — the caller decodes them. Rejects with:
 - `` `response error: <exception_code>` `` on a Modbus exception;
 - an `Error` with the message `connection lost`, if the connection is lost while the request is
   pending, or if the request is issued during a reconnect back-off or while `enable_reconnect` is
-  false (see "Connection loss").
+  false (see "Connection loss");
+- an `Error` with the message `queue overflow`, if the request is dropped from a full send queue
+  before its frame is written (see "Ordering / pacing").
 
 ### `write(range, value, unit_id = 1) → Promise<boolean>`
 
@@ -118,7 +121,7 @@ a bit count cannot be derived from a byte count. Writing to a read-only table (d
 Resolves with whether the write was confirmed: a Modbus write response echoes its request (the
 function code, unit ID and address, plus the value for FC 5/6 or the quantity for FC 15/16).
 `true` when the echo matches the request, `false` when it does not. Rejects like `read` (timeout,
-exception response, connection lost).
+exception response, connection lost, queue overflow).
 
 ### `connect() → Promise<void>`
 
@@ -168,18 +171,30 @@ it is already closed. It never rejects. Concurrent calls settle together, on the
   transaction by this ID. How IDs are allocated is not specified.
 - **Concurrency.** On TCP, multiple `read`/`write` calls may be outstanding at once, and
   responses with no matching pending transaction are ignored. RTU-family transports have no
-  transaction ID, so only one request may be outstanding at a time and requests must be
-  serialized.
+  transaction ID, so requests are serialized: only one request is outstanding at a time, and the
+  next frame is written only after it resolves, rejects or times out. While a request is
+  outstanding, a response whose unit ID or function code (ignoring the exception bit) differs
+  from the request, or a read response whose byte count differs from the requested length, is
+  ignored and the request keeps waiting. A late response to an earlier request that matches in
+  all of these (the same unit, function code and length) cannot be told apart from the answer to
+  the current one; this is a limit of the RTU protocol.
 - **Broadcast (RTU, RTU-over-TCP).** On a serial bus every request to unit `0` is a broadcast:
   slaves execute a broadcast write, ignore a broadcast read, and never answer. The promise
   resolves as soon as the frame has been written, without waiting for a response: a write with
   `true` (there is no echo to check), a read with an empty `Buffer` (there is no data). It still
-  rejects with `connection lost` if the connection is lost before the frame is written. On TCP
-  unit `0` is an ordinary unit.
-- **Ordering / pacing.** Outgoing frames are queued and written one at a time with at least
-  `delay` ms between writes. The queue is bounded (256); on overflow the **oldest** queued frames
-  are dropped.
-- **Timeouts are per transaction**, not per connection. A late response arriving after timeout is
+  rejects with `connection lost` if the connection is lost before the frame is written. The next
+  frame is written no earlier than `turnaround` ms after the broadcast, giving the slaves time to
+  execute it. On TCP unit `0` is an ordinary unit.
+- **Ordering / pacing.** Outgoing frames are queued and written one at a time, in the order the
+  requests were issued. On TCP the next frame is written at least `delay` ms after the previous
+  write. On RTU-family transports it is written at least `delay` ms after the previous request
+  ended (resolved, rejected or timed out), or `turnaround` ms after a broadcast, whichever
+  applies; on a serial port the gap is never shorter than the line's 3.5-character silence. The
+  queue is bounded (256 frames, not counting the one outstanding); on overflow the **oldest**
+  queued requests are dropped, and each rejects at once with an `Error` whose message is
+  `queue overflow`; their frames are never written.
+- **Timeouts are per transaction**, not per connection, and start when the request's frame is
+  written, so time spent in the queue does not count. A late response arriving after timeout is
   discarded.
 - **Connection loss.** When the connection is lost, every pending request, whether already sent
   or still queued, is rejected immediately with an `Error` (message `connection lost`) and the

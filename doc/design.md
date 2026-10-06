@@ -112,7 +112,8 @@ A single routine builds every outgoing frame regardless of transport:
 
 - **Packet table.** `#packets` is a plain array indexed by `tid - TRANSACTION_START`
   (`TRANSACTION_START = 8000`). `set_packet` / `get_packet` wrap the offset math. `packets_length`
-  is 256.
+  is 256. Only TCP uses it: the RTU family has at most one written request, held in `#current`
+  from its frame write until it ends.
 - **TID allocation (`get_tid`).** Non-TCP always returns `TRANSACTION_START` (RTU has no
   transaction field). TCP increments `#last_tid` and wraps back to `TRANSACTION_START` once it
   passes `packets_length + TRANSACTION_START`. With 256 slots and no check that a slot is free,
@@ -123,9 +124,12 @@ A single routine builds every outgoing frame regardless of transport:
   listener: emitting `error` with no listener throws, and a call with valid arguments must not
   throw synchronously.
   Otherwise it sets `status = 'pending'`, bumps `#trans_count`, creates the Promise,
-  then enqueues the buffer and returns the Promise. It stores `resolve` / `reject` closures on the packet plus a
-  `timeout_id`. `end_transaction` decrements the count, stamps `status`, clears the timer, and
-  swaps `resolve`/`reject` for `DO_NOTHING` so a late/duplicate response is inert.
+  then enqueues the packet and returns the Promise. It stores `resolve` / `reject` / `on_timeout`
+  closures on the packet; the timer (`timeout_id`) is armed by `#write`, when the frame is written,
+  so queueing time never counts. `end_transaction` decrements the count, stamps `status`, clears
+  the timer, swaps `resolve`/`reject` for `DO_NOTHING` so a late/duplicate response is inert, and
+  calls `#transaction_ended`. An RTU timeout also empties `unprocessed_buffer`, so the bytes of a
+  late answer do not prefix the next response.
 - **Framing (`on_data`).** The chunk is appended to `unprocessed_buffer` and cut by
   `split_frames` with `mbap_frame_length` (`tcp`) or `rtu_response_length`. `#keep` stores `rest`
   in `unprocessed_buffer` and, when it is not empty, restarts `#silence_timer` (`#silence`, see
@@ -133,9 +137,12 @@ A single routine builds every outgoing frame regardless of transport:
   `#on_silence` runs `resync_frames` on the bytes left, keeps what is still left on TCP (without
   a new timer) and discards it on a serial port. `#transport_opened` and `#transport_lost` empty
   the buffer. A response length is never `UNKNOWN`, so the client has no unknown-length case.
-- **Matching (`on_data`).** For each frame: parse → emit `receive` → skip `func_code === 0` → look up by `tid` →
-  ignore unless `status === 'pending'` → `reject` on `exception_code`, else resolve: a read with
-  `response.data`, a write with `echo_matches()`.
+- **Matching (`on_data`).** For each frame: parse → emit `receive` → skip `func_code === 0` → look
+  up by `tid` (TCP) or take `#current` (RTU family) → ignore unless `status === 'pending'` → on the
+  RTU family, ignore unless `response_fits()` (same unit ID, function code with the exception bit
+  cleared, and for a read the requested byte count) → `reject` on `exception_code`, else resolve:
+  a read with `response.data`, a write with `echo_matches()`. TCP does not check `response_fits()`:
+  the transaction ID matches, and some gateways answer with another unit ID.
 - **Write echo.** `transact()` stores `packet.echo`, the value a write response must echo after
   its address (`expected_echo()`: `0xFF00` / `0x0000` for FC 5, the value for FC 6, the quantity
   for FC 15/16; `undefined` for a read). `echo_matches()` compares the response's function code,
@@ -144,20 +151,29 @@ A single routine builds every outgoing frame regardless of transport:
 
 ## Send queue / backpressure (`send` → `sending`)
 
-- `send_queue` is an array of `{ buffer, on_sent }` capped at `send_queue_size` (256); overflow
-  splices off the **front** (oldest dropped). `on_sent`, if given, runs right after the buffer
-  is passed to `_send`. A broadcast packet (`packet.broadcast`: any request to unit `0` on a
-  non-TCP protocol) resolves through it, since no response will come: a write with `true`, a
-  read with an empty `Buffer`.
+- `send_queue` is an array of packets capped at `send_queue_size` (256); overflow splices off the
+  **front** (oldest dropped) and rejects each dropped packet with `Error('queue overflow')`. Since
+  the timer starts only at the write, a dropped packet that was not rejected would never settle.
 - `sending` is guarded by `#busy` and returns at once when the queue is empty. When connected it
-  shifts one buffer, calls `_send`, then after
-  `delay` ms clears `#busy` and re-enters. This serializes writes and paces them.
+  sets `#busy`, shifts one packet and passes it to `#write`, which arms the timeout and calls
+  `_send`. `#release(gap)` clears `#busy` after `gap` ms and re-enters. `#gap` is `delay`, or on a
+  serial port `max(delay, silence)`.
+  - **TCP:** `#write` calls `#release(#gap)` right after the write, so writes are paced but many
+    requests may be outstanding.
+  - **RTU family:** `#write` stores the packet in `#current` and does not release; `end_transaction`
+    calls `#transaction_ended`, which clears `#current` and calls `#release(#gap)`. So the next
+    frame follows the end of the request (response, exception, timeout or `abort_pending()`),
+    and `#busy` cannot stay set: every written request ends.
+  - **Broadcast** (`packet.broadcast`: any request to unit `0` on a non-TCP protocol): no response
+    will come, so `#write` resolves it right after `_send` (a write with `true`, a read with an
+    empty `Buffer`), arms no timer, and calls `#release(max(turnaround, #gap))`.
 - In `IDLE` (or joining a `CONNECTING`), `sending` starts a connect with itself as the success
   callback. It never
   connects from another phase: a back-off or a manual close starts only after `abort_pending()`
   has emptied the queue, and requests issued then are rejected before they are queued.
-- **`abort_pending()`.** Empties `send_queue` and rejects every packet whose `status` is
-  `'pending'` with `Error('connection lost')`. It runs on every transport `close` / `error`
+- **`abort_pending()`.** Empties `send_queue` and rejects with `Error('connection lost')` every
+  packet whose `status` is `'pending'`: the queued ones, and the written ones (`#packets` on TCP,
+  `#current` on the RTU family). It runs on every transport `close` / `error`
   (through `#transport_lost`, for the TCP socket and the serial port) and on a `disconnect()`
   from `IDLE` or `BACKING_OFF`, so a failed on-demand connect also fails its requests at once.
 
@@ -239,8 +255,9 @@ close in progress, and `disconnect()` while `DISCONNECTED` resolves at once.
   open that fails instead reports the loss itself. The `disconnect()` promise resolves on the transition to `DISCONNECTED`,
   after the `disconnect` event. From `IDLE` or `BACKING_OFF` no transport event follows, so
   `disconnect()` runs `abort_pending()` itself and resolves at once.
-- **`#busy` is not a phase.** It marks the `delay` gap after a frame write and is independent of
-  the connection phase, so it stays a separate boolean.
+- **`#busy` is not a phase.** It marks a frame write in progress: until the gap after the write
+  (TCP) or after the request ended (RTU family). It is independent of the connection phase, so it
+  stays a separate boolean.
 
 ### Transport hooks
 
@@ -368,12 +385,6 @@ fixed in code. The `spec-*` files describe the target contract, so their RTU / s
 not yet guaranteed by the code, and they do not change when this list is cleared.
 
 Each item is a defect or missing piece, not intended behavior.
-
-### Client
-
-- [ ] **Fixed transaction ID.** RTU has no transaction field, so every RTU request shares
-  `TRANSACTION_START`; concurrent requests overwrite each other's packet slot. RTU needs strict
-  request/response serialization (one outstanding request at a time) which is not implemented.
 
 ### Server
 

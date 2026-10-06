@@ -248,7 +248,7 @@ describe(`Modbus RTU client on ${PEER_PATH} <-> server on ${SERVER_PATH}`, { ski
 		}
 	});
 
-	test('concurrent requests are serialized', { todo: 'design.md RTU / serial: fixed transaction ID' }, async () => {
+	test('concurrent requests are serialized', async () => {
 		const client = new Modbus_Client(null, { port: PEER_PATH, baud_rate: BAUD_RATE, timeout: 1000 });
 		client.on('error', () => { });
 		try {
