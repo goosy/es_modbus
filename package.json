@@ -1,6 +1,6 @@
 {
   "name": "es-modbus",
-  "version": "0.3.0",
+  "version": "0.3.0-beta.2",
   "description": "",
   "type": "module",
   "exports": {
@@ -9,7 +9,8 @@
   "files": [
     "dist",
     "prebuilds",
-    "THIRD_PARTY_LICENSES"
+    "THIRD_PARTY_LICENSES",
+    "CHANGELOG.md"
   ],
   "engines": {
     "node": ">=20.11"
