@@ -23,22 +23,12 @@ const close_port = (port) => new Promise((resolve) => {
 });
 const new_port = (path) => new SerialPort({ path, baudRate: BAUD_RATE, autoOpen: false });
 
-/**
- * Returns false when the pair is usable, or the reason to skip the suite.
- * Usable means: both ports open, and a byte written on one side reaches a read that is
- * already pending on the other side (the way a server waits for requests).
- */
+/** Returns false when both ports of the pair open, or the reason to skip the suite. */
 async function probe_ports() {
 	if (SERVER_PATH === 'none' || !PEER_PATH) return 'MODBUS_SERIAL_PORTS is not set to a port pair';
 	const ports = [new_port(SERVER_PATH), new_port(PEER_PATH)];
 	try {
 		for (const port of ports) await open_port(port);
-		const received = collect(ports[1], 1, 500);
-		await sleep(100); // let the read on the peer become pending
-		ports[0].write(Buffer.from([0x55]));
-		if ((await received).length === 0) {
-			return `serial pair ${SERVER_PATH}/${PEER_PATH} does not deliver data to a pending read (see doc/spec-test.md, "Serial test environment")`;
-		}
 		return false;
 	} catch (error) {
 		return `serial pair ${SERVER_PATH}/${PEER_PATH} unavailable: ${error.message}`;

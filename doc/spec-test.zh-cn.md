@@ -55,15 +55,21 @@
   端口，对端（原始 `SerialPort` 或 `Modbus_Client`）打开第二个。
 - 端口对通过环境变量 `MODBUS_SERIAL_PORTS="<服务端>,<对端>"` 设置；默认为 `COM11,COM12`。
   `MODBUS_SERIAL_PORTS=none` 跳过串口测试。
-- 串口测试运行前会做一次预检：打开两个端口，并检查在一个端口写入的字节能否到达另一个端口上已经
-  挂起的读操作。任一步失败，串口测试组即被跳过并注明原因，套件其余部分照常运行。
+- 串口测试运行前会做一次预检：打开两个端口。任一端口无法打开，串口测试组即被跳过并注明原因，
+  套件其余部分照常运行。
 
 ### 串口测试环境
 
-在开发机上（Windows 11，com0com 3.0.0.0 默认参数，`serialport` 10 至 13），预检失败：Node.js
-`serialport` 绑定在 com0com 端口上已经发起的读操作，在数据到达时不会完成；数据要等到端口关闭或
-同一端口进行写入时才被交付。同一对端口上的 .NET `SerialPort` 双向都正常，说明端口对本身连接无误。
-在此问题解决之前（例如通过 com0com 参数或改用其他虚拟串口驱动），该机器上的串口测试组会被跳过。
+串口测试组在 Windows 11 上通过一对 com0com 3.0.0.0 端口（默认参数）运行。
+
+在 Windows 上，Node.js v26.4.0 及以后的版本中串口测试失败。自 v26.4.0 起，原生模块在异步工作中调用
+JavaScript 之后，Node.js 不再代为执行 microtask 队列和 `process.nextTick` 处理函数，模块须自行用
+`CallbackScope` 或 `MakeCallback` 完成（[nodejs/node#66158](https://github.com/nodejs/node/issues/66158)，
+以“不予修复”关闭；[nodejs/node-addon-api#1756](https://github.com/nodejs/node-addon-api/issues/1756)）。
+`@serialport/bindings-cpp` 13 在 Windows 上用普通调用完成读写，于是交付结果的 Promise 要等下一个宏任务
+（例如定时器、关闭端口或再一次写入）执行时才会兑现
+（[serialport/node-serialport#3148](https://github.com/serialport/node-serialport/issues/3148)）。
+原因不在串口驱动：用原生 Win32 调用，同一对 com0com 端口上挂起的读操作在数据到达时会立即完成。
 
 ## 已知缺陷
 

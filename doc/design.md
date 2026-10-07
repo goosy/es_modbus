@@ -388,10 +388,15 @@ Each item is a defect or missing piece, not intended behavior.
 
 ### Server
 
-- [ ] **Serial path not verified end to end.** `test/serial.test.js` exercises the RTU server and
-  client over a serial port pair, but on the development machine the com0com pair fails the
-  suite's pre-check and the serial tests are skipped (see `spec-test.md`, "Serial test
-  environment"). The serial paths of the client and the server are instead exercised over a
-  simulated serial line, `test/serial-bridge.js` (usage at the top of the file), with an
-  RTU-over-TCP peer or a raw socket on its other end; what stays unverified is `serialport` with
-  a real driver and hardware.
+- [ ] **Serial path not verified on hardware.** `test/serial.test.js` exercises the RTU server and
+  client end to end over a com0com virtual port pair (they fail on Windows with Node.js v26.4.0
+  and later; see the next item). The serial paths are also exercised over a simulated serial
+  line, `test/serial-bridge.js` (usage at the top of the file), with an RTU-over-TCP peer or a
+  raw socket on its other end. What stays unverified is `serialport` with a hardware serial port
+  and its driver.
+- [ ] **Serial I/O stalls on Windows with Node.js v26.4.0 and later.** `@serialport/bindings-cpp`
+  13 does not run the microtask queue after completing a read or write, which Node.js requires
+  of native modules since v26.4.0. Received data and write completions are delivered only when
+  another macrotask runs, so the client and the server stall on a serial port until then (see
+  `spec-test.md`, "Serial test environment"). It needs a fixed `@serialport/bindings-cpp`, or a
+  workaround in this library.

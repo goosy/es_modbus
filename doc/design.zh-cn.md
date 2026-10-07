@@ -330,8 +330,11 @@
 
 ### 服务端
 
-- [ ] **串口路径未经端到端验证。** `test/serial.test.js` 通过一对串口测试 RTU 服务端和客户端，
-  但在开发机上 com0com 端口对未通过套件的预检，串口测试被跳过（见 `spec-test.zh-cn.md`
-  “串口测试环境”）。客户端和服务端的串口路径改由模拟串行线路 `test/serial-bridge.js`（用法见该文件
-  开头）来测试，线路另一端接 RTU-over-TCP 对端或原始套接字；尚未验证的是 `serialport` 配合真实驱动和
-  硬件的情况。
+- [ ] **串口路径未在硬件上验证。** `test/serial.test.js` 通过一对 com0com 虚拟串口，端到端测试 RTU
+  服务端和客户端（在 Windows 上，Node.js v26.4.0 及以后的版本中这些测试会失败；见下一条）。串口路径
+  也通过模拟串行线路 `test/serial-bridge.js`（用法见该文件开头）来测试，线路另一端接 RTU-over-TCP 对端
+  或原始套接字。尚未验证的是 `serialport` 配合硬件串口及其驱动的情况。
+- [ ] **在 Windows 上，Node.js v26.4.0 及以后的版本中串口读写会停滞。** `@serialport/bindings-cpp` 13
+  完成读写后不执行 microtask 队列，而自 v26.4.0 起 Node.js 要求原生模块自行执行。收到的数据和写入完成
+  要等下一个宏任务执行时才被交付，在此之前串口上的客户端和服务端都会停滞（见 `spec-test.zh-cn.md`
+  “串口测试环境”）。需要修复后的 `@serialport/bindings-cpp`，或在本库中加入规避措施。

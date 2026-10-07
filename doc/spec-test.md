@@ -57,19 +57,24 @@ missing or older than any file in `src/`.
   `Modbus_Client`) the second.
 - The pair is set with the environment variable `MODBUS_SERIAL_PORTS="<server>,<peer>"`; the
   default is `COM11,COM12`. `MODBUS_SERIAL_PORTS=none` skips the serial tests.
-- Before the serial tests run, a pre-check opens both ports and checks that a byte written on
-  one port reaches a read already pending on the other. If either step fails, the serial suites
-  are skipped with the reason, and the rest of the suite still runs.
+- Before the serial tests run, a pre-check opens both ports. If either port cannot be opened, the
+  serial suites are skipped with the reason, and the rest of the suite still runs.
 
 ### Serial test environment
 
-On the development machine (Windows 11, com0com 3.0.0.0 with default parameters,
-`serialport` 10 to 13), the pre-check fails: a read that the Node.js `serialport` binding has
-already started on a com0com port does not complete when data arrives; the data is delivered
-only when the port is closed or the same port writes. A .NET `SerialPort` on the same pair
-works in both directions, so the pair itself is linked correctly. Until this is solved (for
-example by com0com parameters or another virtual serial driver), the serial suites are skipped
-there.
+The serial suites run on Windows 11 over a com0com 3.0.0.0 pair with default parameters.
+
+On Windows with Node.js v26.4.0 and later, the serial tests fail. Since v26.4.0, Node.js no
+longer runs the microtask queue and `process.nextTick` handlers after a native module calls into
+JavaScript from async work; the module has to do it itself with `CallbackScope` or
+`MakeCallback` ([nodejs/node#66158](https://github.com/nodejs/node/issues/66158), closed as not
+planned; [nodejs/node-addon-api#1756](https://github.com/nodejs/node-addon-api/issues/1756)).
+On Windows, `@serialport/bindings-cpp` 13 completes reads and writes with a plain call, so the
+promise that delivers the result settles only when another macrotask runs, such as a timer,
+closing the port, or another write
+([serialport/node-serialport#3148](https://github.com/serialport/node-serialport/issues/3148)).
+The serial driver is not the cause: through native Win32 calls, the same com0com pair completes
+a pending read as soon as data arrives.
 
 ## Known gaps
 
