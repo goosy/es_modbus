@@ -317,24 +317,11 @@
 
 ---
 
-## RTU / 串口：未完成的工作
+## 已知问题：在 Windows 上，Node.js v26.4.0 及以后的版本中串口读写会停滞
 
-**状态：未完成。** 目前只有 Modbus TCP 是完整的。`rtu`（串口）和 `rtu_over_tcp` 属于范围之内
-（见 `spec.zh-cn.md`），但必须视为不受支持。部分代码已存在：`src/util.js` 中的编解码
-（`parse_rtu_request`、`parse_rtu_response`、`modbus_crc16`）、`make_data_packet` 的客户端 RTU
-分支、`Modbus_Client.set_serial` 和 `Modbus_Server.set_rtu`。它们尚未完成，也没有端到端地跑通过。
-本节即待办清单；只有当某项在代码中真正修复后才能删除它。`spec-*` 文件描述的是目标约定，因此其中与 RTU / 串口
-相关的行目前并不由代码保证，且清单清空时它们也不需要改动。
+自 Node.js v26.4.0 起，原生模块在异步工作中调用 JavaScript 之后，须自行执行 microtask 队列。在
+Windows 上，`@serialport/bindings-cpp` 13 完成读写后没有这样做。因此收到的数据和写入完成要等下一个宏任务
+执行时才被交付，在此之前串口上的客户端和服务端都会停滞。详情和上游 issue 见 `spec-test.zh-cn.md` 的
+“串口测试环境”。
 
-每一项都是缺陷或缺失的部分，而不是预期行为。
-
-### 服务端
-
-- [ ] **串口路径未在硬件上验证。** `test/serial.test.js` 通过一对 com0com 虚拟串口，端到端测试 RTU
-  服务端和客户端（在 Windows 上，Node.js v26.4.0 及以后的版本中这些测试会失败；见下一条）。串口路径
-  也通过模拟串行线路 `test/serial-bridge.js`（用法见该文件开头）来测试，线路另一端接 RTU-over-TCP 对端
-  或原始套接字。尚未验证的是 `serialport` 配合硬件串口及其驱动的情况。
-- [ ] **在 Windows 上，Node.js v26.4.0 及以后的版本中串口读写会停滞。** `@serialport/bindings-cpp` 13
-  完成读写后不执行 microtask 队列，而自 v26.4.0 起 Node.js 要求原生模块自行执行。收到的数据和写入完成
-  要等下一个宏任务执行时才被交付，在此之前串口上的客户端和服务端都会停滞（见 `spec-test.zh-cn.md`
-  “串口测试环境”）。需要修复后的 `@serialport/bindings-cpp`，或在本库中加入规避措施。
+如果 `serialport` 升级后仍未修复这个问题，再考虑在本库中加入规避措施。

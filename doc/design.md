@@ -374,29 +374,12 @@ the move into `CONNECTING`; a caller that arrives while `CONNECTING` is added to
 
 ---
 
-## RTU / serial: unfinished work
+## Known issue: serial I/O stalls on Windows with Node.js v26.4.0 and later
 
-**Status: NOT FINISHED.** Only Modbus TCP is complete. `rtu` (serial) and `rtu_over_tcp` are in
-scope (see `spec.md`) but must be treated as unsupported. Parts exist: the codec in `src/util.js`
-(`parse_rtu_request`, `parse_rtu_response`, `modbus_crc16`), the client RTU branch of
-`make_data_packet`, `Modbus_Client.set_serial`, and `Modbus_Server.set_rtu`. They have not been
-completed or exercised end to end. This section is the backlog; remove an item only when it is
-fixed in code. The `spec-*` files describe the target contract, so their RTU / serial rows are
-not yet guaranteed by the code, and they do not change when this list is cleared.
+Since Node.js v26.4.0, a native module that calls into JavaScript from async work has to run the
+microtask queue itself. On Windows, `@serialport/bindings-cpp` 13 does not do this after it
+completes a read or write. Received data and write completions are therefore delivered only when
+another macrotask runs, and the client and the server stall on a serial port until then. Details
+and upstream issues are in `spec-test.md`, "Serial test environment".
 
-Each item is a defect or missing piece, not intended behavior.
-
-### Server
-
-- [ ] **Serial path not verified on hardware.** `test/serial.test.js` exercises the RTU server and
-  client end to end over a com0com virtual port pair (they fail on Windows with Node.js v26.4.0
-  and later; see the next item). The serial paths are also exercised over a simulated serial
-  line, `test/serial-bridge.js` (usage at the top of the file), with an RTU-over-TCP peer or a
-  raw socket on its other end. What stays unverified is `serialport` with a hardware serial port
-  and its driver.
-- [ ] **Serial I/O stalls on Windows with Node.js v26.4.0 and later.** `@serialport/bindings-cpp`
-  13 does not run the microtask queue after completing a read or write, which Node.js requires
-  of native modules since v26.4.0. Received data and write completions are delivered only when
-  another macrotask runs, so the client and the server stall on a serial port until then (see
-  `spec-test.md`, "Serial test environment"). It needs a fixed `@serialport/bindings-cpp`, or a
-  workaround in this library.
+If an upgraded `serialport` does not fix this, consider a workaround in this library.
