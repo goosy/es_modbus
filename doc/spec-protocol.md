@@ -240,8 +240,8 @@ match is rejected.
 ## Exception responses
 
 An exception response is `[unit_id][function_code | 0x80][exception_code]` (RTU adds CRC, TCP
-adds MBAP). The client surfaces it by rejecting the pending transaction with
-`` `response error: ${exception_code}` ``. Exception codes the server emits:
+adds MBAP). The client surfaces it by rejecting the pending transaction with an `Error` whose
+message is `` `response error: ${exception_code}` ``. Exception codes the server emits:
 
 | Code   | Meaning                                   | When the server sends it                    |
 | ------ | ----------------------------------------- | ------------------------------------------ |

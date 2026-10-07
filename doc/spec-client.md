@@ -29,7 +29,10 @@ const client = new Modbus_Client(null, { port: 'COM3', baud_rate: 19200, parity:
 | `timeout`        | `1000`  | Per-transaction response timeout, ms, counted from when the request's frame is written. On expiry the request rejects and `timeout` is emitted. |
 | `delay`          | `20`    | Minimum gap before the next frame write, ms (send pacing; see "Ordering / pacing"). |
 | `turnaround`     | `100`   | RTU and RTU-over-TCP: minimum wait after a broadcast before the next frame write, ms (the serial line "turnaround delay"). Ignored on TCP. |
-| `reconnect_time` | `10000` | Reconnect delay for TCP and RTU-over-TCP, ms. `> 0` also makes the constructor connect immediately (for serial, open the port); `0` disables the timed reconnect. Both apply only while `enable_reconnect` is true. |
+| `reconnect_time` | `10000` | Initial reconnect delay for TCP and RTU-over-TCP, ms; the delay grows from there (see "Reconnect"). `> 0` also makes the constructor connect immediately (for serial, open the port); `0` disables the timed reconnect. Both apply only while `enable_reconnect` is true. |
+| `reconnect_max`  | `60000` | TCP and RTU-over-TCP: upper bound of the growing reconnect delay, ms. A finite positive number (else `Invalid reconnect_max`); a value below `reconnect_time` acts as `reconnect_time`. |
+| `max_timeouts`   | `3`     | TCP and RTU-over-TCP: consecutive timeouts after which the connection is taken as dead and closed (see "Dead-link detection"). A non-negative integer (else `Invalid max_timeouts`); `0` disables the detection. Ignored on serial. |
+| `keep_alive`     | `10000` | TCP and RTU-over-TCP: idle time in ms before the socket sends its first TCP keep-alive probe; `0` disables keep-alive. A non-negative finite number (else `Invalid keep_alive`). Ignored on serial. |
 | `silence`        | `50`    | Silence in ms after which the bytes left of an incomplete frame are resolved (see "Frame delimiting" in `spec-protocol.md`). A finite positive number (else `Invalid silence`). On a serial port at least 3.5 character times (1.75 ms above 19200 baud). |
 | `modicon_zero_based` | `false` | `true` selects 0-based Modicon point numbering (see below). |
 | `baud_rate`      | `9600`  | Serial baud rate, a positive integer (else `Invalid baud rate`). |
@@ -92,8 +95,9 @@ Function code and length come from the range:
 Resolves with the **raw payload bytes** of the response (register words big-endian, or packed
 coil bytes) — the caller decodes them. Rejects with:
 
-- a message that identifies the transaction by its transaction ID, on timeout;
-- `` `response error: <exception_code>` `` on a Modbus exception;
+- an `Error` whose message identifies the transaction by its transaction ID
+  (`` `transaction 0x<id> timeout` ``), on timeout;
+- an `Error` with the message `` `response error: <exception_code>` `` on a Modbus exception;
 - an `Error` with the message `connection lost`, if the connection is lost while the request is
   pending, or if the request is issued during a reconnect back-off or while `enable_reconnect` is
   false (see "Connection loss");
@@ -196,14 +200,48 @@ it is already closed. It never rejects. Concurrent calls settle together, on the
 - **Timeouts are per transaction**, not per connection, and start when the request's frame is
   written, so time spent in the queue does not count. A late response arriving after timeout is
   discarded.
-- **Connection loss.** When the connection is lost, every pending request, whether already sent
+- **Connection loss.** When the connection is lost, including a connection the client closes as
+  dead (see "Dead-link detection"), every pending request, whether already sent
   or still queued, is rejected immediately with an `Error` (message `connection lost`) and the
   queued frames are discarded, so no request is executed after it was reported as failed. A
   request issued while a reconnect back-off is pending, or while `enable_reconnect` is false, is
   rejected at once instead of being queued.
 - **Reconnect (TCP and RTU-over-TCP).** On `close` or `error`, if `reconnect_time > 0` and
-  `enable_reconnect` is true, the client retries after that delay; `connect()` called during the
+  `enable_reconnect` is true, the client retries after a delay; `connect()` called during the
   back-off rejects with `ERR_ILLEGAL_STATE`. After `disconnect()` no retry happens.
+  - **Exponential back-off.** The first back-off waits `reconnect_time`, and each further one
+    twice the previous, up to `reconnect_max`. A failed connect attempt is a loss too, so a peer
+    that refuses connections is retried less and less often.
+  - **Reset.** The delay returns to `reconnect_time` once the connection has proved itself, not
+    when it opens: a peer that accepts the connection and drops it at once would otherwise be
+    retried at the shortest delay forever. `disconnect()` also returns the delay to
+    `reconnect_time`. Either of these proves the connection:
+    - a valid frame is received (below);
+    - the connection stays open as long as the last back-off delay. This covers a client that
+      sends no request for a long time, and so receives no frame, on a connection that is fine.
+  - **Events are not smoothed.** `connect` and `disconnect` report every open and close as it
+    happens; the back-off, not hidden events, is what keeps a flapping link quiet.
+- **Valid frame.** A received frame that parses as a Modbus response (correct header or CRC, a
+  supported function code), from any unit, whether or not it matches a pending request; an
+  exception response counts. It proves that the peer is alive. It resets the reconnect delay and
+  the timeout count.
+- **Dead-link detection (TCP and RTU-over-TCP).** A peer that vanishes without closing (cable
+  pulled, gateway powered off) leaves a half-open connection: no event fires, and a polling client
+  is never idle, so TCP keep-alive never probes it either; only the operating system's
+  retransmission timeout ends it, which can take many minutes. The client therefore counts the
+  timeouts on a connection: when `max_timeouts` requests in a row time out with no valid frame
+  received in between, it closes the connection as dead. That is a connection loss like any
+  other: pending requests reject with `connection lost`, `disconnect` is emitted, and the client
+  reconnects as above. No other event is emitted for it: the `timeout` events come first.
+  - The count returns to `0` on every valid frame from **any** unit, and on every new connection.
+    Behind an RTU-over-TCP or TCP gateway, one slave that is offline therefore does not close the
+    connection while other units answer; a client that only polls that one slave does see its
+    connection closed and reopened every `max_timeouts` timeouts.
+  - On a serial port timeouts are not counted: a timeout there means a slave did not answer, not
+    that the line is gone, and a serial port is never re-opened automatically.
+- **Keep-alive (TCP and RTU-over-TCP).** The socket enables TCP keep-alive, probing after
+  `keep_alive` ms of idleness. It covers a client that polls rarely, whose socket is idle long
+  enough for the probes to run; the timeout count covers a client that polls often.
 - **Serial port.** The port is created and opened at construction when `reconnect_time > 0`,
   otherwise on demand by the first request or `connect()`; concurrent callers share one open.
   Creating the port loads `serialport` and its native binding, so a platform where the binding

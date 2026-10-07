@@ -99,7 +99,7 @@ describe('TCP client <-> server', () => {
 	});
 
 	test('a unit ID the server does not accept rejects with exception 0x0B', async () => {
-		await assert.rejects(client.read('40001', 3), (reason) => String(reason) === 'response error: 11');
+		await assert.rejects(client.read('40001', 3), { name: 'Error', message: 'response error: 11' });
 	});
 
 	test('many concurrent requests resolve with the right data', async () => {

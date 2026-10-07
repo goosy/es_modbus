@@ -116,7 +116,7 @@ describe('build output dist/modbus.js', { skip }, () => {
 		});
 
 		test('rejects a unit ID the server does not accept', async () => {
-			await assert.rejects(client.read('40001', 12), (reason) => String(reason) === 'response error: 11');
+			await assert.rejects(client.read('40001', 12), { name: 'Error', message: 'response error: 11' });
 		});
 	});
 });

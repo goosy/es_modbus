@@ -30,7 +30,10 @@ const client = new Modbus_Client(null, { port: 'COM3', baud_rate: 19200, parity:
 | `timeout`        | `1000`  | 单事务响应超时，毫秒，从该请求的帧写出时算起。到期时请求被拒绝，并发出 `timeout` 事件。 |
 | `delay`          | `20`    | 写出下一帧之前的最小间隔，毫秒（发送节流；见“顺序/节流”）。             |
 | `turnaround`     | `100`   | RTU 和 RTU-over-TCP：广播之后到写出下一帧的最小等待，毫秒（串行线路的“转向延迟”）。TCP 上忽略。 |
-| `reconnect_time` | `10000` | TCP 和 RTU-over-TCP 的重连延迟，毫秒。`> 0` 同时使构造函数立即连接（串口则打开端口）；`0` 禁用定时重连。二者都只在 `enable_reconnect` 为真时生效。 |
+| `reconnect_time` | `10000` | TCP 和 RTU-over-TCP 的初始重连延迟，毫秒；延迟从这里开始递增（见“重连”）。`> 0` 同时使构造函数立即连接（串口则打开端口）；`0` 禁用定时重连。二者都只在 `enable_reconnect` 为真时生效。 |
+| `reconnect_max`  | `60000` | TCP 和 RTU-over-TCP：递增的重连延迟的上限，毫秒。必须是有限的正数（否则抛出 `Invalid reconnect_max`）；小于 `reconnect_time` 时按 `reconnect_time` 处理。 |
+| `max_timeouts`   | `3`     | TCP 和 RTU-over-TCP：连续超时达到该次数后，连接被视为已死并关闭（见“死链检测”）。必须是非负整数（否则抛出 `Invalid max_timeouts`）；`0` 关闭检测。串口忽略此项。 |
+| `keep_alive`     | `10000` | TCP 和 RTU-over-TCP：套接字空闲多少毫秒后发出第一个 TCP keep-alive 探测；`0` 关闭 keep-alive。必须是有限的非负数（否则抛出 `Invalid keep_alive`）。串口忽略此项。 |
 | `silence`        | `50`    | 静默时间（ms），超过之后处理不完整帧留下的残留字节（见 `spec-protocol.zh-cn.md` 的“帧的界定”）。必须是有限的正数（否则抛出 `Invalid silence`）。串口上至少为 3.5 个字符时间（19200 波特以上为 1.75 ms）。 |
 | `modicon_zero_based` | `false` | `true` 选择 0 起始的 Modicon 点号编号（见下文）。 |
 | `baud_rate`      | `9600`  | 串口波特率，正整数（否则抛出 `Invalid baud rate`）。 |
@@ -85,8 +88,8 @@ Modicon 地址的编号起点同样在构造时选择：默认 1 起始，以 `m
 以响应的**原始载荷字节**（寄存器字为大端，或打包的线圈字节）兑现 — 由调用者自行解码。以下情况会
 拒绝：
 
-- 超时：消息中以事务 ID 标识该事务；
-- Modbus 异常：`` `response error: <exception_code>` ``；
+- 超时：一个 `Error`，消息中以事务 ID 标识该事务（`` `transaction 0x<id> timeout` ``）；
+- Modbus 异常：消息为 `` `response error: <exception_code>` `` 的 `Error`；
 - 请求待决期间连接丢失，或请求在重连退避期间、`enable_reconnect` 为假时发出：消息为
   `connection lost` 的 `Error`（见“连接丢失”）；
 - 请求在帧写出之前被挤出已满的发送队列：消息为 `queue overflow` 的 `Error`（见“顺序/节流”）。
@@ -170,12 +173,38 @@ FC 15/16 的数量）。回显与请求一致时为 `true`，不一致时为 `fa
   `queue overflow` 的 `Error` 拒绝，它们的帧不会写出。
 - **超时按事务计**，而非按连接计，从请求的帧写出时算起，在队列中等待的时间不计入。超时之后到达
   的迟到响应会被丢弃。
-- **连接丢失。** 连接丢失时，每个待决请求（无论已发出还是仍在队列中）都被立即以 `Error`（消息为
+- **连接丢失。** 连接丢失时（包括客户端视为已死而关闭的连接，见“死链检测”），每个待决请求
+  （无论已发出还是仍在队列中）都被立即以 `Error`（消息为
   `connection lost`）拒绝，排队的帧被丢弃，因此不会有请求在被报告失败之后又被执行。在重连退避
   期间或 `enable_reconnect` 为假时发出的请求会被立即拒绝，而不是入队。
 - **重连（TCP 和 RTU-over-TCP）。** 发生 `close` 或 `error` 时，若 `reconnect_time > 0` 且
-  `enable_reconnect` 为真，客户端在该延迟后重试；退避期间调用 `connect()` 会以
+  `enable_reconnect` 为真，客户端在一段延迟后重试；退避期间调用 `connect()` 会以
   `ERR_ILLEGAL_STATE` 拒绝。`disconnect()` 之后不会重试。
+  - **指数退避。** 第一次退避等待 `reconnect_time`，之后每次是上一次的两倍，最多到
+    `reconnect_max`。连接尝试失败也算一次丢失，因此对拒绝连接的对端，重试会越来越稀疏。
+  - **重置。** 连接证明了自己之后，延迟才回到 `reconnect_time`，而不是在连接打开时：否则一个
+    接受连接后立即断开的对端，会永远以最短延迟被重试。`disconnect()` 也会让延迟回到
+    `reconnect_time`。以下任意一条即可证明连接：
+    - 收到有效帧（见下文）；
+    - 连接持续打开的时间达到上一次的退避延迟。这覆盖了连接正常、但长时间不发请求因而收不到帧的
+      客户端。
+  - **事件不做平滑。** `connect` 和 `disconnect` 如实报告每一次打开和关闭；让抖动的链路安静下来
+    靠的是退避，而不是把事件藏起来。
+- **有效帧。** 收到的、能解析为 Modbus 响应的帧（头部或 CRC 正确、功能码受支持），来自**任意**
+  单元，无论是否与某个待决请求匹配；异常响应也算。它证明对端还活着。它会重置重连延迟和超时计数。
+- **死链检测（TCP 和 RTU-over-TCP）。** 对端没有关闭就消失（拔掉网线、网关断电）会留下半开连接：
+  不会触发任何事件，而持续轮询的客户端从不空闲，TCP keep-alive 也就从不探测它；只有操作系统的
+  重传超时能结束它，这可能要好几分钟。因此客户端对一个连接上的超时计数：连续 `max_timeouts` 个
+  请求超时、其间没有收到有效帧时，客户端把该连接视为已死并关闭。这与其他连接丢失一样：待决请求
+  以 `connection lost` 拒绝，发出 `disconnect`，客户端按上文重连。此外不发出其他事件：在它之前
+  已有那些 `timeout` 事件。
+  - 收到来自**任意**单元的有效帧时，以及每次建立新连接时，计数归零。因此在 RTU-over-TCP 或 TCP
+    网关之后，某一个从站离线时，只要其他单元还在应答，连接就不会被关闭；只轮询这一个从站的客户端
+    则会看到连接每隔 `max_timeouts` 次超时被关闭并重新打开。
+  - 串口上不计超时：那里的超时说明某个从站没有应答，而不是线路已断，而且串口从不自动重新打开。
+- **keep-alive（TCP 和 RTU-over-TCP）。** 套接字开启 TCP keep-alive，空闲 `keep_alive` 毫秒后开始
+  探测。它覆盖低频轮询的客户端：其套接字空闲得足够久，探测才有机会进行；超时计数覆盖高频轮询的
+  客户端。
 - **串口。** `reconnect_time > 0` 时串口在构造时创建并打开，否则由第一个请求或 `connect()` 按需
   创建并打开；并发的调用者共用同一次打开。创建串口时才加载 `serialport` 及其原生绑定，因此在原生
   绑定无法加载的平台上，失败发生在这里，而不是在导入时。创建或打开失败时发出 `error`、拒绝

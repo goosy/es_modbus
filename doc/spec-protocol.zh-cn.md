@@ -210,7 +210,7 @@ Modbus 协议限制一个请求可以携带的点数：
 ## 异常响应
 
 异常响应为 `[unit_id][function_code | 0x80][exception_code]`（RTU 追加 CRC，TCP 追加
-MBAP）。客户端通过以 `` `response error: ${exception_code}` `` 拒绝待决事务来呈现该异常。
+MBAP）。客户端通过以消息为 `` `response error: ${exception_code}` `` 的 `Error` 拒绝待决事务来呈现该异常。
 服务端会发出的异常码：
 
 | 代码   | 含义                                      | 服务端何时发送                              |

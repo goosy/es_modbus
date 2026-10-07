@@ -20,6 +20,20 @@ const STATE = Object.freeze({
 	BACKING_OFF: 5,
 });
 
+/**
+ * Checks a numeric option: the default when nullish, else a number passing `valid`. Throws
+ * `Invalid <name>` on anything else, so the constructor fails at once.
+ */
+function number_option(name, value, fallback, valid) {
+	if (value == null) return fallback;
+	if (typeof value !== 'number' || !valid(value)) throw new Error(`Invalid ${name}: ${value}`);
+	return value;
+}
+
+const is_positive = (value) => Number.isFinite(value) && value > 0;
+const is_non_negative = (value) => Number.isFinite(value) && value >= 0;
+const is_count = (value) => Number.isInteger(value) && value >= 0;
+
 function check_unit_id(unit_id) {
 	if (!Number.isInteger(unit_id) || unit_id < 0 || unit_id > 255) {
 		throw new Error(`Invalid unit ID: ${unit_id}`);
@@ -178,6 +192,13 @@ export class Modbus_Client extends EventEmitter {
 
 	// Non-null exactly while backing off
 	#reconnect_timer = null;
+	// The delay of the next back-off, and of the last one (0 once the connection proved itself)
+	#next_delay = 0;
+	#last_delay = 0;
+	// Proves a connection that stays open as long as the last back-off delay
+	#stable_timer = null;
+	// Consecutive timeouts on the connection, for the dead-link detection
+	#timeouts = 0;
 	// Callbacks of the connect attempt in progress: { on_connect, on_error }
 	#connect_waiters = [];
 	// connect() calls waiting for a disconnect to complete: { resolve, reject }
@@ -186,6 +207,9 @@ export class Modbus_Client extends EventEmitter {
 	#disconnect_waiters = [];
 
 	timeout; // response timeout, from the frame write
+	reconnect_max; // TCP family: upper bound of the reconnect delay
+	max_timeouts; // TCP family: consecutive timeouts that close the connection, 0 = never
+	keep_alive; // TCP family: idle time before the first keep-alive probe, 0 = off
 	delay; // minimum gap before the next frame write
 	turnaround; // RTU family: minimum wait after a broadcast
 
@@ -237,6 +261,10 @@ export class Modbus_Client extends EventEmitter {
 			baud_rate, parity, data_bits, stop_bits,
 		} = options;
 		this.reconnect_time = reconnect_time;
+		this.reconnect_max = number_option('reconnect_max', options.reconnect_max, 60000, is_positive);
+		this.max_timeouts = number_option('max_timeouts', options.max_timeouts, 3, is_count);
+		this.keep_alive = number_option('keep_alive', options.keep_alive, 10000, is_non_negative);
+		this.#next_delay = reconnect_time;
 		this.#modicon_zero_based = options.modicon_zero_based ?? false;
 		// Bytes received and not yet delimited; emptied when the connection opens or closes
 		this.unprocessed_buffer = Buffer.alloc(0);
@@ -372,7 +400,8 @@ export class Modbus_Client extends EventEmitter {
 				if (this.protocol !== 'tcp') this.#keep(Buffer.alloc(0));
 				end_transaction('rejected');
 				this.emit('timeout');
-				reject(`transaction 0x${packet.tid.toString(16)} timeout`);
+				reject(new Error(`transaction 0x${packet.tid.toString(16)} timeout`));
+				this.#count_timeout();
 			};
 			packet.resolve = (value) => {
 				end_transaction('fulfilled');
@@ -507,13 +536,15 @@ export class Modbus_Client extends EventEmitter {
 			this.emit('receive', response.buffer);
 
 			if (response.func_code === 0) continue; // Invalid data
+			// Any valid frame, from any unit, proves the peer alive
+			this.#link_proved();
 
 			const packet = tcp ? this.get_packet(response.tid) : this.#current;
 			if (!packet || packet.status !== 'pending') continue;
 			if (!tcp && !response_fits(packet, response)) continue;
 
 			if (response.exception_code) {
-				packet.reject(`response error: ${response.exception_code}`);
+				packet.reject(new Error(`response error: ${response.exception_code}`));
 				continue;
 			}
 
@@ -590,6 +621,7 @@ export class Modbus_Client extends EventEmitter {
      * the next `connect()`. Resolves once the transport has closed, never rejects.
      */
 	disconnect() {
+		this.#reset_delay();
 		for (const { reject } of this.#waiting_connects.splice(0)) {
 			reject(new Error('connection lost'));
 		}
@@ -622,12 +654,43 @@ export class Modbus_Client extends EventEmitter {
 		this._open();
 	}
 
+	// Waits the next delay, then reconnects; each back-off doubles the delay up to the bound
 	#back_off() {
+		const delay = this.#next_delay;
+		this.#last_delay = delay;
+		this.#next_delay = Math.min(delay * 2, Math.max(this.reconnect_max, this.reconnect_time));
 		this.#state = STATE.BACKING_OFF;
 		this.#reconnect_timer = setTimeout(() => {
 			this.#reconnect_timer = null;
 			this.#start_connect();
-		}, this.reconnect_time);
+		}, delay);
+	}
+
+	// The back-off starts again from `reconnect_time`
+	#reset_delay() {
+		clearTimeout(this.#stable_timer);
+		this.#stable_timer = null;
+		this.#next_delay = this.reconnect_time;
+		this.#last_delay = 0;
+	}
+
+	// A valid frame was received: the connection works
+	#link_proved() {
+		this.#timeouts = 0;
+		this.#reset_delay();
+	}
+
+	/**
+	 * Counts a timeout; `max_timeouts` in a row close a TCP-family connection as dead. Not on a
+	 * serial port, where a timeout means a slave did not answer.
+	 */
+	#count_timeout() {
+		if (this.protocol === 'rtu' || this.max_timeouts === 0 || !this.is_connected) return;
+		this.#timeouts++;
+		if (this.#timeouts < this.max_timeouts) return;
+		// An ordinary loss: the transport's close rejects the pending requests and reconnects
+		this.#timeouts = 0;
+		this._close();
 	}
 
 	// Called by the transport once it is open
@@ -635,6 +698,11 @@ export class Modbus_Client extends EventEmitter {
 		// A serial open that settles after disconnect() is closed by `_close`
 		if (!this.is_connecting) return;
 		this.#keep(Buffer.alloc(0));
+		this.#timeouts = 0;
+		// Open as long as the last back-off delay, the connection has proved itself
+		if (this.#last_delay > 0) {
+			this.#stable_timer = setTimeout(() => this.#reset_delay(), this.#last_delay);
+		}
 		this.#state = STATE.CONNECTED;
 		this.emit('connect');
 		for (const { on_connect } of this.#connect_waiters.splice(0)) on_connect();
@@ -651,6 +719,8 @@ export class Modbus_Client extends EventEmitter {
 	#transport_lost(error, emit_disconnect) {
 		this.abort_pending();
 		this.#keep(Buffer.alloc(0));
+		clearTimeout(this.#stable_timer);
+		this.#stable_timer = null;
 		const was_disconnecting = this.is_disconnecting;
 		// Taken before any event, so a listener that connects again keeps its own callbacks
 		const connect_waiters = this.#connect_waiters.splice(0);
@@ -761,7 +831,7 @@ export class Modbus_Client extends EventEmitter {
      * @return {void}
      */
 	set_tcp(ip_address, port) {
-		if (this.stream instanceof Socket) this.destroy();
+		if (this.stream instanceof Socket) this.stream.destroy();
 		const stream = new Socket();
 		this.stream = stream;
 
@@ -778,6 +848,7 @@ export class Modbus_Client extends EventEmitter {
 		});
 
 		stream.on('connect', () => {
+			if (this.keep_alive > 0) stream.setKeepAlive(true, this.keep_alive);
 			this.#transport_opened();
 		});
 

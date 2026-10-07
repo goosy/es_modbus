@@ -112,17 +112,3 @@ Commands:
 - Ranges cross the public API in one of two forms chosen by JavaScript type, as defined in
   `spec-protocol.md`: a `string` is Modicon notation (5- or 6-digit), an array or object is a
   structured PDU range.
-
-## Open questions
-
-Decisions the spec does not make yet. Settle them in the spec first, then implement.
-
-- **Connection flapping (debounce).** The client sets `is_connected` from the socket's
-  `connect` / `close` / `error` events and nothing else: no keep-alive, no heartbeat, no
-  smoothing. A closed TCP socket cannot recover, and responses to requests sent on it can never
-  arrive, so delaying the "connection lost" rejection would only delay the failure. What
-  flapping does cost is a reconnect storm if `reconnect_time` is small, and event noise
-  (`connect` / `disconnect`) for the caller. The opposite problem is a half-open connection
-  (cable pulled, peer gone without a FIN), where no event fires and the client only ever sees
-  timeouts. Decide whether to add (a) a minimum or growing reconnect delay, and (b) dead-link
-  detection, such as closing the socket after N consecutive timeouts or enabling TCP keep-alive.

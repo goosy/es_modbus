@@ -110,16 +110,18 @@
   由 `#write` 在帧写出时启动，因此排队时间不计入超时。`end_transaction` 递减计数，标记 `status`，
   清除定时器，把 `resolve`/`reject` 换成 `DO_NOTHING` 使迟到/重复的响应无效，并调用
   `#transaction_ended`。RTU 超时还会清空 `unprocessed_buffer`，以免迟到应答的字节混到下一个响应
-  前面。
+  前面。`on_timeout` 以 `Error('transaction 0x<tid> timeout')` 拒绝，然后调用 `#count_timeout()`
+  （见“死链”）。
 - **界定（`on_data`）。** 数据块追加到 `unprocessed_buffer`，再用 `split_frames` 切分：`tcp` 用
   `mbap_frame_length`，否则用 `rtu_response_length`。`#keep` 把 `rest` 存入 `unprocessed_buffer`，
   不为空时重设 `#silence_timer`（`#silence`，见下文“静默”）。`#on_silence` 对残留字节调用 `resync_frames`，仍然剩下的字节在 TCP 上保留
   （不再重设定时器），在串口上丢弃。`#transport_opened` 和 `#transport_lost` 会清空缓冲区。响应
   的帧长不会是 `UNKNOWN`，所以客户端没有帧长未知的情况。
-- **匹配（`on_data`）。** 对每一帧：解析 → 发出 `receive` → 跳过 `func_code === 0` → 按 `tid`
+- **匹配（`on_data`）。** 对每一帧：解析 → 发出 `receive` → 跳过 `func_code === 0` →
+  `#link_proved()`（有效帧，来自任意单元：见“死链”）→ 按 `tid`
   查找（TCP）或取 `#current`（RTU 系列）→ 除非 `status === 'pending'` 否则忽略 → RTU 系列上，
   除非 `response_fits()`（单元 ID 相同、去掉异常位后功能码相同，读还要求字节数与所请求的相符）
-  否则忽略 → 有 `exception_code` 则 `reject`，否则兑现：读以 `response.data` 兑现，写以
+  否则忽略 → 有 `exception_code` 则以 `Error('response error: <code>')` `reject`，否则兑现：读以 `response.data` 兑现，写以
   `echo_matches()` 的结果兑现。TCP 不检查 `response_fits()`：事务 ID 已经匹配，而且有些网关会以
   别的单元 ID 应答。
 - **写回显。** `transact()` 保存 `packet.echo`，即写响应在地址之后必须回显的值（`expected_echo()`：
@@ -208,6 +210,20 @@
 - **重连定时器。** `#reconnect_timer` 保存待决定时器的句柄。它是资源，不是阶段：恰好在
   `BACKING_OFF` 期间不为空。进入 `BACKING_OFF` 时启动它；定时器回调先清除它，再转入
   `CONNECTING`；`disconnect()` 用 `clearTimeout` 清除它。
+- **退避延迟。** `#next_delay` 是下一次退避的延迟，`#last_delay` 是上一次的。`#back_off()` 等待
+  `#next_delay`，把它复制到 `#last_delay`，再把 `#next_delay` 设为它的两倍，上限为
+  `max(reconnect_max, reconnect_time)`。每次转入 `BACKING_OFF` 都经过它，连接尝试失败也不例外。
+  `#reset_delay()` 把 `#next_delay` 设回 `reconnect_time`、`#last_delay` 设为 `0`，并清除
+  `#stable_timer`；它在收到有效帧（`#link_proved()`）、`#stable_timer` 触发，以及
+  `disconnect()` 开始时运行。
+- **稳定的连接。** `#last_delay` 不为 `0`（连接跟在一次退避之后）时，`#transport_opened()` 以
+  `#last_delay` 启动 `#stable_timer`；`#transport_lost()` 清除它。连接保持打开这么久，就调用
+  `#reset_delay()`。这个定时器与 `#reconnect_timer` 一样是资源。
+- **死链。** `#timeouts` 记录连接上连续的超时次数。在串口上、`max_timeouts = 0` 时或不处于
+  `CONNECTED` 时，`#count_timeout()` 什么也不做；否则递增计数，达到 `max_timeouts` 时将其清零并
+  调用 `_close()`。随后 TCP 套接字的 `close` 经 `#transport_lost()` 报告丢失，与对端关闭完全
+  相同：阶段转入 `BACKING_OFF` 或 `IDLE`，而不是 `DISCONNECTING`，因此不会抑制重连。
+  `#link_proved()` 和 `#transport_opened()` 会将计数清零。
 - **等待中的 `connect()`。** `DISCONNECTING` 期间调用的 `connect()` 被保存为一个待决的兑现函数，
   同样是资源而不是阶段。结束 `DISCONNECTING` 的 `close` 启动它。在此之前调用 `disconnect()` 会
   以 `connection lost` 拒绝它。
@@ -228,8 +244,10 @@
 每种传输为 `_send(data)`、`_open()` 和 `_close()` 赋值。`_open()` 只在转入 `CONNECTING` 时
 调用；在 `CONNECTING` 期间到来的调用者被加入 `#connect_waiters`，因此并发调用者共用一次尝试。
 
-- **TCP（`set_tcp`）。** `_open()` 即 `socket.connect`；套接字的 `connect` 事件报告
-  `#transport_opened()`。每次尝试都复用同一个套接字。
+- **TCP（`set_tcp`）。** `_open()` 即 `socket.connect`；套接字的 `connect` 事件开启 keep-alive
+  （`setKeepAlive(true, keep_alive)`，`keep_alive` 为 `0` 时不开启），并报告
+  `#transport_opened()`。每次尝试都复用同一个套接字，因此每次连接时都设置 keep-alive，而不是只设
+  一次。
 - **串口（`set_serial`）。** `_open()` 只创建一次串口（`creating` Promise，是懒创建缓存，不是
   阶段）并打开它；`opening` Promise 让 `_close()` 能等待进行中的打开。由打开的回调（而不是 `open`
   事件）报告 `#transport_opened()`。

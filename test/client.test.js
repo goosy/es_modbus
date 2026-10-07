@@ -1,6 +1,7 @@
 import { describe, test, before, after, beforeEach, afterEach } from 'node:test';
 import assert from 'node:assert/strict';
 import { once } from 'node:events';
+import { createServer } from 'node:net';
 import { Modbus_Client } from '../src/ModbusClient.js';
 import { set_serial_port_factory } from '../src/serial.js';
 import {
@@ -462,24 +463,26 @@ describe('Modbus_Client transactions', () => {
 		assert.deepEqual(data, [true, false]);
 	});
 
-	test('an exception response rejects with "response error: <code>"', async () => {
+	test('an exception response rejects with Error("response error: <code>")', async () => {
 		responder = (request) => reply_to(request, '018302');
 		const data_error = once(client, 'data_error');
 		await assert.rejects(client.read('40001'), (reason) => {
-			assert.equal(String(reason), 'response error: 2');
+			assert.ok(reason instanceof Error);
+			assert.equal(reason.message, 'response error: 2');
 			return true;
 		});
 		await data_error;
 	});
 
-	test('a timeout rejects with the transaction ID and emits timeout', async () => {
+	test('a timeout rejects with an Error naming the transaction ID and emits timeout', async () => {
 		responder = () => undefined;
 		client.timeout = 100;
 		const timeout = once(client, 'timeout');
 		const started = performance.now();
 		await assert.rejects(client.read('40001'), (reason) => {
 			const tid = split_frames(fake.frames)[0].readUInt16BE(0);
-			assert.match(String(reason), new RegExp(`0x${tid.toString(16)}`));
+			assert.ok(reason instanceof Error);
+			assert.equal(reason.message, `transaction 0x${tid.toString(16)} timeout`);
 			return true;
 		});
 		assert.ok(performance.now() - started >= 90);
@@ -900,6 +903,8 @@ describe('Modbus_Client RTU-over-TCP', () => {
 
 	test('requests are RTU frames with a CRC and no MBAP', async () => {
 		client.timeout = 50;
+		// Every request times out; the connection must not be closed as dead
+		client.max_timeouts = 0;
 		await Promise.allSettled([client.read('40001,73', 18)]);
 		await Promise.allSettled([client.write('00173', true, 0x11)]);
 		await Promise.allSettled([client.write('40002', hex('000a0102'), 0x11)]);
@@ -1009,7 +1014,7 @@ describe('Modbus_Client RTU-over-TCP', () => {
 
 	test('rejects on an RTU exception response', async () => {
 		responder = () => rtu_frame('018302');
-		await assert.rejects(client.read('40001'), (reason) => String(reason) === 'response error: 2');
+		await assert.rejects(client.read('40001'), { name: 'Error', message: 'response error: 2' });
 	});
 
 	test('ignores a response with a bad CRC', async () => {
@@ -1372,5 +1377,340 @@ describe('Modbus_Client connection phases (serial)', () => {
 		await connected;
 		assert.equal(phase(client), 'connected');
 		assert.equal(created[0].opens, 2);
+	});
+});
+
+/**
+ * A TCP peer that drops every connection at once while `drop` is true, and otherwise keeps it
+ * and answers with `responder(frame)`.
+ */
+async function start_dropping_server(responder = () => undefined) {
+	const sockets = new Set();
+	const server = createServer((socket) => {
+		socket.on('error', () => { });
+		if (peer.drop) {
+			socket.destroy();
+			return;
+		}
+		sockets.add(socket);
+		socket.on('close', () => sockets.delete(socket));
+		socket.on('data', (frame) => {
+			for (const reply of [responder(frame)].flat()) {
+				if (reply) socket.write(reply);
+			}
+		});
+	});
+	const peer = {
+		drop: true,
+		sockets,
+		async close() {
+			for (const socket of sockets) socket.destroy();
+			await new Promise((resolve) => server.close(resolve));
+		},
+	};
+	server.listen(0, HOST);
+	await once(server, 'listening');
+	peer.port = server.address().port;
+	return peer;
+}
+
+/** Records the time from each `disconnect` to the next `connect`: the reconnect delays. */
+function record_delays(client) {
+	const delays = [];
+	let lost;
+	client.on('disconnect', () => {
+		lost = performance.now();
+	});
+	client.on('connect', () => {
+		if (lost !== undefined) delays.push(performance.now() - lost);
+		lost = undefined;
+	});
+	return delays;
+}
+
+/** Waits until `delays` holds `count` entries. */
+async function delays_recorded(client, delays, count) {
+	while (delays.length < count) await once(client, 'connect');
+}
+
+/** Asserts each measured delay is the expected one, within timer jitter. */
+function assert_delays(delays, expected) {
+	assert.equal(delays.length, expected.length, `delays ${delays.map(Math.round)}`);
+	expected.forEach((ms, i) => {
+		assert.ok(
+			delays[i] >= ms - 5 && delays[i] < ms + 60,
+			`delay ${i}: ${Math.round(delays[i])} ms, expected ${ms}`,
+		);
+	});
+}
+
+describe('Modbus_Client reconnect back-off', () => {
+	test('the options default, and an invalid one throws', () => {
+		const client = new Modbus_Client(HOST, { reconnect_time: 0 });
+		assert.equal(client.reconnect_max, 60000);
+		assert.equal(client.max_timeouts, 3);
+		assert.equal(client.keep_alive, 10000);
+		const cases = [
+			...[0, -1, Number.POSITIVE_INFINITY, '1000'].map((reconnect_max) => [{ reconnect_max }, /Invalid reconnect_max/]),
+			...[-1, 1.5, '3'].map((max_timeouts) => [{ max_timeouts }, /Invalid max_timeouts/]),
+			...[-1, Number.POSITIVE_INFINITY, '0'].map((keep_alive) => [{ keep_alive }, /Invalid keep_alive/]),
+		];
+		for (const [options, error] of cases) {
+			assert.throws(
+				() => new Modbus_Client(HOST, { reconnect_time: 0, ...options }),
+				error,
+				JSON.stringify(options),
+			);
+		}
+		const zero = new Modbus_Client(HOST, { reconnect_time: 0, max_timeouts: 0, keep_alive: 0 });
+		assert.equal(zero.max_timeouts, 0);
+		assert.equal(zero.keep_alive, 0);
+	});
+
+	test('the delay doubles up to reconnect_max while connections drop at once', async () => {
+		const peer = await start_dropping_server();
+		const client = create_client(peer.port, { reconnect_time: 50, reconnect_max: 200 });
+		const delays = record_delays(client);
+		try {
+			await delays_recorded(client, delays, 4);
+			assert_delays(delays, [50, 100, 200, 200]);
+		} finally {
+			await close_client(client);
+			await peer.close();
+		}
+	});
+
+	test('a reconnect_max below reconnect_time acts as reconnect_time', async () => {
+		const peer = await start_dropping_server();
+		const client = create_client(peer.port, { reconnect_time: 80, reconnect_max: 10 });
+		const delays = record_delays(client);
+		try {
+			await delays_recorded(client, delays, 2);
+			assert_delays(delays, [80, 80]);
+		} finally {
+			await close_client(client);
+			await peer.close();
+		}
+	});
+
+	test('a valid frame returns the delay to reconnect_time', async () => {
+		const peer = await start_dropping_server(auto_reply);
+		const client = create_client(peer.port, { reconnect_time: 50, reconnect_max: 1000 });
+		const delays = record_delays(client);
+		try {
+			await delays_recorded(client, delays, 2); // 50, 100
+			peer.drop = false;
+			await delays_recorded(client, delays, 3); // 200, now kept
+			await client.read('40001');
+			for (const socket of peer.sockets) socket.destroy();
+			await delays_recorded(client, delays, 4);
+			assert_delays(delays, [50, 100, 200, 50]);
+		} finally {
+			await close_client(client);
+			await peer.close();
+		}
+	});
+
+	test('a connection open as long as the last delay returns it to reconnect_time', async () => {
+		const peer = await start_dropping_server();
+		const client = create_client(peer.port, { reconnect_time: 50, reconnect_max: 1000 });
+		const delays = record_delays(client);
+		try {
+			await delays_recorded(client, delays, 1); // 50
+			peer.drop = false;
+			await delays_recorded(client, delays, 2); // 100, now kept with no frame
+			await sleep(150);
+			for (const socket of peer.sockets) socket.destroy();
+			await delays_recorded(client, delays, 3);
+			assert_delays(delays, [50, 100, 50]);
+		} finally {
+			await close_client(client);
+			await peer.close();
+		}
+	});
+
+	test('a connection dropped before the last delay keeps the delay growing', async () => {
+		const peer = await start_dropping_server();
+		const client = create_client(peer.port, { reconnect_time: 50, reconnect_max: 1000 });
+		const delays = record_delays(client);
+		try {
+			await delays_recorded(client, delays, 1); // 50
+			peer.drop = false;
+			await delays_recorded(client, delays, 2); // 100, now kept with no frame
+			await sleep(30);
+			for (const socket of peer.sockets) socket.destroy();
+			await delays_recorded(client, delays, 3);
+			assert_delays(delays, [50, 100, 200]);
+		} finally {
+			await close_client(client);
+			await peer.close();
+		}
+	});
+
+	test('disconnect() returns the delay to reconnect_time', async () => {
+		const peer = await start_dropping_server();
+		const client = create_client(peer.port, { reconnect_time: 50, reconnect_max: 1000 });
+		const delays = record_delays(client);
+		try {
+			await delays_recorded(client, delays, 2); // 50, 100: the next would be 200
+			await client.disconnect();
+			await client.connect().catch(() => { });
+			// The gap from disconnect() to connect() is no back-off; the drop after it is
+			await delays_recorded(client, delays, 4);
+			assert_delays(delays.slice(3), [50]);
+		} finally {
+			await close_client(client);
+			await peer.close();
+		}
+	});
+});
+
+describe('Modbus_Client dead-link detection', () => {
+	test('max_timeouts timeouts in a row close the connection, which then reconnects', async () => {
+		const fake = await start_fake_server();
+		const client = await connect_client(fake.port, { timeout: 40, max_timeouts: 2, reconnect_time: 50 });
+		const events = [];
+		for (const name of ['timeout', 'disconnect', 'connect']) client.on(name, () => events.push(name));
+		try {
+			const first = client.read('40001');
+			const second = client.read('40002');
+			await assert.rejects(first, /timeout/);
+			await assert.rejects(second, /timeout/);
+			await once(client, 'connect');
+			assert.deepEqual(events, ['timeout', 'timeout', 'disconnect', 'connect']);
+		} finally {
+			await close_client(client);
+			await fake.close();
+		}
+	});
+
+	test('requests pending when the link is closed as dead reject with "connection lost"', async () => {
+		const fake = await start_fake_server();
+		const client = await connect_client(fake.port, { timeout: 40, max_timeouts: 1 });
+		try {
+			// The frame is written at once, with the timeout of that moment
+			const first = client.read('40001');
+			client.timeout = 2000;
+			const second = client.read('40002');
+			await assert.rejects(first, /timeout/);
+			await assert.rejects(second, { message: 'connection lost' });
+		} finally {
+			await close_client(client);
+			await fake.close();
+		}
+	});
+
+	test('a valid frame from any unit resets the count', async () => {
+		// Only unit 2 answers
+		const fake = await start_fake_server((chunk) => (chunk[6] === 2 ? auto_reply(chunk) : undefined));
+		const client = await connect_client(fake.port, { timeout: 40, max_timeouts: 2 });
+		let disconnects = 0;
+		client.on('disconnect', () => disconnects++);
+		try {
+			for (let i = 0; i < 3; i++) {
+				await assert.rejects(client.read('40001', 1), /timeout/);
+				await client.read('40001', 2);
+			}
+			assert.equal(disconnects, 0);
+			await assert.rejects(client.read('40001', 1), /timeout/);
+			const disconnected = once(client, 'disconnect');
+			await assert.rejects(client.read('40001', 1), /timeout/);
+			await disconnected;
+		} finally {
+			await close_client(client);
+			await fake.close();
+		}
+	});
+
+	test('an exception response counts as a valid frame', async () => {
+		let answer = false;
+		const fake = await start_fake_server((chunk) => (answer ? reply_to(chunk, '018302') : undefined));
+		const client = await connect_client(fake.port, { timeout: 40, max_timeouts: 2 });
+		let disconnects = 0;
+		client.on('disconnect', () => disconnects++);
+		try {
+			await assert.rejects(client.read('40001'), /timeout/);
+			answer = true;
+			await assert.rejects(client.read('40001'), /response error: 2/);
+			answer = false;
+			await assert.rejects(client.read('40001'), /timeout/);
+			await sleep(20);
+			assert.equal(disconnects, 0);
+		} finally {
+			await close_client(client);
+			await fake.close();
+		}
+	});
+
+	test('max_timeouts 0 never closes the connection', async () => {
+		const fake = await start_fake_server();
+		const client = await connect_client(fake.port, { timeout: 20, max_timeouts: 0 });
+		try {
+			for (let i = 0; i < 5; i++) await assert.rejects(client.read('40001'), /timeout/);
+			await sleep(20);
+			assert.equal(client.is_connected, true);
+		} finally {
+			await close_client(client);
+			await fake.close();
+		}
+	});
+
+	test('RTU-over-TCP counts timeouts too', async () => {
+		const fake = await start_fake_server();
+		const client = await connect_client(fake.port, { rtu: true, timeout: 30, max_timeouts: 2 });
+		try {
+			const disconnected = once(client, 'disconnect');
+			await assert.rejects(client.read('40001'), /timeout/);
+			await assert.rejects(client.read('40001'), /timeout/);
+			await disconnected;
+		} finally {
+			await close_client(client);
+			await fake.close();
+		}
+	});
+
+	test('a serial port does not count timeouts', async () => {
+		const ports = [];
+		set_serial_port_factory(async (settings) => {
+			const port = new Fake_Serial_Port(settings);
+			ports.push(port);
+			return port;
+		});
+		const client = new Modbus_Client(null, {
+			port: 'COM9', reconnect_time: 0, timeout: 20, delay: 0, max_timeouts: 1,
+		});
+		client.on('error', () => { });
+		try {
+			await client.connect();
+			for (let i = 0; i < 3; i++) await assert.rejects(client.read('40001'), /timeout/);
+			assert.equal(client.is_connected, true);
+			assert.equal(ports[0].isOpen, true);
+		} finally {
+			await client.disconnect();
+			set_serial_port_factory(null);
+		}
+	});
+});
+
+describe('Modbus_Client keep-alive', () => {
+	/** Connects a client and returns the arguments of its setKeepAlive calls. */
+	async function keep_alive_calls(options) {
+		const fake = await start_fake_server();
+		const client = create_client(fake.port, options);
+		const calls = [];
+		client.stream.setKeepAlive = (...args) => calls.push(args);
+		await client.connect();
+		await close_client(client);
+		await fake.close();
+		return calls;
+	}
+
+	test('a TCP socket enables keep-alive with the keep_alive delay', async () => {
+		assert.deepEqual(await keep_alive_calls({}), [[true, 10000]]);
+		assert.deepEqual(await keep_alive_calls({ keep_alive: 2500 }), [[true, 2500]]);
+	});
+
+	test('keep_alive 0 leaves keep-alive off', async () => {
+		assert.deepEqual(await keep_alive_calls({ keep_alive: 0 }), []);
 	});
 });

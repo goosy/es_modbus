@@ -129,7 +129,8 @@ A single routine builds every outgoing frame regardless of transport:
   so queueing time never counts. `end_transaction` decrements the count, stamps `status`, clears
   the timer, swaps `resolve`/`reject` for `DO_NOTHING` so a late/duplicate response is inert, and
   calls `#transaction_ended`. An RTU timeout also empties `unprocessed_buffer`, so the bytes of a
-  late answer do not prefix the next response.
+  late answer do not prefix the next response. `on_timeout` rejects with
+  `Error('transaction 0x<tid> timeout')`, then calls `#count_timeout()` (see "Dead link").
 - **Framing (`on_data`).** The chunk is appended to `unprocessed_buffer` and cut by
   `split_frames` with `mbap_frame_length` (`tcp`) or `rtu_response_length`. `#keep` stores `rest`
   in `unprocessed_buffer` and, when it is not empty, restarts `#silence_timer` (`#silence`, see
@@ -137,10 +138,12 @@ A single routine builds every outgoing frame regardless of transport:
   `#on_silence` runs `resync_frames` on the bytes left, keeps what is still left on TCP (without
   a new timer) and discards it on a serial port. `#transport_opened` and `#transport_lost` empty
   the buffer. A response length is never `UNKNOWN`, so the client has no unknown-length case.
-- **Matching (`on_data`).** For each frame: parse → emit `receive` → skip `func_code === 0` → look
+- **Matching (`on_data`).** For each frame: parse → emit `receive` → skip `func_code === 0` →
+  `#link_proved()` (a valid frame, from any unit: see "Dead link") → look
   up by `tid` (TCP) or take `#current` (RTU family) → ignore unless `status === 'pending'` → on the
   RTU family, ignore unless `response_fits()` (same unit ID, function code with the exception bit
-  cleared, and for a read the requested byte count) → `reject` on `exception_code`, else resolve:
+  cleared, and for a read the requested byte count) → `reject` on `exception_code` with
+  `Error('response error: <code>')`, else resolve:
   a read with `response.data`, a write with `echo_matches()`. TCP does not check `response_fits()`:
   the transaction ID matches, and some gateways answer with another unit ID.
 - **Write echo.** `transact()` stores `packet.echo`, the value a write response must echo after
@@ -241,6 +244,22 @@ close in progress, and `disconnect()` while `DISCONNECTED` resolves at once.
   resource, not a phase: it is non-null exactly while `BACKING_OFF`. Entering `BACKING_OFF`
   starts it; the timer callback clears it before moving to `CONNECTING`; `disconnect()` clears it
   with `clearTimeout`.
+- **Back-off delay.** `#next_delay` is the delay of the next back-off, `#last_delay` that of the
+  last one. `#back_off()` waits `#next_delay`, copies it to `#last_delay`, and sets
+  `#next_delay` to twice it, capped at `max(reconnect_max, reconnect_time)`. Every move into
+  `BACKING_OFF` goes through it, a failed connect attempt included. `#reset_delay()` sets
+  `#next_delay` back to `reconnect_time`, `#last_delay` to `0`, and clears `#stable_timer`; it
+  runs on a valid frame (`#link_proved()`), when `#stable_timer` fires, and at the start of
+  `disconnect()`.
+- **Stable connection.** `#transport_opened()` starts `#stable_timer` for `#last_delay` when it is
+  not `0` (the connection follows a back-off); `#transport_lost()` clears it. A connection that
+  stays open that long calls `#reset_delay()`. The timer is a resource, like `#reconnect_timer`.
+- **Dead link.** `#timeouts` counts the consecutive timeouts on the connection.
+  `#count_timeout()` does nothing on a serial port, with `max_timeouts = 0`, or when not
+  `CONNECTED`; otherwise it increments the count and, at `max_timeouts`, resets it and calls
+  `_close()`. The TCP socket's `close` then reports the loss through `#transport_lost()`, exactly
+  as a peer's close would: the phase moves to `BACKING_OFF` or `IDLE`, not `DISCONNECTING`, so
+  the reconnect is not suppressed. `#link_proved()` and `#transport_opened()` reset the count.
 - **Waiting `connect()`.** A `connect()` called while `DISCONNECTING` is kept as a pending
   resolver, also a resource, not a phase. The `close` that ends `DISCONNECTING` starts it. A
   `disconnect()` called before that rejects it with `connection lost`.
@@ -265,8 +284,10 @@ Each transport assigns `_send(data)`, `_open()` and `_close()`. `_open()` is cal
 the move into `CONNECTING`; a caller that arrives while `CONNECTING` is added to
 `#connect_waiters` instead, so concurrent callers share one attempt.
 
-- **TCP (`set_tcp`).** `_open()` is `socket.connect`; the socket's `connect` event reports
-  `#transport_opened()`. A socket is reused for every attempt.
+- **TCP (`set_tcp`).** `_open()` is `socket.connect`; the socket's `connect` event enables
+  keep-alive (`setKeepAlive(true, keep_alive)`, unless `keep_alive` is `0`) and reports
+  `#transport_opened()`. A socket is reused for every attempt, so keep-alive is set on each
+  connect rather than once.
 - **Serial (`set_serial`).** `_open()` creates the port once (the `creating` promise, a
   lazy-creation cache, not a phase) and opens it; the `opening` promise lets `_close()` wait for
   an open in progress. The open callback, not the `open` event, reports `#transport_opened()`.
