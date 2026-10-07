@@ -60,13 +60,16 @@ file; so far [design-test.md](./design-test.md), the test suite.
 function codes) as attributes of the range. An *address* is a single point: a Modicon address
 (`"40001"`) or a PDU address (`pdu_addr`, the number on the wire). The parsers turn every form
 of range into the same internal range object: `parse_modicon_range` handles the Modicon form,
-`parse_pdu_range` the structured PDU range, and the client's `resolve_range` picks one of them.
+`parse_pdu_range` the structured PDU range, and `resolve_range` picks one of them.
 
 The forms accepted for `range` (a Modicon string, or a structured array / object) and the rules
 for their fields are defined in `spec-protocol.md`; the client-side validation is in
-`spec-client.md`. How they are implemented:
+`spec-client.md`. They are implemented by two pure functions of `util.js`:
+`plan_read(range, unit_id, zero_based)` and `plan_write(range, value, unit_id, zero_based)` return
+the request `{ unit_id, func_code, address, length, data }` (`data` is `null` for a read) or
+throw. `read()` / `write()` call them with the client's numbering base and pass the request on:
 
-- **Type split first.** `read()` / `write()` call `resolve_range`, which looks at the type of
+- **Type split first.** `plan_read()` / `plan_write()` call `resolve_range`, which looks at the type of
   `range` before anything else: a `string` goes to the Modicon parser (`parse_modicon_range`),
   anything else to the structured-range validator (`parse_pdu_range`). Either one returning
   `null` throws `Invalid range format`.
@@ -82,31 +85,32 @@ for their fields are defined in `spec-protocol.md`; the client-side validation i
 - **Range checks.** After the range is parsed and the function code chosen, `check_range()`
   applies the same two checks to both forms: the length must be within `MAX_QUANTITY[func_code]`
   (`Invalid length …`), and `pdu_addr + length` must not exceed `0x10000`
-  (`Range exceeds address 65535`). `write()` runs it after `check_write_value`, so a value that
+  (`Range exceeds address 65535`). `plan_write()` runs it after `check_write_value`, so a value that
   does not fit the function code is reported first.
-- **Explicit function code.** With a Modicon string `write()` infers the function code from the
+- **Unit ID.** `check_unit_id` (`util.js`) checks it right after the range; the server's
+  `set_unit_ids` uses it too.
+- **Explicit function code.** With a Modicon string `plan_write()` infers the function code from the
   shape of `value` (`infer_write`); with a structured range it takes `func_code` as given.
   In both cases `check_write_value` then validates `value` against the function code and length,
   and for FC 16 rejects an odd-length `Buffer` as a wrong buffer length.
-- **One transaction path.** Both methods end in `transact()`, which allocates the TID, builds the
-  frame and stores the packet.
+- **One transaction path.** Both methods end in `transact(request)`, which allocates the TID,
+  builds the frame and stores the packet.
 
-## Frame construction pipeline (`Modbus_Client.make_data_packet`)
+## Frame construction (`Modbus_Client.make_data_packet`)
 
 A single routine builds every outgoing frame regardless of transport:
 
-1. Allocate a TCP-shaped buffer: 12 bytes for reads / single writes, `13 + data_bytes` for
-   FC 15/16.
-2. Write the PDU at offset 6 (`unit_id`, `func_code`, `start_address`, then per-FC fields).
-   - FC 1–4: quantity at offset 10.
-   - FC 5: `0xFF00` / `0x0000` at offset 10.
-   - FC 6: 16-bit value at offset 10.
-   - FC 15/16: quantity at 10, byte count at 12, data from 13.
-3. The start address is the PDU address and is written unchanged. The Modicon→PDU conversion
+1. Build the body: `unit_id`, then the PDU (`func_code`, `start_address`, then per-FC fields).
+   - FC 1–4: the quantity.
+   - FC 5: `0xFF00` / `0x0000`.
+   - FC 6: the 16-bit value.
+   - FC 15/16: the quantity, the byte count, then the data bytes.
+2. The start address is the PDU address and is written unchanged. The Modicon→PDU conversion
    (`point - 1` by default, `point` when the client was constructed with
    `options.modicon_zero_based = true`) has already been done by the Modicon parser.
-4. If `protocol === 'tcp'`: fill MBAP (offsets 0–5) and return.
-   Else: drop the 6-byte MBAP prefix, append CRC-16 little-endian, return the RTU frame.
+3. Frame the body with `encode_tcp_frame(tid, body)` for `tcp` (an MBAP header with protocol
+   ID 0) or `encode_rtu_frame(body)` (CRC-16 appended little-endian). The server frames its
+   responses with the same two functions.
 
 ## Client transaction lifecycle
 
@@ -128,17 +132,15 @@ A single routine builds every outgoing frame regardless of transport:
   closures on the packet; the timer (`timeout_id`) is armed by `#write`, when the frame is written,
   so queueing time never counts. `end_transaction` decrements the count, stamps `status`, clears
   the timer, swaps `resolve`/`reject` for `DO_NOTHING` so a late/duplicate response is inert, and
-  calls `#transaction_ended`. An RTU timeout also empties `unprocessed_buffer`, so the bytes of a
+  calls `#transaction_ended`. An RTU timeout also clears the frame receiver, so the bytes of a
   late answer do not prefix the next response. `on_timeout` rejects with
   `Error('transaction 0x<tid> timeout')`, then calls `#count_timeout()` (see "Dead link").
-- **Framing (`on_data`).** The chunk is appended to `unprocessed_buffer` and cut by
-  `split_frames` with `mbap_frame_length` (`tcp`) or `rtu_response_length`. `#keep` stores `rest`
-  in `unprocessed_buffer` and, when it is not empty, restarts `#silence_timer` (`#silence`, see
-  "Silence" below).
-  `#on_silence` runs `resync_frames` on the bytes left, keeps what is still left on TCP (without
-  a new timer) and discards it on a serial port. `#transport_opened` and `#transport_lost` empty
-  the buffer. A response length is never `UNKNOWN`, so the client has no unknown-length case.
-- **Matching (`on_data`).** For each frame: parse → emit `receive` → skip `func_code === 0` →
+- **Framing (`on_data`).** The chunk goes to `#receiver`, a `Frame_Receiver` (see "Parser
+  notes") made by the constructor with `mbap_frame_length` (`tcp`) or `rtu_response_length`, the
+  silence, and `serial_line` for `rtu`; it hands each frame to `#on_frame`. `unprocessed_buffer`
+  is a getter of the bytes it keeps. `#transport_opened` and `#transport_lost` clear it. A
+  response length is never `UNKNOWN`, so the client has no unknown-length case.
+- **Matching (`#on_frame`).** For each frame: parse → emit `receive` → skip `func_code === 0` →
   `#link_proved()` (a valid frame, from any unit: see "Dead link") → look
   up by `tid` (TCP) or take `#current` (RTU family) → ignore unless `status === 'pending'` → on the
   RTU family, ignore unless `response_fits()` (same unit ID, function code with the exception bit
@@ -302,7 +304,8 @@ the move into `CONNECTING`; a caller that arrives while `CONNECTING` is added to
   the `MB_prefix_dict` lookup of the table digit, and `point_to_pdu_addr` (applies the numbering
   base; a PDU address outside `0..65535` rejects the point, which yields the ranges of
   `spec-protocol.md` for both forms and both bases).
-- `read()` / `write()` validate their arguments before building a frame and throw synchronously:
+- `plan_read()` / `plan_write()` validate the arguments of `read()` / `write()`, which therefore
+  throw synchronously:
   `unit_id` must be an integer in `0..255`, the length must be within `MAX_QUANTITY` (exported
   from `src/util.js`) for the function code, and an FC 6 value must be an integer in `0..65535`.
 - Supported function codes and PDU lengths are validated per function: exact length for
@@ -329,11 +332,22 @@ the move into `CONNECTING`; a caller that arrives while `CONNECTING` is added to
   function never exceeds the maximum ADU, so `rest` stays below one. A resynchronization costs
   at most one CRC per offset over a few hundred bytes, and runs only on an error or a silence
   with bytes left.
+- **`Frame_Receiver`** holds the bytes left of one byte stream (a connection or a serial line)
+  and their silence timer, so the client and the server share one implementation of
+  "Frame delimiting" in `spec-protocol.md`. It is made with `{ frame_length, silence,
+  serial_line, on_frame }`. `push(chunk)` joins the chunk to the bytes left, cuts them with
+  `split_frames` and hands each frame to `on_frame`; on a stream (`serial_line` false) a `rest`
+  of `UNKNOWN` length is taken at once as one frame (`#take_unknown`). The bytes left, when not
+  empty, restart the timer. On silence, a `rest` of `UNKNOWN` length is taken as one frame,
+  anything else goes through `resync_frames` first; what is still left is discarded on a
+  serial line and kept on a stream, without a new timer. `clear()` drops the bytes and the
+  timer. Only `rtu_request_length` gives `UNKNOWN`, so with the other two length functions the
+  unknown-length steps change nothing.
 - **Silence.** Both constructors read the `silence` option with `silence_option` (`util.js`):
   `DEFAULT_SILENCE_MS` (50) when nullish, else a finite positive number, or `Invalid silence` is
   thrown. A TCP-family transport uses it as is; a serial one uses `silence_time(settings,
   silence)` (`serial.js`), which is `max(t3.5, silence)`, t3.5 being 3.5 character times, or
-  1.75 ms above 19200 baud. The result is `#silence`.
+  1.75 ms above 19200 baud. The result is the `silence` of the transport's `Frame_Receiver`.
 - The four parsers (`parse_tcp_request` / `_response`, `parse_rtu_request` / `_response`) each
   parse **one** delimited frame and return one object. They still check the PDU layout and the
   CRC, since an unknown-length request reaches them as whatever bytes were received.
@@ -349,24 +363,20 @@ the move into `CONNECTING`; a caller that arrives while `CONNECTING` is added to
 
 ## Server dispatch notes
 
-- Framing follows `this.protocol`: `on_data` chooses the parser, `send_response` the framing,
-  and `_on_data` the serial-bus semantics from it. The `socket` argument only says where the
+- Framing follows `this.protocol`: `on_data` chooses the frame length, `#on_frame` the parser,
+  `send_response` the framing, and `_on_data` the serial-bus semantics from it. The `socket` argument only says where the
   response is written: a socket for both TCP-family transports, the serial port when absent.
 - `handle_read_bits` serves FC 1 and FC 2; `handle_read_registers` serves FC 3 (holding) and
   FC 4 (input), branching on `function_code === 3`.
 
 ### Request flow
 
-1. `on_data(chunk, socket?)` — append the chunk to the bytes left for that socket (`#pending`,
-   a `Map` keyed by socket; the serial port's under `undefined`), and cut them with
-   `split_frames` (`mbap_frame_length` for `tcp`, else `rtu_request_length`). On `rtu_over_tcp`
-   a `rest` of `UNKNOWN` length is taken at once as one frame (`take_unknown`). `#keep` stores
-   the rest and, when it is not empty, restarts its timer in `#silence_timers` (`#silence`:
-   see "Silence" under the codec notes); a socket's
-   entries are cleared on its `close`, the serial port's on its `close`. `#on_silence` takes a
-   serial `rest` of `UNKNOWN` length as one frame, and otherwise runs `resync_frames`, then
-   `take_unknown` on RTU; what is still left is discarded on a serial port and kept on TCP,
-   without a new timer.
+1. `on_data(chunk, socket?)` — push the chunk to that socket's `Frame_Receiver` (`#receivers`,
+   a `Map` keyed by socket; the serial port's under `undefined`), made on its first chunk with
+   `mbap_frame_length` for `tcp`, else `rtu_request_length`, the silence, and `serial_line` for
+   `rtu`. A socket's receiver is cleared and removed on the socket's `close`; the serial port's
+   is cleared on the port's `close`. On `rtu_over_tcp` a request of unknown length is therefore
+   served at once, on a serial port once the line is silent.
    Each frame goes to `#on_frame`, which parses it with `parse_tcp_request` for `tcp`, else
    `parse_rtu_request`, and emits `receive`. A frame with `func_code: 0` is dropped, unless
    the parser set `illegal_function`; then it goes on with that function code.
@@ -378,18 +388,22 @@ the move into `CONNECTING`; a caller that arrives while `CONNECTING` is added to
    `dispatch()`, which switches on `func_code` to the matching `handle_*` method; that method
    calls into `vector` and builds the response PDU. An unsupported function code → exception
    `0x01` under its own function code (`fc | 0x80`).
-   - Before any `vector` call, `check_request()` validates a supported request as the Modbus
+   - Before any `vector` call, `check_request()` (`util.js`) validates a supported request as the Modbus
      application protocol does: `0x03` for a quantity outside `1..MAX_QUANTITY[fc]`, a byte count
      that does not match the quantity (FC 15/16) or an FC 5 value other than `0xFF00` /
      `0x0000`; then `0x02` for a range ending past address 65535. A failing request is answered
      with that exception and the `vector` is not called. An over-limit FC 15/16 request with a
-     matching byte count cannot occur: it does not fit in a 253-byte PDU.
+     matching byte count cannot occur: it does not fit in a 253-byte PDU. An unsupported function
+     code passes the check, and `dispatch()` answers it with `0x01`.
+   - Exception and write responses are built by the module functions `exception_response` and
+     `write_response`.
    - Every `vector` call goes through `call_vector`, which wraps a thrown exception in a private
      `Vector_Error`. `serve()` catches only `Vector_Error`: it emits `vector_error` with the
      original error and the request, and answers exception `0x04`. A `vector_error` with no
      listener is ignored. Any other exception is a bug and propagates.
-3. `send_response(pdu, socket?, tid, pid)` — `tcp`: prepend a fresh MBAP header. `rtu` and
-   `rtu_over_tcp`: append CRC-16 (LE). Emit `send`, then write to `socket`, or to the serial port
+3. `send_response(pdu, socket?, tid)` — `tcp`: `encode_tcp_frame`, whose protocol ID is 0 like
+   that of every request served (`mbap_frame_length` never delimits another). `rtu` and
+   `rtu_over_tcp`: `encode_rtu_frame`. Emit `send`, then write to `socket`, or to the serial port
    when there is none.
 
 ## Server lifecycle

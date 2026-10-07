@@ -7,6 +7,16 @@ export const MAX_QUANTITY = {
 	5: 1, 6: 1, 15: 1968, 16: 123,
 };
 
+// The broadcast unit ID on a serial bus; an ordinary unit ID on TCP
+export const BROADCAST_ID = 0;
+
+/** Throws `Invalid unit ID` unless `unit_id` is an integer in 0..255. */
+export function check_unit_id(unit_id) {
+	if (!Number.isInteger(unit_id) || unit_id < 0 || unit_id > 255) {
+		throw new Error(`Invalid unit ID: ${unit_id}`);
+	}
+}
+
 const TABLE = new Int32Array([
 	0x0000, 0xc0c1, 0xc181, 0x0140, 0xc301, 0x03c0, 0x0280, 0xc241,
 	0xc601, 0x06c0, 0x0780, 0xc741, 0x0500, 0xc5c1, 0xc481, 0x0440,
@@ -162,6 +172,175 @@ export function parse_modicon_range(range_str, zero_based = false) {
 
 	if (parts.length === 0) return null;
 	return { ...table, pdu_addr, length: parts.length };
+}
+
+/**
+ * Parses a `read` / `write` range by its type: a string is a Modicon range, an array or object
+ * is a structured PDU range. Throws when it is invalid.
+ */
+function resolve_range(range, zero_based) {
+	const resolved = typeof range === 'string'
+		? parse_modicon_range(range, zero_based)
+		: parse_pdu_range(range);
+	if (!resolved) throw new Error('Invalid range format');
+	return resolved;
+}
+
+/**
+ * Checks a range against the quantity limit of its function code and the PDU address space.
+ */
+function check_range(func_code, pdu_addr, length) {
+	if (!Number.isInteger(length) || length < 1 || length > MAX_QUANTITY[func_code]) {
+		throw new Error(`Invalid length ${length} for function code ${func_code}`);
+	}
+	if (pdu_addr + length > 0x10000) {
+		throw new Error('Range exceeds address 65535');
+	}
+}
+
+/**
+ * Chooses the write function code and length for a Modicon range from the shape of `value`.
+ */
+function infer_write(target, value) {
+	const { fs_write, fm_write } = target;
+	if (!fs_write || !fm_write) {
+		throw new Error('Write operation not supported for this table');
+	}
+	if (fs_write === 5) {
+		// Coils: a boolean is a single write, a Buffer is a multiple write
+		if (typeof value === 'boolean') return { func_code: 5, length: target.length ?? 1 };
+		if (Buffer.isBuffer(value)) {
+			// A bit count cannot be derived from a byte count, so ",N" is required
+			if (target.length === undefined) {
+				throw new Error('Coil Buffer write requires a ",N" length');
+			}
+			return { func_code: 15, length: target.length };
+		}
+		throw new Error('Invalid value for coil write');
+	}
+	// Holding registers: a number or a 2-byte Buffer of length 1 is a single write
+	const length = target.length ?? (Buffer.isBuffer(value) ? value.length / 2 : 1);
+	if (typeof value === 'number') return { func_code: 6, length };
+	if (Buffer.isBuffer(value)) {
+		return { func_code: value.length === 2 && length === 1 ? 6 : 16, length };
+	}
+	throw new Error('Invalid value for register write');
+}
+
+/**
+ * Validates `value` against a write function code and length; returns the frame data.
+ */
+function check_write_value(func_code, length, value) {
+	switch (func_code) {
+		case 5:
+			if (typeof value !== 'boolean' || length !== 1) {
+				throw new Error('Invalid value for coil write');
+			}
+			return value;
+		case 15:
+			if (!Buffer.isBuffer(value)) throw new Error('Invalid value for coil write');
+			if (value.length !== Math.ceil(length / 8)) {
+				throw new Error('Invalid buffer length for coil write');
+			}
+			return value;
+		case 6: {
+			const data = Buffer.isBuffer(value) && value.length === 2 ? value.readUInt16BE(0) : value;
+			if (length !== 1 || !Number.isInteger(data) || data < 0 || data > 0xFFFF) {
+				throw new Error('Invalid value for register write');
+			}
+			return data;
+		}
+		case 16:
+			if (!Buffer.isBuffer(value)) throw new Error('Invalid value for register write');
+			if (value.length % 2 !== 0 || value.length !== length * 2) {
+				throw new Error('Invalid buffer length for register write');
+			}
+			return value;
+	}
+}
+
+/**
+ * Turns the arguments of a client `read()` into the request to send (see `spec-client.md`,
+ * `read`). Throws on any invalid argument.
+ *
+ * @param {string|Array|Object} range - a Modicon range or a structured PDU range.
+ * @param {number} unit_id
+ * @param {boolean} zero_based - the numbering base of a Modicon range.
+ * @returns {{ unit_id: number, func_code: number, address: number, length: number, data: null }}
+ */
+export function plan_read(range, unit_id, zero_based) {
+	const target = resolve_range(range, zero_based);
+	check_unit_id(unit_id);
+	let func_code;
+	let length;
+	if (typeof range === 'string') {
+		func_code = target.fm_read;
+		length = target.length ?? 1;
+	} else {
+		if (target.access !== 'read') {
+			throw new Error(`Function code ${target.func_code} is not a read function`);
+		}
+		({ func_code, length } = target);
+	}
+	check_range(func_code, target.pdu_addr, length);
+	return { unit_id, func_code, address: target.pdu_addr, length, data: null };
+}
+
+/**
+ * Turns the arguments of a client `write()` into the request to send: with a Modicon range the
+ * function code follows the shape of `value`. Throws on any invalid argument.
+ *
+ * @param {string|Array|Object} range - a Modicon range or a structured PDU range.
+ * @param {boolean|number|Buffer} value
+ * @param {number} unit_id
+ * @param {boolean} zero_based - the numbering base of a Modicon range.
+ * @returns {{ unit_id: number, func_code: number, address: number, length: number,
+ *   data: boolean|number|Buffer }} `data` is the coil value (FC 5), the register value (FC 6)
+ *   or the packed bytes (FC 15 / 16).
+ */
+export function plan_write(range, value, unit_id, zero_based) {
+	const target = resolve_range(range, zero_based);
+	check_unit_id(unit_id);
+	let func_code;
+	let length;
+	if (typeof range === 'string') {
+		({ func_code, length } = infer_write(target, value));
+	} else {
+		if (target.access !== 'write') {
+			throw new Error(`Function code ${target.func_code} is not a write function`);
+		}
+		({ func_code, length } = target);
+	}
+	const data = check_write_value(func_code, length, value);
+	check_range(func_code, target.pdu_addr, length);
+	return { unit_id, func_code, address: target.pdu_addr, length, data };
+}
+
+/**
+ * Checks the data of a parsed request as the Modbus application protocol does. Returns the
+ * exception code to answer with, or 0 when the request is valid or its function code is not
+ * supported: 0x03 (Illegal Data Value) for a quantity outside 1..MAX_QUANTITY, a byte count that
+ * does not match the quantity, or an FC 5 value other than 0xFF00 / 0x0000; then 0x02 (Illegal
+ * Data Address) for a range that ends past address 65535.
+ */
+export function check_request({ func_code, start_address, quantity, byte_count, data }) {
+	if (MAX_QUANTITY[func_code] === undefined) return 0;
+	switch (func_code) {
+		case 5:
+			if (data !== 0xFF00 && data !== 0x0000) return 0x03;
+			return 0;
+		case 6:
+			return 0;
+		case 15:
+			if (byte_count !== Math.ceil(quantity / 8)) return 0x03;
+			break;
+		case 16:
+			if (byte_count !== quantity * 2) return 0x03;
+			break;
+	}
+	if (quantity < 1 || quantity > MAX_QUANTITY[func_code]) return 0x03;
+	if (start_address + quantity > 0x10000) return 0x02;
+	return 0;
 }
 
 /**
@@ -534,6 +713,32 @@ export function parse_tcp_response(buffer) {
 	};
 }
 
+/**
+ * Frames a unit ID + PDU as a Modbus TCP frame: an MBAP header with transaction ID `tid`,
+ * protocol ID 0 and the length, then the body.
+ * @param {number} tid
+ * @param {Buffer} body - the unit ID, then the PDU.
+ * @returns {Buffer}
+ */
+export function encode_tcp_frame(tid, body) {
+	const frame = Buffer.alloc(6 + body.length);
+	frame.writeUInt16BE(tid, 0);
+	frame.writeUInt16BE(body.length, 4);
+	body.copy(frame, 6);
+	return frame;
+}
+
+/**
+ * Frames a unit ID + PDU as a Modbus RTU frame: the body, then its CRC-16 (little-endian).
+ * @param {Buffer} body - the unit ID, then the PDU.
+ * @returns {Buffer}
+ */
+export function encode_rtu_frame(body) {
+	const frame = Buffer.alloc(body.length + 2, body);
+	frame.writeUInt16LE(modbus_crc16(body), body.length);
+	return frame;
+}
+
 // Results of a frame length function, besides a length
 export const NEED_MORE = 0;  // the bytes so far do not yet give the length
 export const INVALID = -1;   // the frame cannot be delimited
@@ -671,4 +876,86 @@ export function split_frames(buffer, frame_length) {
 export function resync_frames(rest, frame_length) {
 	const next = resynchronize(rest, 0, frame_length);
 	return next < 0 ? { frames: [], rest } : split_frames(rest.subarray(next), frame_length);
+}
+
+/**
+ * Delimits the frames of one byte stream, a connection or a serial line (see `spec-protocol.md`,
+ * "Frame delimiting"), and hands each to `on_frame`. The bytes of an incomplete frame are kept
+ * for the next chunk; once the stream has been silent for `silence` ms with bytes left, they
+ * are resynchronized.
+ *
+ * A request of UNKNOWN length (only `rtu_request_length` gives one) is what has been received:
+ * on a stream at once, on a serial line once it is silent. After a silence what is still left
+ * is discarded on a serial line, where the silence ends a frame, and kept, without a new timer,
+ * on a stream, where it may be the head of a frame still on its way.
+ */
+export class Frame_Receiver {
+	#frame_length;
+	#silence;
+	#serial_line;
+	#on_frame;
+	#rest = EMPTY;
+	#timer;
+
+	/**
+	 * @param {Object} options
+	 * @param {(buffer: Buffer) => number} options.frame_length - mbap_frame_length,
+	 *   rtu_request_length or rtu_response_length.
+	 * @param {number} options.silence - in ms.
+	 * @param {boolean} options.serial_line - a serial line rather than a stream.
+	 * @param {(frame: Buffer) => void} options.on_frame
+	 */
+	constructor({ frame_length, silence, serial_line, on_frame }) {
+		this.#frame_length = frame_length;
+		this.#silence = silence;
+		this.#serial_line = serial_line;
+		this.#on_frame = on_frame;
+	}
+
+	get silence() {
+		return this.#silence;
+	}
+
+	// The bytes received and not yet delimited
+	get rest() {
+		return this.#rest;
+	}
+
+	/** Delimits the frames of a received chunk, joined to the bytes left. */
+	push(chunk) {
+		const buffer = this.#rest.length > 0 ? Buffer.concat([this.#rest, chunk]) : chunk;
+		const { frames, rest } = split_frames(buffer, this.#frame_length);
+		this.#keep(this.#serial_line ? rest : this.#take_unknown(frames, rest));
+		for (const frame of frames) this.#on_frame(frame);
+	}
+
+	/** Discards the bytes left and stops their silence timer. */
+	clear() {
+		this.#keep(EMPTY);
+	}
+
+	// Keeps the bytes left, and with `arm` restarts their silence timer
+	#keep(rest, arm = true) {
+		clearTimeout(this.#timer);
+		this.#rest = rest;
+		if (arm && rest.length > 0) this.#timer = setTimeout(() => this.#on_silence(), this.#silence);
+	}
+
+	// Moves a request of unknown length left in `rest` to `frames`; returns what is still left
+	#take_unknown(frames, rest) {
+		if (rest.length === 0 || this.#frame_length(rest) !== UNKNOWN) return rest;
+		frames.push(rest);
+		return EMPTY;
+	}
+
+	#on_silence() {
+		let frames = [];
+		let rest = this.#rest;
+		if (this.#frame_length(rest) !== UNKNOWN) {
+			({ frames, rest } = resync_frames(rest, this.#frame_length));
+		}
+		rest = this.#take_unknown(frames, rest);
+		this.#keep(this.#serial_line ? EMPTY : rest, false);
+		for (const frame of frames) this.#on_frame(frame);
+	}
 }

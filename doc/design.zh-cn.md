@@ -52,12 +52,15 @@
 表示法”）：一个起始地址加一个长度，功能码（或该表的各功能码）作为区间的属性。*地址*（address）
 指单个点：Modicon 地址（`"40001"`）或 PDU 地址（`pdu_addr`，即线路上的数字）。解析器把各种形式的
 区间都转换成同一种内部区间对象：`parse_modicon_range` 处理 Modicon 形式，`parse_pdu_range` 处理
-结构化 PDU 区间，客户端的 `resolve_range` 在两者之间选择。
+结构化 PDU 区间，`resolve_range` 在两者之间选择。
 
 `range` 接受的形式（Modicon 字符串，或结构化的数组 / 对象）及其字段规则定义在
-`spec-protocol.zh-cn.md` 中；客户端侧的校验见 `spec-client.zh-cn.md`。实现方式如下：
+`spec-protocol.zh-cn.md` 中；客户端侧的校验见 `spec-client.zh-cn.md`。它们由 `util.js` 中的两个
+纯函数实现：`plan_read(range, unit_id, zero_based)` 和 `plan_write(range, value, unit_id, zero_based)`
+返回请求 `{ unit_id, func_code, address, length, data }`（读的 `data` 为 `null`），或者抛出异常。
+`read()` / `write()` 以客户端的编号起点调用它们，再把请求交下去：
 
-- **先按类型分流。** `read()` / `write()` 调用 `resolve_range`，它在做任何事之前先看 `range`
+- **先按类型分流。** `plan_read()` / `plan_write()` 调用 `resolve_range`，它在做任何事之前先看 `range`
   的类型：`string` 交给 Modicon 解析器（`parse_modicon_range`），其他一切交给结构化区间校验器
   （`parse_pdu_range`）。任一返回 `null` 即抛出 `Invalid range format`。
 - **编号起点。** 构造函数选项 `modicon_zero_based`（默认 `false`，即 1 起始）只影响 Modicon
@@ -69,27 +72,27 @@
   字段都必须是 `number`（其他键会被忽略），`pdu_addr` 为 `0..65535` 的整数，`length` 为 `>= 1` 的整数。
 - **区间检查。** 区间解析完、功能码确定之后，`check_range()` 对两种形式做同样的两项检查：长度必须
   在 `MAX_QUANTITY[func_code]` 之内（`Invalid length …`），且 `pdu_addr + length` 不得超过 `0x10000`
-  （`Range exceeds address 65535`）。`write()` 在 `check_write_value` 之后运行它，因此值与功能码
+  （`Range exceeds address 65535`）。`plan_write()` 在 `check_write_value` 之后运行它，因此值与功能码
   不符的错误先报告。
-- **显式功能码。** 使用 Modicon 字符串时，`write()` 根据 `value` 的形态推断功能码（`infer_write`）；
+- **单元 ID。** 区间之后紧接着由 `check_unit_id`（`util.js`）检查；服务端的 `set_unit_ids` 也用它。
+- **显式功能码。** 使用 Modicon 字符串时，`plan_write()` 根据 `value` 的形态推断功能码（`infer_write`）；
   使用结构化区间时直接采用给定的 `func_code`。两种情况下随后都由 `check_write_value` 按功能码和
   长度校验 `value`，对 FC 16 把奇数长度的 `Buffer` 作为缓冲区长度错误拒绝。
-- **单一事务路径。** 两个方法最终都进入 `transact()`，由它分配 TID、构造帧并保存 packet。
+- **单一事务路径。** 两个方法最终都进入 `transact(request)`，由它分配 TID、构造帧并保存 packet。
 
-## 帧构造流水线（`Modbus_Client.make_data_packet`）
+## 帧构造（`Modbus_Client.make_data_packet`）
 
 无论哪种传输方式，所有发出的帧都由同一个例程构造：
 
-1. 分配一个 TCP 形态的缓冲区：读 / 单写为 12 字节，FC 15/16 为 `13 + data_bytes` 字节。
-2. 在偏移 6 处写入 PDU（`unit_id`、`func_code`、`start_address`，然后是各 FC 的字段）。
-   - FC 1–4：数量位于偏移 10。
-   - FC 5：`0xFF00` / `0x0000` 位于偏移 10。
-   - FC 6：16 位值位于偏移 10。
-   - FC 15/16：数量位于 10，字节数位于 12，数据从 13 开始。
-3. 起始地址即 PDU 地址，原样写入。Modicon→PDU 的转换（默认 `point - 1`；当客户端以
+1. 构造帧体：`unit_id`，然后是 PDU（`func_code`、`start_address`，然后是各 FC 的字段）。
+   - FC 1–4：数量。
+   - FC 5：`0xFF00` / `0x0000`。
+   - FC 6：16 位值。
+   - FC 15/16：数量、字节数，然后是数据字节。
+2. 起始地址即 PDU 地址，原样写入。Modicon→PDU 的转换（默认 `point - 1`；当客户端以
    `options.modicon_zero_based = true` 构造时为 `point`）已由 Modicon 解析器完成。
-4. 若 `protocol === 'tcp'`：填充 MBAP（偏移 0–5）并返回。
-   否则：去掉 6 字节的 MBAP 前缀，追加小端 CRC-16，返回 RTU 帧。
+3. 用 `encode_tcp_frame(tid, body)`（`tcp`：协议 ID 为 0 的 MBAP 头）或 `encode_rtu_frame(body)`
+   （追加小端 CRC-16）给帧体加上头尾。服务端也用这两个函数给应答加头尾。
 
 ## 客户端事务生命周期
 
@@ -109,15 +112,15 @@
   Promise。它把 `resolve` / `reject` / `on_timeout` 闭包存放在 packet 上；定时器（`timeout_id`）
   由 `#write` 在帧写出时启动，因此排队时间不计入超时。`end_transaction` 递减计数，标记 `status`，
   清除定时器，把 `resolve`/`reject` 换成 `DO_NOTHING` 使迟到/重复的响应无效，并调用
-  `#transaction_ended`。RTU 超时还会清空 `unprocessed_buffer`，以免迟到应答的字节混到下一个响应
+  `#transaction_ended`。RTU 超时还会清空帧接收器，以免迟到应答的字节混到下一个响应
   前面。`on_timeout` 以 `Error('transaction 0x<tid> timeout')` 拒绝，然后调用 `#count_timeout()`
   （见“死链”）。
-- **界定（`on_data`）。** 数据块追加到 `unprocessed_buffer`，再用 `split_frames` 切分：`tcp` 用
-  `mbap_frame_length`，否则用 `rtu_response_length`。`#keep` 把 `rest` 存入 `unprocessed_buffer`，
-  不为空时重设 `#silence_timer`（`#silence`，见下文“静默”）。`#on_silence` 对残留字节调用 `resync_frames`，仍然剩下的字节在 TCP 上保留
-  （不再重设定时器），在串口上丢弃。`#transport_opened` 和 `#transport_lost` 会清空缓冲区。响应
-  的帧长不会是 `UNKNOWN`，所以客户端没有帧长未知的情况。
-- **匹配（`on_data`）。** 对每一帧：解析 → 发出 `receive` → 跳过 `func_code === 0` →
+- **界定（`on_data`）。** 数据块交给 `#receiver`，它是构造函数创建的 `Frame_Receiver`（见“解析器
+  说明”）：`tcp` 用 `mbap_frame_length`，否则用 `rtu_response_length`，带上静默时长，`rtu` 时
+  `serial_line` 为真；它把每一帧交给 `#on_frame`。`unprocessed_buffer` 是读取其残留字节的 getter。
+  `#transport_opened` 和 `#transport_lost` 会清空它。响应的帧长不会是 `UNKNOWN`，所以客户端没有
+  帧长未知的情况。
+- **匹配（`#on_frame`）。** 对每一帧：解析 → 发出 `receive` → 跳过 `func_code === 0` →
   `#link_proved()`（有效帧，来自任意单元：见“死链”）→ 按 `tid`
   查找（TCP）或取 `#current`（RTU 系列）→ 除非 `status === 'pending'` 否则忽略 → RTU 系列上，
   除非 `response_fits()`（单元 ID 相同、去掉异常位后功能码相同，读还要求字节数与所请求的相符）
@@ -260,7 +263,7 @@
   `split_modicon`（正则表达式；5 位与 6 位形式只在点号的位数上不同）、用 `MB_prefix_dict` 查找表的
   数字，以及 `point_to_pdu_addr`（应用编号起点；PDU 地址超出 `0..65535` 即拒绝该点号，这对两种形式、
   两种起点都恰好得出 `spec-protocol.zh-cn.md` 中的范围）。
-- `read()` / `write()` 在构造帧之前校验参数并同步抛出异常：`unit_id` 必须是 `0..255` 范围内的
+- `plan_read()` / `plan_write()` 校验 `read()` / `write()` 的参数，因此它们会同步抛出异常：`unit_id` 必须是 `0..255` 范围内的
   整数，长度必须在该功能码的 `MAX_QUANTITY`（由 `src/util.js` 导出）之内，FC 6 的值必须是
   `0..65535` 范围内的整数。
 - 按功能码校验所支持的功能码和 PDU 长度：定长功能要求长度精确相等，多写请求要求
@@ -281,10 +284,18 @@
   字节流是有序的，一个正确的帧还没收全时，它后面不可能出现完整的帧。不需要单独的长度上限：帧长
   函数的结果不会超过最大 ADU，所以 `rest` 总是短于一个最大 ADU。一次重新同步对几百个字节的每个
   偏移至多算一次 CRC，而且只在出错，或有残留字节时静默之后才进行。
+- **`Frame_Receiver`** 持有一条字节流（一个连接或一条串行线路）的残留字节及其静默定时器，客户端和
+  服务端由此共用 `spec-protocol.zh-cn.md` 中“帧的界定”的同一份实现。它以
+  `{ frame_length, silence, serial_line, on_frame }` 创建。`push(chunk)` 把数据块接到残留字节后面，
+  用 `split_frames` 切分，把每一帧交给 `on_frame`；在流上（`serial_line` 为假），帧长为 `UNKNOWN`
+  的 `rest` 立即作为一帧（`#take_unknown`）。残留字节不为空时重设定时器。静默时，帧长为 `UNKNOWN`
+  的 `rest` 作为一帧，其他情况先经过 `resync_frames`；仍然剩下的字节在串行线路上丢弃，在流上保留，
+  不再重设定时器。`clear()` 丢弃字节并停止定时器。只有 `rtu_request_length` 会给出 `UNKNOWN`，
+  所以用另外两个帧长函数时，帧长未知的步骤不起作用。
 - **静默。** 两个构造函数都用 `silence_option`（`util.js`）读取 `silence` 选项：为空时取
   `DEFAULT_SILENCE_MS`（50），否则必须是有限的正数，否则抛出 `Invalid silence`。TCP 系列传输直接
   使用该值；串口使用 `silence_time(settings, silence)`（`serial.js`），即 `max(t3.5, silence)`，
-  其中 t3.5 为 3.5 个字符时间，19200 波特以上为 1.75 ms。结果存为 `#silence`。
+  其中 t3.5 为 3.5 个字符时间，19200 波特以上为 1.75 ms。结果即该传输的 `Frame_Receiver` 的 `silence`。
 - 四个解析器（`parse_tcp_request` / `_response`、`parse_rtu_request` / `_response`）都只解析
   **一个**已界定的帧，返回一个对象。它们仍然校验 PDU 布局和 CRC，因为帧长未知的请求是以已收到的
   字节整体交给它们的。
@@ -299,7 +310,7 @@
 
 ## 服务端分发说明
 
-- 帧格式取决于 `this.protocol`：`on_data` 据此选择解析器，`send_response` 据此组帧，`_on_data`
+- 帧格式取决于 `this.protocol`：`on_data` 据此选择帧长函数，`#on_frame` 据此选择解析器，`send_response` 据此组帧，`_on_data`
   据此确定串行总线语义。`socket` 参数只表示响应写到哪里：两种 TCP 系列传输写入套接字，没有
   `socket` 时写入串口。
 - `handle_read_bits` 服务 FC 1 和 FC 2；`handle_read_registers` 服务 FC 3（保持）和 FC 4（输入），
@@ -307,14 +318,11 @@
 
 ### 请求流程
 
-1. `on_data(chunk, socket?)` — 把数据块追加到该 socket 的残留字节（`#pending`，以 socket 为键的
-   `Map`；串口的以 `undefined` 为键），再用 `split_frames` 切分（`tcp` 用 `mbap_frame_length`，
-   否则用 `rtu_request_length`）。在 `rtu_over_tcp` 上，帧长为 `UNKNOWN` 的 `rest` 立即作为一帧
-   （`take_unknown`）。`#keep` 保存剩下的字节，不为空时重设它在 `#silence_timers` 中的定时器
-   （`#silence`，见编解码说明中的“静默”）；socket 的这两项
-   在其 `close` 时清除，串口的在串口 `close` 时清除。`#on_silence`：串口上帧长为 `UNKNOWN` 的
-   `rest` 作为一帧，否则调用 `resync_frames`，RTU 上再调用 `take_unknown`；仍然剩下的字节在串口上
-   丢弃，在 TCP 上保留，不再重设定时器。
+1. `on_data(chunk, socket?)` — 把数据块交给该 socket 的 `Frame_Receiver`（`#receivers`，以 socket
+   为键的 `Map`；串口的以 `undefined` 为键），它在收到第一个数据块时创建：`tcp` 用
+   `mbap_frame_length`，否则用 `rtu_request_length`，带上静默时长，`rtu` 时 `serial_line` 为真。
+   socket 的接收器在 socket `close` 时清空并移除；串口的在串口 `close` 时清空。因此在
+   `rtu_over_tcp` 上，帧长未知的请求立即得到服务，在串口上则在线路静默之后。
    每一帧交给 `#on_frame`：`tcp` 时用 `parse_tcp_request` 解析，否则用
    `parse_rtu_request`，然后发出 `receive`。`func_code: 0` 的帧被丢弃，除非解析器设置了
    `illegal_function`；此时以该功能码继续处理。
@@ -323,15 +331,18 @@
    `0` 是普通单元，未被接受的单元 ID 得到 `0x0B`。否则由 `serve()` 调用 `dispatch()`，按
    `func_code` 分支到对应的 `handle_*` 方法，由其调用 `vector` 并构造响应 PDU。不支持的功能码 →
    以其自身功能码（`fc | 0x80`）应答异常 `0x01`。
-   - 在调用任何 `vector` 之前，`check_request()` 按 Modbus 应用协议校验受支持的请求：数量超出
+   - 在调用任何 `vector` 之前，`check_request()`（`util.js`）按 Modbus 应用协议校验受支持的请求：数量超出
      `1..MAX_QUANTITY[fc]`、字节数与数量不符（FC 15/16），或 FC 5 的值不是 `0xFF00` / `0x0000` 时
      为 `0x03`；然后区间结束于地址 65535 之后时为 `0x02`。校验失败的请求以该异常应答，不调用
-     `vector`。字节数与数量相符却超限的 FC 15/16 请求不会出现：它放不进 253 字节的 PDU。
+     `vector`。字节数与数量相符却超限的 FC 15/16 请求不会出现：它放不进 253 字节的 PDU。不支持的
+     功能码通过检查，由 `dispatch()` 以 `0x01` 应答。
+   - 异常应答和写应答由模块函数 `exception_response` 和 `write_response` 构造。
    - 每次 `vector` 调用都经过 `call_vector`，它把抛出的异常包装为私有的 `Vector_Error`。
      `serve()` 只捕获 `Vector_Error`：以原始错误和请求发出 `vector_error`，并应答异常 `0x04`。
      没有监听者的 `vector_error` 会被忽略。其他异常属于程序缺陷，会向外传播。
-3. `send_response(pdu, socket?, tid, pid)` — `tcp`：前置新的 MBAP 头。`rtu` 和 `rtu_over_tcp`：
-   追加 CRC-16（小端）。发出 `send`，然后写入 `socket`；没有 `socket` 时写入串口。
+3. `send_response(pdu, socket?, tid)` — `tcp`：`encode_tcp_frame`，其协议 ID 为 0，与所服务的每个
+   请求相同（`mbap_frame_length` 不会界定协议 ID 不为 0 的帧）。`rtu` 和 `rtu_over_tcp`：
+   `encode_rtu_frame`。发出 `send`，然后写入 `socket`；没有 `socket` 时写入串口。
 
 ## 服务端生命周期
 

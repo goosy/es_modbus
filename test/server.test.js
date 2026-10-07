@@ -359,12 +359,6 @@ describe('Modbus_Server request handling (TCP framing)', () => {
 		assert.deepEqual(b.written.map((r) => r.readUInt16BE(0)), [2]);
 	});
 
-	test('coalesced frames are each answered', () => {
-		const socket = fake_socket();
-		server.on_data(Buffer.concat([tcp_frame(1, '010300000001'), tcp_frame(2, '010300000001')]), socket);
-		assert.deepEqual(socket.written.map((r) => r.readUInt16BE(0)), [1, 2]);
-	});
-
 	test('a malformed frame is dropped without a response', () => {
 		assert.deepEqual(tcp_exchange(server, tcp_frame(1, '01030000000100')), []);
 		assert.deepEqual(tcp_exchange(server, tcp_frame(1, '0110000000010200')), []);
@@ -382,57 +376,14 @@ describe('Modbus_Server request handling (TCP framing)', () => {
 		assert.equal(response.toString('hex'), tcp_frame(1, '018304').toString('hex'));
 	});
 
-	test('a quantity outside the protocol limit gets exception 0x03', () => {
-		const requests = [
-			['010100000000', '018103'], ['0101000007d1', '018103'],
-			['010200000000', '018203'], ['0102000007d1', '018203'],
-			['010300000000', '018303'], ['01030000007e', '018303'],
-			['01040000007e', '018403'], ['010300000100', '018303'],
-			// An over-limit FC 15/16 request with a matching byte count does not fit in a PDU
-			['010f00000000 00', '018f03'], ['010f000007b1 01 ff', '018f03'],
-			['0110 0000 0000 00', '019003'], ['0110 0000 007c 02 0000', '019003'],
-		];
-		for (const [request, response] of requests) {
-			const [written] = tcp_exchange(server, tcp_frame(1, request));
-			assert.equal(written?.toString('hex'), tcp_frame(1, response).toString('hex'), request);
-		}
-		assert.deepEqual(memory.calls, []);
-	});
-
-	test('a byte count that does not match the quantity gets exception 0x03', () => {
-		const [coils] = tcp_exchange(server, tcp_frame(1, '010f0000000a 01 cd'));
-		assert.equal(coils.toString('hex'), tcp_frame(1, '018f03').toString('hex'));
-		const [registers] = tcp_exchange(server, tcp_frame(1, '0110 0000 0002 02 0001'));
-		assert.equal(registers.toString('hex'), tcp_frame(1, '019003').toString('hex'));
-		assert.deepEqual(memory.calls, []);
-	});
-
-	test('an FC 5 value other than 0xFF00 or 0x0000 gets exception 0x03', () => {
-		const [response] = tcp_exchange(server, tcp_frame(1, '010500001234'));
-		assert.equal(response.toString('hex'), tcp_frame(1, '018503').toString('hex'));
-		assert.deepEqual(memory.calls, []);
-	});
-
-	test('a range past address 65535 gets exception 0x02', () => {
-		const requests = [
-			['0103ffff0002', '018302'], ['0101fff00011', '018102'],
-			['0110 ffff 0002 04 00010002', '019002'],
-		];
+	test('a request that fails check_request gets its exception, without a vector call', () => {
+		// The rules are tested on check_request() in util.test.js
+		const requests = [['010300000000', '018303'], ['0103ffff0002', '018302']];
 		for (const [request, response] of requests) {
 			const [written] = tcp_exchange(server, tcp_frame(1, request));
 			assert.equal(written.toString('hex'), tcp_frame(1, response).toString('hex'), request);
 		}
 		assert.deepEqual(memory.calls, []);
-	});
-
-	test('a range may end at address 65535', () => {
-		const [response] = tcp_exchange(server, tcp_frame(1, '0103fffe0002'));
-		assert.equal(response.toString('hex'), tcp_frame(1, '01030400000000').toString('hex'));
-	});
-
-	test('the quantity is checked before the address', () => {
-		const [response] = tcp_exchange(server, tcp_frame(1, '0103ffff0080'));
-		assert.equal(response.toString('hex'), tcp_frame(1, '018303').toString('hex'));
 	});
 
 	test('a throwing vector is reported through vector_error', () => {
@@ -607,29 +558,6 @@ describe('Modbus_Server request handling (RTU framing)', () => {
 		assert.deepEqual(port.written, []);
 	});
 
-	test('an unsupported function code gets exception 0x01 once the line is silent', (t) => {
-		t.mock.timers.enable({ apis: ['setTimeout'] });
-		server.set_rtu();
-		port.emit('data', rtu_frame('010800000000'));
-		t.mock.timers.tick(49);
-		assert.deepEqual(port.written, []);
-		t.mock.timers.tick(1);
-		assert.deepEqual(port.written, [rtu_frame('018801')]);
-	});
-
-	test('a frame split across reads is reassembled', () => {
-		const frame = rtu_frame('010300000001');
-		server.on_data(frame.subarray(0, 3));
-		assert.deepEqual(port.written, []);
-		server.on_data(frame.subarray(3));
-		assert.deepEqual(port.written, [rtu_frame('0103020000')]);
-	});
-
-	test('two frames in one read are both answered', () => {
-		server.on_data(Buffer.concat([rtu_frame('010300000001'), rtu_frame('01100000000102 0007')]));
-		assert.deepEqual(port.written, [rtu_frame('0103020000'), rtu_frame('011000000001')]);
-	});
-
 	test('leftover bytes are discarded once the line is silent', (t) => {
 		t.mock.timers.enable({ apis: ['setTimeout'] });
 		server.set_rtu();
@@ -662,11 +590,6 @@ describe('Modbus_Server request handling (RTU framing)', () => {
 		assert.deepEqual(port.written, []);
 		t.mock.timers.tick(1);
 		assert.deepEqual(port.written, [rtu_frame('018801')]);
-	});
-
-	test('an invalid quantity gets exception 0x03', () => {
-		server.on_data(rtu_frame('010300000000'));
-		assert.deepEqual(port.written, [rtu_frame('018303')]);
 	});
 
 	test('a malformed frame is dropped without a response', () => {
@@ -818,26 +741,6 @@ describe('Modbus_Server RTU-over-TCP', () => {
 		assert.deepEqual(socket.written.map((b) => b.toString('hex')), Array(3).fill(rtu_frame('0103020000').toString('hex')));
 	});
 
-	test('a stray leftover byte does not lose the next request', () => {
-		const server = new Modbus_Server(create_memory_vector().vector, { port: 1502, rtu: true });
-		const socket = fake_socket();
-		server.on_data(hex('01'), socket);
-		server.on_data(rtu_frame('010300000001'), socket);
-		assert.deepEqual(socket.written.map((b) => b.toString('hex')), [rtu_frame('0103020000').toString('hex')]);
-	});
-
-	test('a request behind bytes that announce a long frame is answered once the stream is silent', (t) => {
-		t.mock.timers.enable({ apis: ['setTimeout'] });
-		const server = new Modbus_Server(create_memory_vector().vector, { port: 1502, rtu: true });
-		const socket = fake_socket();
-		// FC 16 with a byte count of 0xf0 announces a 249-byte frame, which never completes
-		server.on_data(Buffer.concat([hex('011000000078f0'), rtu_frame('010300000001')]), socket);
-		t.mock.timers.tick(49);
-		assert.deepEqual(socket.written, []);
-		t.mock.timers.tick(1);
-		assert.deepEqual(socket.written.map((b) => b.toString('hex')), [rtu_frame('0103020000').toString('hex')]);
-	});
-
 	test('the silence option sets the silence on TCP', (t) => {
 		t.mock.timers.enable({ apis: ['setTimeout'] });
 		const server = new Modbus_Server(create_memory_vector().vector, { port: 1502, rtu: true, silence: 10 });
@@ -854,17 +757,6 @@ describe('Modbus_Server RTU-over-TCP', () => {
 			assert.throws(() => new Modbus_Server({}, { port: 1502, silence }), /Invalid silence/);
 			assert.throws(() => new Modbus_Server({}, { port: 'COM9', silence }), /Invalid silence/);
 		}
-	});
-
-	test('an incomplete frame is kept once the stream is silent', (t) => {
-		t.mock.timers.enable({ apis: ['setTimeout'] });
-		const server = new Modbus_Server(create_memory_vector().vector, { port: 1502, rtu: true });
-		const socket = fake_socket();
-		const frame = rtu_frame('010300000001');
-		server.on_data(frame.subarray(0, 5), socket);
-		t.mock.timers.tick(1000);
-		server.on_data(frame.subarray(5), socket);
-		assert.deepEqual(socket.written.map((b) => b.toString('hex')), [rtu_frame('0103020000').toString('hex')]);
 	});
 
 	test('an MBAP frame is not served', () => {

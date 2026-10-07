@@ -127,132 +127,14 @@ describe('Modbus_Client construction', () => {
 });
 
 describe('Modbus_Client argument validation', () => {
-	let client;
-	beforeEach(() => {
-		client = new Modbus_Client(HOST, { reconnect_time: 0 });
-	});
-
-	test('rejects invalid range strings synchronously', () => {
-		for (const range of ['20001', '4001', '40001,0', '40000', 'abc', '', 40001, null, undefined]) {
-			assert.throws(() => client.read(range), /Invalid range format/, String(range));
-			assert.throws(() => client.write(range, 1), /Invalid range format/, String(range));
-		}
-	});
-
-	test('rejects invalid unit IDs', () => {
-		for (const unit_id of [-1, 256, 1.5, '1', null, Number.NaN]) {
-			assert.throws(() => client.read('40001', unit_id), /Invalid unit ID/, String(unit_id));
-			assert.throws(() => client.write('40001', 1, unit_id), /Invalid unit ID/, String(unit_id));
-		}
-	});
-
-	test('rejects read lengths over the protocol limit', () => {
-		assert.throws(() => client.read('00001,2001'), /Invalid length 2001 for function code 1/);
-		assert.throws(() => client.read('10001,2001'), /Invalid length 2001 for function code 2/);
-		assert.throws(() => client.read('40001,126'), /Invalid length 126 for function code 3/);
-		assert.throws(() => client.read('30001,126'), /Invalid length 126 for function code 4/);
-	});
-
-	test('a structured range over the limit gets the same message as a Modicon one', () => {
-		assert.throws(() => client.read([3, 0, 126]), /Invalid length 126 for function code 3/);
-		assert.throws(() => client.read([1, 0, 2001]), /Invalid length 2001 for function code 1/);
-		assert.throws(() => client.write([16, 0, 124], Buffer.alloc(248)), /Invalid length 124 for function code 16/);
-		assert.throws(() => client.write([15, 0, 1969], Buffer.alloc(247)), /Invalid length 1969 for function code 15/);
-	});
-
-	test('rejects a range past PDU address 65535', () => {
-		assert.throws(() => client.read('465536,2'), /Range exceeds address 65535/);
-		assert.throws(() => client.read([3, 65535, 2]), /Range exceeds address 65535/);
-		assert.throws(() => client.read([1, 64000, 2000]), /Range exceeds address 65535/);
-		assert.throws(() => client.write('465535', hex('000100020003')), /Range exceeds address 65535/);
-		assert.throws(() => client.write([16, 65535, 2], hex('00010002')), /Range exceeds address 65535/);
-	});
-
-	test('a range may end at PDU address 65535', () => {
-		client.on('error', () => { });
-		try {
-			for (const call of [
-				() => client.read('465536'),
-				() => client.read([3, 65534, 2]),
-				() => client.write([5, 65535, 1], true),
-			]) {
-				call().catch(() => { });
-			}
-		} finally {
-			close_client(client);
-		}
-	});
-
-	test('rejects write lengths over the protocol limit', () => {
-		assert.throws(() => client.write('00001,1969', Buffer.alloc(247)), /function code 15/);
-		assert.throws(() => client.write('40001,124', Buffer.alloc(248)), /function code 16/);
-		assert.throws(() => client.write('40001', Buffer.alloc(248)), /function code 16/);
-	});
-
-	test('rejects writes to read-only tables', () => {
+	// The rules are tested on plan_read() / plan_write() in util.test.js
+	test('read() and write() throw synchronously on an invalid argument', () => {
+		const client = new Modbus_Client(HOST, { reconnect_time: 0 });
+		assert.throws(() => client.read('20001'), /Invalid range format/);
+		assert.throws(() => client.read('40001', 256), /Invalid unit ID/);
+		assert.throws(() => client.read([5, 0, 1]), /is not a read function/);
 		assert.throws(() => client.write('10001', true), /Write operation not supported/);
-		assert.throws(() => client.write('30001', 1), /Write operation not supported/);
-	});
-
-	test('rejects invalid coil values', () => {
-		assert.throws(() => client.write('00001', 1), /Invalid value for coil write/);
-		assert.throws(() => client.write('00001', 'on'), /Invalid value for coil write/);
-		assert.throws(() => client.write('00001,2', true), /Invalid value for coil write/);
-		assert.throws(() => client.write('00001', Buffer.alloc(1)), /requires a ",N" length/);
-		assert.throws(() => client.write('00001,10', Buffer.alloc(1)), /Invalid buffer length for coil write/);
-		assert.throws(() => client.write('00001,8', Buffer.alloc(2)), /Invalid buffer length for coil write/);
-	});
-
-	test('rejects invalid register values', () => {
-		for (const value of [-1, 65536, 1.5, Number.NaN, 'x', true, null]) {
-			assert.throws(() => client.write('40001', value), /Invalid value for register write/, String(value));
-		}
-		assert.throws(() => client.write('40001,2', 5), /Invalid value for register write/);
-		assert.throws(() => client.write('40001,3', Buffer.alloc(4)), /Invalid buffer length for register write/);
-	});
-
-	test('rejects an odd-length register Buffer as a wrong buffer length', () => {
-		assert.throws(() => client.write('40001', Buffer.alloc(3)), /Invalid buffer length for register write/);
-	});
-
-	test('rejects structured ranges with invalid fields', () => {
-		const invalid = [
-			['3', 0, 1], [3, '0', 1], [3, 0, '1'], [true, 0, 1], [3n, 0, 1],
-			[7, 0, 1], [0, 0, 1], [3, -1, 1], [3, 65536, 1], [3, 1.5, 1],
-			[3, 0, 0], [3, 0, -1], [3, 0, 1.5],
-			{ func_code: 3, pdu_addr: 0 }, { func_code: 3, length: 1 },
-		];
-		for (const range of invalid) {
-			assert.throws(() => client.read(range), /Invalid range format/,
-				JSON.stringify(range, (k, v) => typeof v === 'bigint' ? `${v}n` : v));
-		}
-	});
-
-	test('rejects a structured function code that does not belong to the method', () => {
-		for (const func_code of [5, 6, 15, 16]) {
-			assert.throws(() => client.read([func_code, 0, 1]));
-		}
-		for (const func_code of [1, 2, 3, 4]) {
-			assert.throws(() => client.write([func_code, 0, 1], 1));
-		}
-		assert.throws(() => client.write([5, 0, 2], true));
-		assert.throws(() => client.write([6, 0, 2], 1));
-	});
-
-	test('a structured range is checked against the value of its function code', () => {
-		assert.throws(() => client.write([5, 0, 1], 1), /Invalid value for coil write/);
-		assert.throws(() => client.write([15, 0, 3], true), /Invalid value for coil write/);
-		assert.throws(() => client.write([15, 0, 9], Buffer.alloc(1)), /Invalid buffer length for coil write/);
-		assert.throws(() => client.write([6, 0, 1], 65536), /Invalid value for register write/);
-		assert.throws(() => client.write([6, 0, 1], Buffer.alloc(4)), /Invalid value for register write/);
-		assert.throws(() => client.write([16, 0, 2], 5), /Invalid value for register write/);
-		assert.throws(() => client.write([16, 0, 2], Buffer.alloc(2)), /Invalid buffer length for register write/);
-	});
-
-	test('a structured range does not take the Modicon type split', () => {
-		assert.throws(() => client.read(['40001']), /Invalid range format/);
-		assert.throws(() => client.read([3, 0, 1, 0]), /Invalid range format/);
-		assert.throws(() => client.read({ func_code: 3, pdu_addr: 0, length: 1n }), /Invalid range format/);
+		assert.throws(() => client.write('40001,126', Buffer.alloc(252)), /Invalid length 126/);
 	});
 });
 
@@ -273,16 +155,10 @@ describe('Modbus_Client TCP framing', () => {
 		['read discrete inputs', (c) => c.read('10011,3', 2), '000000060202 000a 0003'],
 		['read holding registers', (c) => c.read('40001,73', 18), '000000061203 0000 0049'],
 		['read input registers', (c) => c.read('39999', 3), '000000060304 270e 0001'],
-		['read the default length 1', (c) => c.read('40100'), '000000060103 0063 0001'],
-		['read the maximum register count', (c) => c.read('40001,125'), '000000060103 0000 007d'],
-		['read the maximum coil count', (c) => c.read('00001,2000'), '000000060101 0000 07d0'],
 		['write single coil on', (c) => c.write('00173', true), '000000060105 00ac ff00'],
 		['write single coil off', (c) => c.write('00001', false, 4), '000000060405 0000 0000'],
 		['write single register', (c) => c.write('40002', 0x1234), '000000060106 0001 1234'],
-		['write single register from a 2-byte Buffer', (c) => c.write('40002', hex('abcd')), '000000060106 0001 abcd'],
-		['write single register 0 and 65535', (c) => c.write('40003', 65535), '000000060106 0002 ffff'],
 		['write multiple registers', (c) => c.write('40002', hex('000a0102')), '0000000b0110 0001 0002 04 000a0102'],
-		['write multiple registers with ,N', (c) => c.write('40002,2', hex('000a0102')), '0000000b0110 0001 0002 04 000a0102'],
 		['write multiple coils', (c) => c.write('00020,10', hex('cd01')), '00000009010f 0013 000a 02 cd01'],
 	];
 	for (const [name, call, expected] of cases) {
@@ -519,17 +395,6 @@ describe('Modbus_Client transactions', () => {
 		}
 		const values = (await results).map((data) => data.readUInt16BE(0));
 		assert.deepEqual(values, [1, 2, 3]);
-	});
-
-	test('coalesced responses in one chunk all resolve', async () => {
-		const pending = [];
-		responder = (request) => {
-			for (const frame of split_frames([{ frame: request }])) pending.push(frame);
-			if (pending.length < 2) return undefined;
-			return Buffer.concat(pending.map((r, i) => reply_to(r, Buffer.from([1, 3, 2, 0, i]))));
-		};
-		const values = await Promise.all([client.read('40001'), client.read('40002')]);
-		assert.deepEqual(values.map((d) => d.readUInt16BE(0)), [0, 1]);
 	});
 
 	test('a response with an unknown transaction ID is ignored', async () => {
@@ -933,18 +798,6 @@ describe('Modbus_Client RTU-over-TCP', () => {
 		assert.deepEqual(await pending, hex('1234abcd'));
 	});
 
-	test('a response behind bytes that announce a long frame is found once the stream is silent', async (t) => {
-		const sent = once(client, 'send');
-		const pending = client.read('40001,2');
-		await sent;
-		t.mock.timers.enable({ apis: ['setTimeout'] });
-		// FC 3 with a byte count of 0xf0 announces a 245-byte response, which never completes
-		client.on_data(Buffer.concat([hex('0103f0'), rtu_frame('0103041234abcd')]));
-		t.mock.timers.tick(50);
-		t.mock.timers.reset();
-		assert.deepEqual(await pending, hex('1234abcd'));
-	});
-
 	test('the silence option sets the silence', async (t) => {
 		const silent = await connect_client(fake.port, { rtu: true, silence: 10 });
 		const sent = once(silent, 'send');
@@ -958,14 +811,6 @@ describe('Modbus_Client RTU-over-TCP', () => {
 		t.mock.timers.reset();
 		assert.deepEqual(await pending, hex('1234abcd'));
 		close_client(silent);
-	});
-
-	test('an incomplete response is kept once the stream is silent', (t) => {
-		t.mock.timers.enable({ apis: ['setTimeout'] });
-		const partial = rtu_frame('0103041234abcd').subarray(0, 4);
-		client.on_data(partial);
-		t.mock.timers.tick(50);
-		assert.deepEqual(client.unprocessed_buffer, partial);
 	});
 
 	test('an exception response is 5 bytes', async () => {

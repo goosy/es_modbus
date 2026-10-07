@@ -8,6 +8,8 @@ import {
 	NEED_MORE, INVALID, UNKNOWN,
 	mbap_frame_length, rtu_request_length, rtu_response_length, split_frames, resync_frames,
 	DEFAULT_SILENCE_MS, silence_option,
+	BROADCAST_ID, check_unit_id, plan_read, plan_write, check_request,
+	encode_tcp_frame, encode_rtu_frame, Frame_Receiver,
 } from '../src/util.js';
 import { serial_settings, silence_time } from '../src/serial.js';
 import { hex, rtu_frame, tcp_frame } from './helpers.js';
@@ -19,6 +21,10 @@ describe('constants', () => {
 
 	test('DO_NOTHING is a no-op', () => {
 		assert.equal(DO_NOTHING(1, 2), undefined);
+	});
+
+	test('BROADCAST_ID is 0', () => {
+		assert.equal(BROADCAST_ID, 0);
 	});
 
 	test('MAX_QUANTITY follows the protocol limits', () => {
@@ -178,6 +184,179 @@ describe('parse_pdu_range', () => {
 		for (const value of invalid) {
 			assert.equal(parse_pdu_range(value), null, String(value));
 		}
+	});
+});
+
+describe('check_unit_id', () => {
+	test('accepts an integer in 0..255', () => {
+		for (const unit_id of [0, 1, 255]) check_unit_id(unit_id);
+	});
+
+	test('throws on anything else', () => {
+		for (const unit_id of [-1, 256, 1.5, '1', null, Number.NaN, true]) {
+			assert.throws(() => check_unit_id(unit_id), /Invalid unit ID/, String(unit_id));
+		}
+	});
+});
+
+describe('plan_read / plan_write', () => {
+	const read = (range, unit_id = 1) => plan_read(range, unit_id, false);
+	const write = (range, value, unit_id = 1) => plan_write(range, value, unit_id, false);
+	const request = (unit_id, func_code, address, length, data) => ({ unit_id, func_code, address, length, data });
+
+	test('a Modicon read takes the read function code of its table, with a default length of 1', () => {
+		const cases = [
+			[read('00001,16'), request(1, 1, 0, 16, null)],
+			[read('10011,3', 2), request(2, 2, 10, 3, null)],
+			[read('40001,73', 18), request(18, 3, 0, 73, null)],
+			[read('39999', 3), request(3, 4, 9998, 1, null)],
+			[read('400100'), request(1, 3, 99, 1, null)],
+		];
+		for (const [actual, expected] of cases) assert.deepEqual(actual, expected);
+	});
+
+	test('a Modicon write takes its function code from the shape of the value', () => {
+		const cases = [
+			[write('00173', true), request(1, 5, 172, 1, true)],
+			[write('00001', false, 4), request(4, 5, 0, 1, false)],
+			[write('00020,10', hex('cd01')), request(1, 15, 19, 10, hex('cd01'))],
+			[write('40002', 0x1234), request(1, 6, 1, 1, 0x1234)],
+			[write('40003', 65535), request(1, 6, 2, 1, 65535)],
+			[write('40002', hex('abcd')), request(1, 6, 1, 1, 0xabcd)],
+			[write('40002', hex('000a0102')), request(1, 16, 1, 2, hex('000a0102'))],
+			[write('40002,2', hex('000a0102')), request(1, 16, 1, 2, hex('000a0102'))],
+		];
+		for (const [actual, expected] of cases) assert.deepEqual(actual, expected);
+	});
+
+	test('a structured range is used as given', () => {
+		assert.deepEqual(read([3, 9, 2], 5), request(5, 3, 9, 2, null));
+		assert.deepEqual(read({ func_code: 1, pdu_addr: 0, length: 10 }), request(1, 1, 0, 10, null));
+		assert.deepEqual(write([6, 9, 1], 7, 5), request(5, 6, 9, 1, 7));
+		assert.deepEqual(write([16, 0, 2], hex('00010002')), request(1, 16, 0, 2, hex('00010002')));
+		assert.deepEqual(write({ func_code: 5, pdu_addr: 3, length: 1 }, true), request(1, 5, 3, 1, true));
+	});
+
+	test('the numbering base applies to a Modicon range only', () => {
+		assert.equal(plan_read('40001', 1, true).address, 1);
+		assert.equal(plan_write('40001', 1, 1, true).address, 1);
+		assert.equal(plan_read([3, 1, 1], 1, true).address, 1);
+	});
+
+	test('a length may reach the protocol limit, and a range may end at PDU address 65535', () => {
+		assert.equal(read('40001,125').length, 125);
+		assert.equal(read('00001,2000').length, 2000);
+		assert.equal(read('465536').address, 65535);
+		assert.equal(read([3, 65534, 2]).address, 65534);
+		assert.equal(write([5, 65535, 1], true).address, 65535);
+	});
+
+	test('rejects invalid range strings', () => {
+		for (const range of ['20001', '4001', '40001,0', '40000', 'abc', '', 40001, null, undefined]) {
+			assert.throws(() => read(range), /Invalid range format/, String(range));
+			assert.throws(() => write(range, 1), /Invalid range format/, String(range));
+		}
+	});
+
+	test('rejects invalid unit IDs', () => {
+		for (const unit_id of [-1, 256, 1.5, '1', null, Number.NaN]) {
+			assert.throws(() => read('40001', unit_id), /Invalid unit ID/, String(unit_id));
+			assert.throws(() => write('40001', 1, unit_id), /Invalid unit ID/, String(unit_id));
+		}
+	});
+
+	test('rejects read lengths over the protocol limit', () => {
+		assert.throws(() => read('00001,2001'), /Invalid length 2001 for function code 1/);
+		assert.throws(() => read('10001,2001'), /Invalid length 2001 for function code 2/);
+		assert.throws(() => read('40001,126'), /Invalid length 126 for function code 3/);
+		assert.throws(() => read('30001,126'), /Invalid length 126 for function code 4/);
+	});
+
+	test('a structured range over the limit gets the same message as a Modicon one', () => {
+		assert.throws(() => read([3, 0, 126]), /Invalid length 126 for function code 3/);
+		assert.throws(() => read([1, 0, 2001]), /Invalid length 2001 for function code 1/);
+		assert.throws(() => write([16, 0, 124], Buffer.alloc(248)), /Invalid length 124 for function code 16/);
+		assert.throws(() => write([15, 0, 1969], Buffer.alloc(247)), /Invalid length 1969 for function code 15/);
+	});
+
+	test('rejects a range past PDU address 65535', () => {
+		assert.throws(() => read('465536,2'), /Range exceeds address 65535/);
+		assert.throws(() => read([3, 65535, 2]), /Range exceeds address 65535/);
+		assert.throws(() => read([1, 64000, 2000]), /Range exceeds address 65535/);
+		assert.throws(() => write('465535', hex('000100020003')), /Range exceeds address 65535/);
+		assert.throws(() => write([16, 65535, 2], hex('00010002')), /Range exceeds address 65535/);
+	});
+
+	test('rejects write lengths over the protocol limit', () => {
+		assert.throws(() => write('00001,1969', Buffer.alloc(247)), /function code 15/);
+		assert.throws(() => write('40001,124', Buffer.alloc(248)), /function code 16/);
+		assert.throws(() => write('40001', Buffer.alloc(248)), /function code 16/);
+	});
+
+	test('rejects writes to read-only tables', () => {
+		assert.throws(() => write('10001', true), /Write operation not supported/);
+		assert.throws(() => write('30001', 1), /Write operation not supported/);
+	});
+
+	test('rejects invalid coil values', () => {
+		assert.throws(() => write('00001', 1), /Invalid value for coil write/);
+		assert.throws(() => write('00001', 'on'), /Invalid value for coil write/);
+		assert.throws(() => write('00001,2', true), /Invalid value for coil write/);
+		assert.throws(() => write('00001', Buffer.alloc(1)), /requires a ",N" length/);
+		assert.throws(() => write('00001,10', Buffer.alloc(1)), /Invalid buffer length for coil write/);
+		assert.throws(() => write('00001,8', Buffer.alloc(2)), /Invalid buffer length for coil write/);
+	});
+
+	test('rejects invalid register values', () => {
+		for (const value of [-1, 65536, 1.5, Number.NaN, 'x', true, null]) {
+			assert.throws(() => write('40001', value), /Invalid value for register write/, String(value));
+		}
+		assert.throws(() => write('40001,2', 5), /Invalid value for register write/);
+		assert.throws(() => write('40001,3', Buffer.alloc(4)), /Invalid buffer length for register write/);
+	});
+
+	test('rejects an odd-length register Buffer as a wrong buffer length', () => {
+		assert.throws(() => write('40001', Buffer.alloc(3)), /Invalid buffer length for register write/);
+	});
+
+	test('rejects structured ranges with invalid fields', () => {
+		const invalid = [
+			['3', 0, 1], [3, '0', 1], [3, 0, '1'], [true, 0, 1], [3n, 0, 1],
+			[7, 0, 1], [0, 0, 1], [3, -1, 1], [3, 65536, 1], [3, 1.5, 1],
+			[3, 0, 0], [3, 0, -1], [3, 0, 1.5],
+			{ func_code: 3, pdu_addr: 0 }, { func_code: 3, length: 1 },
+		];
+		for (const range of invalid) {
+			assert.throws(() => read(range), /Invalid range format/,
+				JSON.stringify(range, (k, v) => typeof v === 'bigint' ? `${v}n` : v));
+		}
+	});
+
+	test('rejects a structured function code that does not belong to the method', () => {
+		for (const func_code of [5, 6, 15, 16]) {
+			assert.throws(() => read([func_code, 0, 1]), /is not a read function/);
+		}
+		for (const func_code of [1, 2, 3, 4]) {
+			assert.throws(() => write([func_code, 0, 1], 1), /is not a write function/);
+		}
+		assert.throws(() => write([5, 0, 2], true));
+		assert.throws(() => write([6, 0, 2], 1));
+	});
+
+	test('a structured range is checked against the value of its function code', () => {
+		assert.throws(() => write([5, 0, 1], 1), /Invalid value for coil write/);
+		assert.throws(() => write([15, 0, 3], true), /Invalid value for coil write/);
+		assert.throws(() => write([15, 0, 9], Buffer.alloc(1)), /Invalid buffer length for coil write/);
+		assert.throws(() => write([6, 0, 1], 65536), /Invalid value for register write/);
+		assert.throws(() => write([6, 0, 1], Buffer.alloc(4)), /Invalid value for register write/);
+		assert.throws(() => write([16, 0, 2], 5), /Invalid value for register write/);
+		assert.throws(() => write([16, 0, 2], Buffer.alloc(2)), /Invalid buffer length for register write/);
+	});
+
+	test('a structured range does not take the Modicon type split', () => {
+		assert.throws(() => read(['40001']), /Invalid range format/);
+		assert.throws(() => read([3, 0, 1, 0]), /Invalid range format/);
+		assert.throws(() => read({ func_code: 3, pdu_addr: 0, length: 1n }), /Invalid range format/);
 	});
 });
 
@@ -693,5 +872,159 @@ describe('silence_time', () => {
 		assert.equal(silence_time(settings({ baud_rate: 38400 }), 0.5), 1.75);
 		assert.equal(silence_time(settings({ baud_rate: 115200 }), 1), 1.75);
 		assert.equal(silence_time(settings({ baud_rate: 115200 }), 2), 2);
+	});
+});
+
+describe('check_request', () => {
+	const request = (func_code, start_address, quantity, more = {}) => ({ func_code, start_address, quantity, ...more });
+
+	test('a valid request yields 0', () => {
+		const valid = [
+			request(3, 0, 1), request(1, 0, 2000), request(4, 0, 125),
+			request(3, 65534, 2), // ends at address 65535
+			request(5, 0, undefined, { data: 0xFF00 }), request(5, 0, undefined, { data: 0x0000 }),
+			request(6, 65535, undefined, { data: 0x1234 }),
+			request(15, 0, 10, { byte_count: 2 }), request(16, 0, 2, { byte_count: 4 }),
+		];
+		for (const r of valid) assert.equal(check_request(r), 0, JSON.stringify(r));
+	});
+
+	test('a quantity outside 1..MAX_QUANTITY yields 0x03', () => {
+		const invalid = [
+			request(1, 0, 0), request(1, 0, 2001), request(2, 0, 0), request(2, 0, 2001),
+			request(3, 0, 0), request(3, 0, 126), request(4, 0, 126), request(3, 0, 0x100),
+			// An over-limit FC 15/16 request with a matching byte count does not fit in a PDU
+			request(15, 0, 0, { byte_count: 0 }), request(15, 0, 1969, { byte_count: 247 }),
+			request(16, 0, 0, { byte_count: 0 }), request(16, 0, 124, { byte_count: 248 }),
+		];
+		for (const r of invalid) assert.equal(check_request(r), 0x03, JSON.stringify(r));
+	});
+
+	test('a byte count that does not match the quantity yields 0x03', () => {
+		assert.equal(check_request(request(15, 0, 10, { byte_count: 1 })), 0x03);
+		assert.equal(check_request(request(16, 0, 2, { byte_count: 2 })), 0x03);
+	});
+
+	test('an FC 5 value other than 0xFF00 or 0x0000 yields 0x03', () => {
+		assert.equal(check_request(request(5, 0, undefined, { data: 0x1234 })), 0x03);
+	});
+
+	test('a range past address 65535 yields 0x02', () => {
+		assert.equal(check_request(request(3, 0xffff, 2)), 0x02);
+		assert.equal(check_request(request(1, 0xfff0, 0x11)), 0x02);
+		assert.equal(check_request(request(16, 0xffff, 2, { byte_count: 4 })), 0x02);
+	});
+
+	test('the quantity is checked before the address', () => {
+		assert.equal(check_request(request(3, 0xffff, 0x80)), 0x03);
+	});
+
+	test('an unsupported function code yields 0', () => {
+		assert.equal(check_request(request(8, 0, 0)), 0);
+	});
+});
+
+describe('encode_tcp_frame / encode_rtu_frame', () => {
+	test('a TCP frame is an MBAP header with protocol ID 0, then the body', () => {
+		assert.deepEqual(encode_tcp_frame(0xbeef, hex('010300000001')), hex('beef 0000 0006 010300000001'));
+	});
+
+	test('an RTU frame is the body, then its CRC little-endian', () => {
+		assert.deepEqual(encode_rtu_frame(hex('010300000001')), hex('010300000001 840a'));
+		assert.deepEqual(encode_rtu_frame(hex('0110000000020400010002')), rtu_frame('0110000000020400010002'));
+	});
+});
+
+describe('Frame_Receiver', () => {
+	/** A receiver on mock timers, with a 50 ms silence, recording the frames handed over. */
+	function create(t, options) {
+		t.mock.timers.enable({ apis: ['setTimeout'] });
+		const frames = [];
+		const receiver = new Frame_Receiver({
+			frame_length: rtu_request_length,
+			silence: 50,
+			serial_line: false,
+			on_frame: (frame) => frames.push(frame.toString('hex')),
+			...options,
+		});
+		return { receiver, frames };
+	}
+	const good = rtu_frame('010300000001');
+	const unknown = rtu_frame('010800000000');
+
+	test('frames split across chunks or coalesced in one are each handed over', (t) => {
+		const { receiver, frames } = create(t, { frame_length: mbap_frame_length });
+		const a = tcp_frame(1, '010300000001');
+		const b = tcp_frame(2, '010300000001');
+		receiver.push(Buffer.concat([a, b.subarray(0, 5)]));
+		assert.deepEqual(frames, [a.toString('hex')]);
+		assert.deepEqual(receiver.rest, b.subarray(0, 5));
+		receiver.push(b.subarray(5));
+		assert.deepEqual(frames, [a, b].map((f) => f.toString('hex')));
+		assert.equal(receiver.rest.length, 0);
+	});
+
+	test('the bytes left are resynchronized once the stream is silent', (t) => {
+		const { receiver, frames } = create(t);
+		// FC 16 with a byte count of 0xf0 announces a 249-byte frame, which never completes
+		receiver.push(Buffer.concat([hex('011000000078f0'), good]));
+		t.mock.timers.tick(49);
+		assert.deepEqual(frames, []);
+		t.mock.timers.tick(1);
+		assert.deepEqual(frames, [good.toString('hex')]);
+	});
+
+	test('new bytes restart the silence', (t) => {
+		const { receiver } = create(t, { serial_line: true });
+		receiver.push(hex('0103'));
+		t.mock.timers.tick(40);
+		receiver.push(hex('00'));
+		t.mock.timers.tick(40);
+		assert.deepEqual(receiver.rest, hex('010300'));
+		t.mock.timers.tick(10);
+		assert.equal(receiver.rest.length, 0);
+	});
+
+	test('on a stream, what is left after a silence is kept, without a new timer', (t) => {
+		const { receiver, frames } = create(t);
+		receiver.push(good.subarray(0, 5));
+		t.mock.timers.tick(1000);
+		assert.deepEqual(receiver.rest, good.subarray(0, 5));
+		receiver.push(good.subarray(5));
+		assert.deepEqual(frames, [good.toString('hex')]);
+	});
+
+	test('on a serial line, what is left after a silence is discarded', (t) => {
+		const { receiver, frames } = create(t, { serial_line: true });
+		receiver.push(hex('0103'));
+		t.mock.timers.tick(50);
+		assert.equal(receiver.rest.length, 0);
+		receiver.push(good);
+		assert.deepEqual(frames, [good.toString('hex')]);
+	});
+
+	test('a request of unknown length is handed over at once on a stream', (t) => {
+		const { receiver, frames } = create(t);
+		receiver.push(Buffer.concat([good, unknown]));
+		assert.deepEqual(frames, [good, unknown].map((f) => f.toString('hex')));
+		assert.equal(receiver.rest.length, 0);
+	});
+
+	test('a request of unknown length is handed over once a serial line is silent', (t) => {
+		const { receiver, frames } = create(t, { serial_line: true });
+		receiver.push(unknown);
+		t.mock.timers.tick(49);
+		assert.deepEqual(frames, []);
+		t.mock.timers.tick(1);
+		assert.deepEqual(frames, [unknown.toString('hex')]);
+	});
+
+	test('clear() discards the bytes left and stops the silence timer', (t) => {
+		const { receiver, frames } = create(t);
+		receiver.push(Buffer.concat([hex('011000000078f0'), good]));
+		receiver.clear();
+		assert.equal(receiver.rest.length, 0);
+		t.mock.timers.tick(1000);
+		assert.deepEqual(frames, []);
 	});
 });

@@ -2,49 +2,27 @@ import { createServer } from 'node:net';
 import { EventEmitter } from 'node:events';
 import { serial_settings, silence_time, create_serial_port } from './serial.js';
 import {
-	MAX_QUANTITY, UNKNOWN, silence_option, modbus_crc16, parse_tcp_request, parse_rtu_request,
-	mbap_frame_length, rtu_request_length, split_frames, resync_frames,
+	BROADCAST_ID, check_unit_id, check_request, silence_option,
+	parse_tcp_request, parse_rtu_request, encode_tcp_frame, encode_rtu_frame,
+	mbap_frame_length, rtu_request_length, Frame_Receiver,
 } from './util.js';
 
-/**
- * Checks the data of a supported request as the Modbus application protocol does, before any
- * `vector` call. Returns the exception code to answer with, or 0 when the request is valid:
- * 0x03 (Illegal Data Value) for a quantity outside 1..MAX_QUANTITY, a byte count that does not
- * match the quantity, or an FC 5 value other than 0xFF00 / 0x0000; then 0x02 (Illegal Data
- * Address) for a range that ends past address 65535.
- */
-function check_request({ func_code, start_address, quantity, byte_count, data }) {
-	switch (func_code) {
-		case 5:
-			if (data !== 0xFF00 && data !== 0x0000) return 0x03;
-			return 0;
-		case 6:
-			return 0;
-		case 15:
-			if (byte_count !== Math.ceil(quantity / 8)) return 0x03;
-			break;
-		case 16:
-			if (byte_count !== quantity * 2) return 0x03;
-			break;
-	}
-	if (quantity < 1 || quantity > MAX_QUANTITY[func_code]) return 0x03;
-	if (start_address + quantity > 0x10000) return 0x02;
-	return 0;
-}
-
-const BROADCAST_ID = 0;
-const EMPTY = Buffer.alloc(0);
-
-/**
- * Moves a request of unknown length left in `rest` to `frames`, as one frame; returns what is
- * still left.
- */
-function take_unknown(frames, rest) {
-	if (rest.length === 0 || rtu_request_length(rest) !== UNKNOWN) return rest;
-	frames.push(rest);
-	return EMPTY;
-}
 const WRITE_FUNCTIONS = new Set([5, 6, 15, 16]);
+
+// An exception response: unit ID, function code with the exception bit, exception code
+function exception_response(unit_id, func_code, exception_code) {
+	return Buffer.from([unit_id, func_code | 0x80, exception_code]);
+}
+
+// A write response: unit ID, function code, address, then the value (FC 5 / 6) or quantity
+function write_response(unit_id, func_code, address, value) {
+	const buffer = Buffer.alloc(6);
+	buffer.writeUInt8(unit_id, 0);
+	buffer.writeUInt8(func_code, 1);
+	buffer.writeUInt16BE(address, 2);
+	buffer.writeUInt16BE(value, 4);
+	return buffer;
+}
 
 // Wraps an exception thrown by a `vector` function
 class Vector_Error extends Error {
@@ -137,9 +115,7 @@ export class Modbus_Server extends EventEmitter {
 		this.accept_all_units = false;
 		this.unit_ids = new Set();
 		for (const id of unit_ids) {
-			if (!Number.isInteger(id) || id < 0 || id > 255) {
-				throw new Error(`Invalid unit ID: ${id}. Must be an integer between 0 and 255.`);
-			}
+			check_unit_id(id);
 			this.unit_ids.add(id);
 		}
 	}
@@ -326,7 +302,7 @@ export class Modbus_Server extends EventEmitter {
 		serial_port.on('data', (data) => this.on_data(data));
 		serial_port.on('error', (error) => this.#transport_error(error));
 		serial_port.on('close', () => {
-			this.#keep(undefined, EMPTY);
+			this.#receivers.get(undefined)?.clear();
 			this.#end_run('stop');
 			this.emit('stop');
 		});
@@ -341,7 +317,8 @@ export class Modbus_Server extends EventEmitter {
 			socket.on('error', (error) => this.emit('socket_error', error));
 			socket.on('close', () => {
 				this.sockets.delete(socket);
-				this.#keep(socket, EMPTY);
+				this.#receivers.get(socket)?.clear();
+				this.#receivers.delete(socket);
 				this.emit('socket_disconnect', socket);
 			});
 		});
@@ -361,7 +338,7 @@ export class Modbus_Server extends EventEmitter {
 	}
 
 	_on_data(request, socket) {
-		const { tid, pid, unit_id, func_code } = request;
+		const { tid, unit_id, func_code } = request;
 		// RTU framing means a serial bus, over a serial port or over TCP
 		const serial_bus = this.protocol !== 'tcp';
 
@@ -376,11 +353,11 @@ export class Modbus_Server extends EventEmitter {
 		if (!this.is_valid_unit_id(unit_id)) {
 			// A slave on a serial bus stays silent for other addresses; on TCP the server
 			// answers as a gateway would: 0x0B, Gateway Target Device Failed To Respond
-			if (!serial_bus) this.send_exception_response(unit_id, func_code, 0x0B, socket, tid, pid);
+			if (!serial_bus) this.send_response(exception_response(unit_id, func_code, 0x0B), socket, tid);
 			return;
 		}
 
-		this.send_response(this.serve(request), socket, tid, pid);
+		this.send_response(this.serve(request), socket, tid);
 	}
 
 	/**
@@ -393,7 +370,7 @@ export class Modbus_Server extends EventEmitter {
 			if (!(error instanceof Vector_Error)) throw error;
 			// 0x04: Server Device Failure
 			this.emit('vector_error', error.cause, request);
-			return this.create_error_response(request.unit_id, request.func_code, 0x04);
+			return exception_response(request.unit_id, request.func_code, 0x04);
 		}
 	}
 
@@ -404,10 +381,8 @@ export class Modbus_Server extends EventEmitter {
      */
 	dispatch(request) {
 		const { unit_id, func_code, start_address, quantity, data } = request;
-		if (MAX_QUANTITY[func_code] !== undefined) {
-			const exception_code = check_request(request);
-			if (exception_code) return this.create_error_response(unit_id, func_code, exception_code);
-		}
+		const exception_code = check_request(request);
+		if (exception_code) return exception_response(unit_id, func_code, exception_code);
 
 		let response;
 		switch (func_code) {
@@ -432,7 +407,7 @@ export class Modbus_Server extends EventEmitter {
 				response = this.handle_write_multiple_registers(start_address, quantity, data, unit_id);
 				break;
 			default: // 0x01: Illegal Function
-				response = this.create_error_response(unit_id, func_code, 0x01);
+				response = exception_response(unit_id, func_code, 0x01);
 		}
 		return response;
 	}
@@ -445,61 +420,27 @@ export class Modbus_Server extends EventEmitter {
 		}
 	}
 
-	// Bytes received and not yet delimited, and their silence timers, by socket; the serial
-	// port's under `undefined`
-	#pending = new Map();
-	#silence_timers = new Map();
+	// The frame receivers, by socket; the serial port's under `undefined`
+	#receivers = new Map();
 	// The silence after which the bytes left are resolved, in ms
 	#silence;
 
-	get #frame_length() {
-		return this.protocol === 'tcp' ? mbap_frame_length : rtu_request_length;
-	}
-
 	/**
-	 * Keeps the bytes left for `socket` (the serial port when undefined), and with `arm`
-	 * restarts their silence timer; no bytes left clears both.
-	 */
-	#keep(socket, rest, arm = true) {
-		clearTimeout(this.#silence_timers.get(socket));
-		this.#silence_timers.delete(socket);
-		if (rest.length === 0) {
-			this.#pending.delete(socket);
-			return;
-		}
-		this.#pending.set(socket, rest);
-		if (arm) this.#silence_timers.set(socket, setTimeout(() => this.#on_silence(socket), this.#silence));
-	}
-
-	/**
-	 * Delimits the frames of a received chunk (see `spec-protocol.md`, "Frame delimiting") and
-	 * serves each. The bytes of an incomplete frame are kept for the next chunk.
+	 * Delimits the frames of a chunk received from `socket` (the serial port when undefined)
+	 * and serves each; the bytes of an incomplete frame are kept for the next chunk.
 	 */
 	on_data(chunk, socket) {
-		const pending = this.#pending.get(socket);
-		const buffer = pending ? Buffer.concat([pending, chunk]) : chunk;
-		const { frames, rest } = split_frames(buffer, this.#frame_length);
-		// A stream has no silence to wait for: a request of unknown length is what has been received
-		this.#keep(socket, this.protocol === 'rtu_over_tcp' ? take_unknown(frames, rest) : rest);
-		for (const frame of frames) this.#on_frame(frame, socket);
-	}
-
-	/**
-	 * The connection went silent with bytes left: a request of unknown length on a serial line
-	 * is served as one frame; anything else is resynchronized. What is still left is discarded
-	 * on a serial line and kept, without a new timer, on a TCP connection.
-	 */
-	#on_silence(socket) {
-		const rest = this.#pending.get(socket) ?? EMPTY;
-		const rtu = this.protocol !== 'tcp';
-		let frames = [];
-		let kept = rest;
-		if (!(rtu && rtu_request_length(rest) === UNKNOWN)) {
-			({ frames, rest: kept } = resync_frames(rest, this.#frame_length));
+		let receiver = this.#receivers.get(socket);
+		if (!receiver) {
+			receiver = new Frame_Receiver({
+				frame_length: this.protocol === 'tcp' ? mbap_frame_length : rtu_request_length,
+				silence: this.#silence,
+				serial_line: this.protocol === 'rtu',
+				on_frame: (frame) => this.#on_frame(frame, socket),
+			});
+			this.#receivers.set(socket, receiver);
 		}
-		if (rtu) kept = take_unknown(frames, kept);
-		this.#keep(socket, this.protocol === 'rtu' ? EMPTY : kept, false);
-		for (const frame of frames) this.#on_frame(frame, socket);
+		receiver.push(chunk);
 	}
 
 	#on_frame(frame, socket) {
@@ -515,27 +456,15 @@ export class Modbus_Server extends EventEmitter {
 	}
 
 	/**
-     * Frames a response PDU for the configured protocol and writes it to `socket`, or to the
-     * serial port when there is no `socket`.
-     */
-	send_response(response, socket, transaction_id, protocol_id) {
-		const data_length = response.length;
-		let full_response;
-		if (this.protocol === 'tcp') {
-			// Modbus TCP: add MBAP header
-			full_response = Buffer.alloc(data_length + 6);
-			full_response.writeUInt16BE(transaction_id, 0);
-			full_response.writeUInt16BE(protocol_id, 2);
-			full_response.writeUInt16BE(response.length, 4);
-			response.copy(full_response, 6, 0);
-		} else {
-			// Modbus RTU, over a serial port or TCP: add CRC
-			const crc = modbus_crc16(response);
-			full_response = Buffer.alloc(data_length + 2, response);
-			full_response.writeUInt16LE(crc, data_length);
-		}
-		this.emit('send', full_response);
-		(socket ?? this.serial_port).write(full_response);
+	 * Frames a response (unit ID + PDU) for the configured protocol and writes it to `socket`,
+	 * or to the serial port when there is no `socket`.
+	 */
+	send_response(response, socket, transaction_id) {
+		const frame = this.protocol === 'tcp'
+			? encode_tcp_frame(transaction_id, response)
+			: encode_rtu_frame(response);
+		this.emit('send', frame);
+		(socket ?? this.serial_port).write(frame);
 	}
 
 	handle_read_bits(function_code, start_address, quantity, unit_id) {
@@ -589,26 +518,12 @@ export class Modbus_Server extends EventEmitter {
 
 	handle_write_single_coil(address, value, unit_id) {
 		this.call_vector('set_coil', address, value === 0xFF00, unit_id);
-
-		const buffer = Buffer.alloc(6);
-		buffer.writeUInt8(unit_id, 0);
-		buffer.writeUInt8(5, 1);
-		buffer.writeUInt16BE(address, 2);
-		buffer.writeUInt16BE(value, 4);
-
-		return buffer;
+		return write_response(unit_id, 5, address, value);
 	}
 
 	handle_write_single_register(address, value, unit_id) {
 		this.call_vector('set_register', address, value, unit_id);
-
-		const buffer = Buffer.alloc(6);
-		buffer.writeUInt8(unit_id, 0);
-		buffer.writeUInt8(6, 1);
-		buffer.writeUInt16BE(address, 2);
-		buffer.writeUInt16BE(value, 4);
-
-		return buffer;
+		return write_response(unit_id, 6, address, value);
 	}
 
 	handle_write_multiple_coils(start_address, quantity, data, unit_id) {
@@ -618,14 +533,7 @@ export class Modbus_Server extends EventEmitter {
 			const value = (data[byteIndex] & (1 << bitIndex)) !== 0;
 			this.call_vector('set_coil', start_address + i, value, unit_id);
 		}
-
-		const buffer = Buffer.alloc(6);
-		buffer.writeUInt8(unit_id, 0);
-		buffer.writeUInt8(15, 1);
-		buffer.writeUInt16BE(start_address, 2);
-		buffer.writeUInt16BE(quantity, 4);
-
-		return buffer;
+		return write_response(unit_id, 15, start_address, quantity);
 	}
 
 	handle_write_multiple_registers(start_address, quantity, data, unit_id) {
@@ -633,26 +541,6 @@ export class Modbus_Server extends EventEmitter {
 			const value = data.readUInt16BE(i * 2);
 			this.call_vector('set_register', start_address + i, value, unit_id);
 		}
-
-		const buffer = Buffer.alloc(6);
-		buffer.writeUInt8(unit_id, 0);
-		buffer.writeUInt8(16, 1);
-		buffer.writeUInt16BE(start_address, 2);
-		buffer.writeUInt16BE(quantity, 4);
-
-		return buffer;
-	}
-
-	send_exception_response(unit_id, function_code, exception_code, socket, transaction_id, protocol_id) {
-		const response = this.create_error_response(unit_id, function_code, exception_code);
-		this.send_response(response, socket, transaction_id, protocol_id);
-	}
-
-	create_error_response(unit_id, function_code, exception_code) {
-		const buffer = Buffer.alloc(3);
-		buffer.writeUInt8(unit_id, 0);
-		buffer.writeUInt8(function_code | 0x80, 1);
-		buffer.writeUInt8(exception_code, 2);
-		return buffer;
+		return write_response(unit_id, 16, start_address, quantity);
 	}
 }

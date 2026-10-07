@@ -1,14 +1,11 @@
 import { Socket } from 'node:net';
 import { EventEmitter } from 'node:events';
 import {
-	TRANSACTION_START, DO_NOTHING, MAX_QUANTITY,
-	modbus_crc16, parse_modicon_range, parse_pdu_range,
-	parse_rtu_response, parse_tcp_response,
-	silence_option, mbap_frame_length, rtu_response_length, split_frames, resync_frames,
+	TRANSACTION_START, DO_NOTHING, BROADCAST_ID, plan_read, plan_write,
+	parse_rtu_response, parse_tcp_response, encode_tcp_frame, encode_rtu_frame,
+	silence_option, mbap_frame_length, rtu_response_length, Frame_Receiver,
 } from './util.js';
 import { serial_settings, silence_time, create_serial_port } from './serial.js';
-
-const BROADCAST_ID = 0;
 
 // Connection phases: the client is in exactly one at a time (see design.md, "Client connection state")
 const STATE = Object.freeze({
@@ -33,85 +30,6 @@ function number_option(name, value, fallback, valid) {
 const is_positive = (value) => Number.isFinite(value) && value > 0;
 const is_non_negative = (value) => Number.isFinite(value) && value >= 0;
 const is_count = (value) => Number.isInteger(value) && value >= 0;
-
-function check_unit_id(unit_id) {
-	if (!Number.isInteger(unit_id) || unit_id < 0 || unit_id > 255) {
-		throw new Error(`Invalid unit ID: ${unit_id}`);
-	}
-}
-
-/**
- * Checks a range against the quantity limit of its function code and the PDU address space.
- */
-function check_range(func_code, pdu_addr, length) {
-	if (!Number.isInteger(length) || length < 1 || length > MAX_QUANTITY[func_code]) {
-		throw new Error(`Invalid length ${length} for function code ${func_code}`);
-	}
-	if (pdu_addr + length > 0x10000) {
-		throw new Error('Range exceeds address 65535');
-	}
-}
-
-/**
- * Chooses the write function code and length for a Modicon range from the shape of `value`.
- */
-function infer_write(target, value) {
-	const { fs_write, fm_write } = target;
-	if (!fs_write || !fm_write) {
-		throw new Error('Write operation not supported for this table');
-	}
-	if (fs_write === 5) {
-		// Coils: a boolean is a single write, a Buffer is a multiple write
-		if (typeof value === 'boolean') return { func_code: 5, length: target.length ?? 1 };
-		if (Buffer.isBuffer(value)) {
-			// A bit count cannot be derived from a byte count, so ",N" is required
-			if (target.length === undefined) {
-				throw new Error('Coil Buffer write requires a ",N" length');
-			}
-			return { func_code: 15, length: target.length };
-		}
-		throw new Error('Invalid value for coil write');
-	}
-	// Holding registers: a number or a 2-byte Buffer of length 1 is a single write
-	const length = target.length ?? (Buffer.isBuffer(value) ? value.length / 2 : 1);
-	if (typeof value === 'number') return { func_code: 6, length };
-	if (Buffer.isBuffer(value)) {
-		return { func_code: value.length === 2 && length === 1 ? 6 : 16, length };
-	}
-	throw new Error('Invalid value for register write');
-}
-
-/**
- * Validates `value` against a write function code and length; returns the frame data.
- */
-function check_write_value(func_code, length, value) {
-	switch (func_code) {
-		case 5:
-			if (typeof value !== 'boolean' || length !== 1) {
-				throw new Error('Invalid value for coil write');
-			}
-			return value;
-		case 15:
-			if (!Buffer.isBuffer(value)) throw new Error('Invalid value for coil write');
-			if (value.length !== Math.ceil(length / 8)) {
-				throw new Error('Invalid buffer length for coil write');
-			}
-			return value;
-		case 6: {
-			const data = Buffer.isBuffer(value) && value.length === 2 ? value.readUInt16BE(0) : value;
-			if (length !== 1 || !Number.isInteger(data) || data < 0 || data > 0xFFFF) {
-				throw new Error('Invalid value for register write');
-			}
-			return data;
-		}
-		case 16:
-			if (!Buffer.isBuffer(value)) throw new Error('Invalid value for register write');
-			if (value.length % 2 !== 0 || value.length !== length * 2) {
-				throw new Error('Invalid buffer length for register write');
-			}
-			return value;
-	}
-}
 
 /**
  * Returns the value a write response echoes after its address: the coil value (FC 5), the
@@ -266,25 +184,29 @@ export class Modbus_Client extends EventEmitter {
 		this.keep_alive = number_option('keep_alive', options.keep_alive, 10000, is_non_negative);
 		this.#next_delay = reconnect_time;
 		this.#modicon_zero_based = options.modicon_zero_based ?? false;
-		// Bytes received and not yet delimited; emptied when the connection opens or closes
-		this.unprocessed_buffer = Buffer.alloc(0);
 		this.timeout = options.timeout ?? 1000;
 		this.delay = options.delay ?? 20;
 		this.turnaround = options.turnaround ?? 100;
-		const silence = silence_option(options.silence);
+		let silence = silence_option(options.silence);
 
 		if (typeof address === 'string') {
 			this.set_tcp(address, port);
 			this.protocol = rtu ? 'rtu_over_tcp' : 'tcp';
-			this.#silence = silence;
 		} else {
 			// The serial device path is `port`; the options are checked here, the port is
 			// created when first opened
 			const settings = serial_settings({ port, baud_rate, parity, data_bits, stop_bits });
 			this.set_serial(settings);
 			this.protocol = 'rtu';
-			this.#silence = silence_time(settings, silence);
+			silence = silence_time(settings, silence);
 		}
+		// Emptied when the connection opens or closes
+		this.#receiver = new Frame_Receiver({
+			frame_length: this.protocol === 'tcp' ? mbap_frame_length : rtu_response_length,
+			silence,
+			serial_line: this.protocol === 'rtu',
+			on_frame: (frame) => this.#on_frame(frame),
+		});
 
 		if (this.reconnect_time > 0) this.#start_connect();
 	}
@@ -314,7 +236,7 @@ export class Modbus_Client extends EventEmitter {
 
 	// The minimum gap before the next write; on a serial line never shorter than its silence
 	get #gap() {
-		return this.protocol === 'rtu' ? Math.max(this.delay, this.#silence) : this.delay;
+		return this.protocol === 'rtu' ? Math.max(this.delay, this.#receiver.silence) : this.delay;
 	}
 
 	sending() {
@@ -397,7 +319,7 @@ export class Modbus_Client extends EventEmitter {
 			// Armed by `#write`, when the frame is written
 			packet.on_timeout = () => {
 				// Bytes of a late answer must not prefix the next response
-				if (this.protocol !== 'tcp') this.#keep(Buffer.alloc(0));
+				if (this.protocol !== 'tcp') this.#receiver.clear();
 				end_transaction('rejected');
 				this.emit('timeout');
 				reject(new Error(`transaction 0x${packet.tid.toString(16)} timeout`));
@@ -418,61 +340,18 @@ export class Modbus_Client extends EventEmitter {
 		return promise;
 	}
 
-	/**
-     * Parses a `read` / `write` range by its type: a string is a Modicon range, an array or
-     * object is a structured PDU range. Throws when it is invalid.
-     */
-	resolve_range(range) {
-		const resolved = typeof range === 'string'
-			? parse_modicon_range(range, this.modicon_zero_based)
-			: parse_pdu_range(range);
-		if (!resolved) throw new Error('Invalid range format');
-		return resolved;
-	}
-
 	read(range, unit_id = 1) {
-		const target = this.resolve_range(range);
-		check_unit_id(unit_id);
-
-		let func_code;
-		let length;
-		if (typeof range === 'string') {
-			func_code = target.fm_read;
-			length = target.length ?? 1;
-		} else {
-			if (target.access !== 'read') {
-				throw new Error(`Function code ${target.func_code} is not a read function`);
-			}
-			({ func_code, length } = target);
-		}
-		check_range(func_code, target.pdu_addr, length);
-
-		return this.transact(unit_id, func_code, target.pdu_addr, null, length);
+		return this.transact(plan_read(range, unit_id, this.modicon_zero_based));
 	}
 
 	write(range, value, unit_id = 1) {
-		const target = this.resolve_range(range);
-		check_unit_id(unit_id);
-
-		let func_code;
-		let length;
-		if (typeof range === 'string') {
-			({ func_code, length } = infer_write(target, value));
-		} else {
-			if (target.access !== 'write') {
-				throw new Error(`Function code ${target.func_code} is not a write function`);
-			}
-			({ func_code, length } = target);
-		}
-		const data = check_write_value(func_code, length, value);
-		check_range(func_code, target.pdu_addr, length);
-
-		return this.transact(unit_id, func_code, target.pdu_addr, data, length);
+		return this.transact(plan_write(range, value, unit_id, this.modicon_zero_based));
 	}
 
-	transact(unit_id, func_code, address, data, length) {
+	// Sends a request made by plan_read() / plan_write()
+	transact({ unit_id, func_code, address, length, data }) {
 		const tid = this.get_tid();
-		const buffer = this.make_data_packet(tid, 0, unit_id, func_code, address, data, length);
+		const buffer = this.make_data_packet(tid, unit_id, func_code, address, data, length);
 		const packet = {
 			tid,
 			unit_id,
@@ -492,115 +371,71 @@ export class Modbus_Client extends EventEmitter {
 		return this.process_packet_transaction(packet);
 	}
 
+	// The frame receiver, created by the constructor
+	#receiver;
+
+	// Bytes received and not yet delimited
+	get unprocessed_buffer() {
+		return this.#receiver.rest;
+	}
+
 	/**
-	 * Delimits the frames of a received chunk (see `spec-protocol.md`, "Frame delimiting") and
-	 * settles the matching requests. The bytes of an incomplete frame are kept for the next chunk.
+	 * Delimits the frames of a received chunk and settles the matching requests. The bytes of an
+	 * incomplete frame are kept for the next chunk.
 	 */
 	on_data(chunk) {
-		const pending = this.unprocessed_buffer;
-		const buffer = pending.length > 0 ? Buffer.concat([pending, chunk]) : chunk;
-		const { frames, rest } = split_frames(buffer, this.#frame_length);
-		this.#keep(rest);
-		this.#on_frames(frames);
+		this.#receiver.push(chunk);
 	}
 
-	get #frame_length() {
-		return this.protocol === 'tcp' ? mbap_frame_length : rtu_response_length;
-	}
+	#on_frame(frame) {
+		const tcp = this.protocol === 'tcp';
+		const response = tcp ? parse_tcp_response(frame) : parse_rtu_response(frame);
+		this.emit('receive', response.buffer);
 
-	// The silence after which the bytes left are resynchronized, in ms, and its timer
-	#silence;
-	#silence_timer;
+		if (response.func_code === 0) return; // Invalid data
+		// Any valid frame, from any unit, proves the peer alive
+		this.#link_proved();
 
-	/** Keeps the bytes left, and with `arm` restarts their silence timer. */
-	#keep(rest, arm = true) {
-		clearTimeout(this.#silence_timer);
-		this.unprocessed_buffer = rest;
-		if (arm && rest.length > 0) this.#silence_timer = setTimeout(() => this.#on_silence(), this.#silence);
+		const packet = tcp ? this.get_packet(response.tid) : this.#current;
+		if (!packet || packet.status !== 'pending') return;
+		if (!tcp && !response_fits(packet, response)) return;
+
+		if (response.exception_code) {
+			packet.reject(new Error(`response error: ${response.exception_code}`));
+			return;
+		}
+
+		// A read resolves with its data, a write with whether the echo matches the request
+		packet.resolve(packet.echo === undefined ? response.data : echo_matches(packet, response));
 	}
 
 	/**
-	 * The connection went silent with bytes left: they are resynchronized; what is still left
-	 * is discarded on a serial line and kept, without a new timer, on a TCP connection.
+	 * Builds the frame of a request. `start_address` is the PDU address, already converted from
+	 * Modicon notation.
 	 */
-	#on_silence() {
-		const { frames, rest } = resync_frames(this.unprocessed_buffer, this.#frame_length);
-		this.#keep(this.protocol === 'rtu' ? Buffer.alloc(0) : rest, false);
-		this.#on_frames(frames);
-	}
-
-	#on_frames(frames) {
-		const tcp = this.protocol === 'tcp';
-		for (const frame of frames) {
-			const response = tcp ? parse_tcp_response(frame) : parse_rtu_response(frame);
-			this.emit('receive', response.buffer);
-
-			if (response.func_code === 0) continue; // Invalid data
-			// Any valid frame, from any unit, proves the peer alive
-			this.#link_proved();
-
-			const packet = tcp ? this.get_packet(response.tid) : this.#current;
-			if (!packet || packet.status !== 'pending') continue;
-			if (!tcp && !response_fits(packet, response)) continue;
-
-			if (response.exception_code) {
-				packet.reject(new Error(`response error: ${response.exception_code}`));
-				continue;
-			}
-
-			// A read resolves with its data, a write with whether the echo matches the request
-			packet.resolve(packet.echo === undefined ? response.data : echo_matches(packet, response));
-		}
-	}
-
-	// `start_address` is the PDU address, already converted from Modicon notation
-	make_data_packet(trans_id, proto_id, unit_id, func_code, start_address, data, length) {
-		let dataBytes = 0;
-		if (func_code === 15) { dataBytes = Math.ceil(length / 8); }
-		if (func_code === 16) { dataBytes = length * 2; }
-
-		let buffer_length = 12;
-		if (func_code === 15 || func_code === 16) { buffer_length = 13 + dataBytes; }
-
-		const tcp_buffer = Buffer.alloc(buffer_length);
-		tcp_buffer.writeUInt8(unit_id, 6);
-		tcp_buffer.writeUInt8(func_code, 7);
-		tcp_buffer.writeUInt16BE(start_address, 8);
+	make_data_packet(tid, unit_id, func_code, start_address, data, length) {
+		const multiple = func_code === 15 || func_code === 16;
+		const data_bytes = multiple ? data.length : 0;
+		const body = Buffer.alloc(multiple ? 7 + data_bytes : 6);
+		body.writeUInt8(unit_id, 0);
+		body.writeUInt8(func_code, 1);
+		body.writeUInt16BE(start_address, 2);
 		switch (func_code) {
-			case 1:
-			case 2:
-			case 3:
-			case 4:
-				tcp_buffer.writeUInt16BE(length, 10);
-				break;
 			case 5:
-				tcp_buffer.writeUInt16BE(data ? 0xFF00 : 0x0000, 10);
+				body.writeUInt16BE(data ? 0xFF00 : 0x0000, 4);
 				break;
 			case 6:
-				tcp_buffer.writeUInt16BE(data, 10);
+				body.writeUInt16BE(data, 4);
 				break;
-			case 15:
-			case 16:
-				tcp_buffer.writeInt16BE(length, 10);
-				tcp_buffer.writeUInt8(dataBytes, 12);
-				data.copy(tcp_buffer, 13, 0, dataBytes);
-				break;
+			default:
+				// FC 1..4: the quantity; FC 15 / 16: the quantity, byte count and data
+				body.writeUInt16BE(length, 4);
+				if (multiple) {
+					body.writeUInt8(data_bytes, 6);
+					data.copy(body, 7);
+				}
 		}
-
-		if (this.protocol === 'tcp') {
-			tcp_buffer.writeUInt16BE(trans_id, 0);
-			tcp_buffer.writeUInt16BE(proto_id, 2);
-			tcp_buffer.writeUInt16BE(buffer_length - 6, 4);
-			return tcp_buffer;
-		}
-
-		const rtu_data = tcp_buffer.subarray(6);
-		// rtu_buffer.length = tcp_buffer.lenght -6(MBA) + 2(CRC)
-		const rtu_buffer = Buffer.alloc(buffer_length - 4, rtu_data);
-		const crc = modbus_crc16(rtu_data);
-		// index_of_crc = rtu_buffer.lenght - 2(CRC)
-		rtu_buffer.writeUInt16LE(crc, buffer_length - 6);
-		return rtu_buffer;
+		return this.protocol === 'tcp' ? encode_tcp_frame(tid, body) : encode_rtu_frame(body);
 	}
 
 	connect() {
@@ -697,7 +532,7 @@ export class Modbus_Client extends EventEmitter {
 	#transport_opened() {
 		// A serial open that settles after disconnect() is closed by `_close`
 		if (!this.is_connecting) return;
-		this.#keep(Buffer.alloc(0));
+		this.#receiver.clear();
 		this.#timeouts = 0;
 		// Open as long as the last back-off delay, the connection has proved itself
 		if (this.#last_delay > 0) {
@@ -718,7 +553,7 @@ export class Modbus_Client extends EventEmitter {
      */
 	#transport_lost(error, emit_disconnect) {
 		this.abort_pending();
-		this.#keep(Buffer.alloc(0));
+		this.#receiver.clear();
 		clearTimeout(this.#stable_timer);
 		this.#stable_timer = null;
 		const was_disconnecting = this.is_disconnecting;
