@@ -42,14 +42,79 @@ The meaning of the unit ID depends on the transport, following common Modbus pra
 
 ### Frame delimiting
 
-- **TCP.** A single read may contain several coalesced frames. Receivers must split such a read
-  into individual frames using the MBAP length field and process each frame separately; a
-  malformed header ends the extraction.
-- **RTU (serial).** Frames are separated by a silent interval of at least 3.5 character times.
-  A receiver must collect incoming bytes until that silence elapses and treat the collected
-  bytes as one frame. A single read may carry only part of a frame.
-- **RTU-over-TCP.** A stream has no inter-frame silence; frame boundaries come from the length
-  implied by the function code and, where present, the byte count.
+A read carries no frame boundaries: it may hold several frames, or only part of one. Every
+transport (TCP, RTU-over-TCP, serial RTU) delimits frames by **length**, with one receive buffer
+per connection (each TCP socket, the serial port). Each read is appended to the buffer; then, as
+long as bytes remain, the length of the frame at the start of the buffer is worked out:
+
+- **Complete**: the frame is cut off and processed, and the rest of the buffer is examined in
+  turn. This splits coalesced frames.
+- **Incomplete**: the bytes stay in the buffer for the next read. This joins a frame split
+  across reads.
+- **Cannot be delimited**: the receiver resynchronizes. If no complete frame follows, only the
+  frame's first byte is discarded and delimiting resumes at the next byte, which may start a
+  frame not yet complete.
+
+**Resynchronizing.** Neither framing marks where a frame starts, so after an error the receiver
+searches byte by byte, from the byte after the failed frame's start, for the first offset where a
+complete frame can be delimited; an offset of unknown length does not count. The bytes before
+it are discarded and delimiting resumes there. The search is safe at any time: a stream is
+ordered, so no complete frame can follow a correct frame that is still incomplete, and finding
+one proves the bytes before it bad.
+
+The receiver also resynchronizes once the connection has been silent (below) with bytes left in
+the buffer. A correct frame always completes, so a frame that keeps waiting was announced by bad
+bytes, and a correct frame received behind it is found when the silence ends.
+
+The buffer is emptied when the connection closes. Discarded bytes are not frames and are not
+reported as received.
+
+**MBAP (TCP).** The length is `6 + ` the MBAP length field. A protocol ID other than `0`, or a
+length field outside `3..253`, cannot be delimited.
+
+**RTU (RTU-over-TCP and serial).** The length follows from the function code and, where present,
+the byte count, and differs by direction. Once the whole frame is received its CRC must be
+valid; a frame with an invalid CRC cannot be delimited.
+
+| Direction | Function code     | Frame length            |
+| --------- | ----------------- | ----------------------- |
+| request   | 1–6               | 8                       |
+| request   | 15, 16            | 9 + byte count (byte 6) |
+| request   | other, `1..127`   | unknown (see below)     |
+| response  | `> 127`           | 5 (exception response)  |
+| response  | 1–4               | 5 + byte count (byte 2) |
+| response  | 5, 6, 15, 16      | 8                       |
+
+Anything else (function code `0`, a request function code `> 127`, an unsupported response
+function code `1..127`), and any length beyond the RTU maximum of 256 bytes, cannot be
+delimited.
+
+A request whose length is unknown (an unsupported function code) is taken as one frame made of
+the bytes received so far: at once on RTU-over-TCP, and on a serial line once the line has been
+silent (below). If its CRC is valid it is answered with exception `0x01`; otherwise it is
+dropped.
+
+**Silence.** The silence is the `silence` option of the server or client, 50 ms by default. On a
+serial line it is at least 3.5 character times, so it never cuts a frame still being received:
+`max(3.5 character times, silence)`, where 3.5 character times is 1.75 ms above 19200 baud, as
+the Modbus serial line specification fixes it. A character time is (1 start bit + data bits +
+parity bit, if any + stop bits) / baud rate. Once the silence has elapsed with bytes left in the
+buffer:
+
+- a request of unknown length at the start of the buffer is taken as one frame (on a serial
+  line; RTU-over-TCP takes it at once);
+- otherwise the receiver resynchronizes, and delimits the frames that follow;
+- the bytes still left are discarded on a serial line, where the bytes of one frame are sent
+  back to back, and kept on a TCP connection, where a correct frame may be delayed by any
+  amount, for example by a retransmission.
+
+A longer silence suits a USB serial adapter with a high latency, or a gateway that forwards in
+large batches, such as a cellular one. A shorter one finds a frame stuck behind bad bytes sooner,
+which matters when the master's timeout is short; on TCP it does no harm, but searches more often
+in vain. The silence does not delimit frames. The operating system and USB serial adapters deliver bytes
+in chunks with millisecond latency, so a silence of 3.5 character times (1.75 ms above 19200
+baud) cannot be measured reliably from a read, while master/slave polling keeps a single frame
+in flight, which makes delimiting by length unambiguous.
 
 ## Range notation
 

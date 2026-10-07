@@ -175,7 +175,7 @@ describe(`Modbus RTU server on ${SERVER_PATH}, raw peer on ${PEER_PATH}`, { skip
 		assert.equal(response.length, 0);
 	});
 
-	test('a frame split across reads is reassembled', { todo: 'design.md RTU / serial: no RTU frame delimiting' }, async () => {
+	test('a frame split across reads is reassembled', async () => {
 		const frame = rtu_frame('010300000001');
 		const response = collect(peer, 7, 500);
 		peer.write(frame.subarray(0, 3));
@@ -185,7 +185,8 @@ describe(`Modbus RTU server on ${SERVER_PATH}, raw peer on ${PEER_PATH}`, { skip
 		assert.equal(as_hex(await response), as_hex(rtu_frame('0103020000')));
 	});
 
-	test('two frames in one read are both answered', { todo: 'design.md RTU / serial: no RTU frame delimiting' }, async () => {
+	test('two frames in one read are both answered', async () => {
+		memory.unit(1).holding.set([0, 0], 0);
 		const response = await exchange(peer, Buffer.concat([
 			rtu_frame('010300000001'), rtu_frame('010300010001'),
 		]), 14);

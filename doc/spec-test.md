@@ -29,9 +29,9 @@ missing or older than any file in `src/`.
 | File                  | Covers                                                                    |
 | --------------------- | ------------------------------------------------------------------------- |
 | `test/helpers.js`     | Shared fixtures: in-memory `vector`, RTU / MBAP frame builders, fake TCP slave, raw TCP peer, server and client set-up. Not a test file. |
-| `test/util.test.js`   | Constants, `modbus_crc16`, `parse_modicon_range`, the RTU and TCP request / response parsers. |
+| `test/util.test.js`   | Constants, `modbus_crc16`, `parse_modicon_range`, the RTU and TCP request / response parsers, the frame length functions and `split_frames`. |
 | `test/client.test.js` | `Modbus_Client` against a fake TCP slave: construction, argument validation, frames on the wire, transaction matching, timeouts, pacing, queue overflow, events, connection and reconnect, connection phase transitions (TCP and serial), RTU-over-TCP framing. |
-| `test/server.test.js` | `Modbus_Server`: construction, unit IDs, every function code with TCP and RTU framing (through a fake socket / fake serial port), exceptions, events, and the TCP lifecycle on a real socket. |
+| `test/server.test.js` | `Modbus_Server`: construction, unit IDs, every function code with TCP and RTU framing (through a fake socket / fake serial port), frame delimiting, exceptions, events, and the TCP lifecycle on a real socket. |
 | `test/tcp.test.js`    | End to end: `Modbus_Client` against `Modbus_Server` over Modbus TCP on loopback. |
 | `test/serial.test.js` | End to end over a serial port pair: `Modbus_Server` in RTU mode against a raw serial peer, and `Modbus_Client` in RTU mode against `Modbus_Server`. |
 | `test/bundle.test.js` | The build output `dist/modbus.js`: it exports exactly `Modbus_Client` and `Modbus_Server`, `package.json` `exports` points at it, `serialport` is bundled with no outside import and no `__dirname`, `prebuilds/` and `THIRD_PARTY_LICENSES` are in place, importing it does not load the native binding while the first serial `start()` does, and the bundled classes complete a TCP round trip. |

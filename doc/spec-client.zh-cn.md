@@ -30,6 +30,7 @@ const client = new Modbus_Client(null, { port: 'COM3', baud_rate: 19200, parity:
 | `timeout`        | `1000`  | 单事务响应超时，毫秒。到期时请求被拒绝，并发出 `timeout` 事件。         |
 | `delay`          | `20`    | 连续两次帧写入之间的最小间隔，毫秒（发送节流）。                        |
 | `reconnect_time` | `10000` | TCP 和 RTU-over-TCP 的重连延迟，毫秒。`> 0` 同时使构造函数立即连接（串口则打开端口）；`0` 禁用定时重连。二者都只在 `enable_reconnect` 为真时生效。 |
+| `silence`        | `50`    | 静默时间（ms），超过之后处理不完整帧留下的残留字节（见 `spec-protocol.zh-cn.md` 的“帧的界定”）。必须是有限的正数（否则抛出 `Invalid silence`）。串口上至少为 3.5 个字符时间（19200 波特以上为 1.75 ms）。 |
 | `modicon_zero_based` | `false` | `true` 选择 0 起始的 Modicon 点号编号（见下文）。 |
 | `baud_rate`      | `9600`  | 串口波特率，正整数（否则抛出 `Invalid baud rate`）。 |
 | `parity`         | `'none'` | 串口校验位：`'none'`、`'odd'`、`'even'`，或 `0` = 无、`1` = 奇、`2` = 偶。其他值抛出 `Invalid parity`。 |

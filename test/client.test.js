@@ -54,6 +54,13 @@ function split_frames(frames) {
 const without_tid = (frame) => frame.subarray(2).toString('hex');
 
 describe('Modbus_Client construction', () => {
+	test('an invalid silence throws at construction', () => {
+		for (const silence of [0, -5, '50']) {
+			assert.throws(() => new Modbus_Client(HOST, { reconnect_time: 0, silence }), /Invalid silence/);
+			assert.throws(() => new Modbus_Client(null, { port: 'COM9', reconnect_time: 0, silence }), /Invalid silence/);
+		}
+	});
+
 	test('a string address selects TCP; rtu: true selects RTU-over-TCP', () => {
 		const tcp = new Modbus_Client(HOST, { reconnect_time: 0 });
 		assert.equal(tcp.protocol, 'tcp');
@@ -392,6 +399,27 @@ describe('Modbus_Client transactions', () => {
 	test('read resolves with the raw payload bytes', async () => {
 		responder = (request) => reply_to(request, '0103041234abcd');
 		assert.deepEqual(await client.read('40001,2'), hex('1234abcd'));
+	});
+
+	test('a response split across reads is reassembled', async () => {
+		responder = () => undefined;
+		const sent = once(client, 'send'); // emitted synchronously on a connected client
+		const pending = client.read('40001', 1);
+		const [request] = await sent;
+		const response = reply_to(request, '0103020007');
+		client.on_data(response.subarray(0, 4));
+		client.on_data(response.subarray(4));
+		assert.deepEqual(await pending, hex('0007'));
+	});
+
+	test('coalesced responses each settle their request', async () => {
+		responder = () => undefined;
+		const sent = [];
+		client.on('send', (buffer) => sent.push(buffer));
+		const pending = [client.read('40001', 1), client.read('40002', 1)];
+		while (sent.length < 2) await sleep(5);
+		client.on_data(Buffer.concat([reply_to(sent[0], '0103020001'), reply_to(sent[1], '0103020002')]));
+		assert.deepEqual(await Promise.all(pending), [hex('0001'), hex('0002')]);
 	});
 
 	test('read of coils resolves with packed bytes', async () => {
@@ -765,6 +793,18 @@ describe('Modbus_Client serial port', () => {
 		assert.deepEqual(await pending, hex('0007'));
 	});
 
+	test('leftover bytes are discarded once the line is silent', async (t) => {
+		const client = serial_client({ reconnect_time: 0 });
+		await client.connect();
+		t.mock.timers.enable({ apis: ['setTimeout'] });
+		created[0].emit('data', hex('0103'));
+		assert.deepEqual(client.unprocessed_buffer, hex('0103'));
+		t.mock.timers.tick(50);
+		assert.equal(client.unprocessed_buffer.length, 0);
+		t.mock.timers.reset();
+		await client.disconnect();
+	});
+
 	test('connect() creates and opens the port once for concurrent callers', async () => {
 		const client = serial_client({ reconnect_time: 0 });
 		await Promise.all([client.connect(), client.connect()]);
@@ -852,6 +892,60 @@ describe('Modbus_Client RTU-over-TCP', () => {
 	test('resolves with the payload of an RTU response', async () => {
 		responder = () => rtu_frame('0103041234abcd');
 		assert.deepEqual(await client.read('40001,2'), hex('1234abcd'));
+	});
+
+	test('an RTU response split across reads is reassembled', async () => {
+		const sent = once(client, 'send');
+		const pending = client.read('40001,2');
+		await sent;
+		const response = rtu_frame('0103041234abcd');
+		client.on_data(response.subarray(0, 2));
+		client.on_data(response.subarray(2, 6));
+		client.on_data(response.subarray(6));
+		assert.deepEqual(await pending, hex('1234abcd'));
+	});
+
+	test('a response behind bytes that announce a long frame is found once the stream is silent', async (t) => {
+		const sent = once(client, 'send');
+		const pending = client.read('40001,2');
+		await sent;
+		t.mock.timers.enable({ apis: ['setTimeout'] });
+		// FC 3 with a byte count of 0xf0 announces a 245-byte response, which never completes
+		client.on_data(Buffer.concat([hex('0103f0'), rtu_frame('0103041234abcd')]));
+		t.mock.timers.tick(50);
+		t.mock.timers.reset();
+		assert.deepEqual(await pending, hex('1234abcd'));
+	});
+
+	test('the silence option sets the silence', async (t) => {
+		const silent = await connect_client(fake.port, { rtu: true, silence: 10 });
+		const sent = once(silent, 'send');
+		const pending = silent.read('40001,2');
+		await sent;
+		t.mock.timers.enable({ apis: ['setTimeout'] });
+		silent.on_data(Buffer.concat([hex('0103f0'), rtu_frame('0103041234abcd')]));
+		t.mock.timers.tick(9);
+		assert.equal(silent.unprocessed_buffer.length, 12);
+		t.mock.timers.tick(1);
+		t.mock.timers.reset();
+		assert.deepEqual(await pending, hex('1234abcd'));
+		close_client(silent);
+	});
+
+	test('an incomplete response is kept once the stream is silent', (t) => {
+		t.mock.timers.enable({ apis: ['setTimeout'] });
+		const partial = rtu_frame('0103041234abcd').subarray(0, 4);
+		client.on_data(partial);
+		t.mock.timers.tick(50);
+		assert.deepEqual(client.unprocessed_buffer, partial);
+	});
+
+	test('an exception response is 5 bytes', async () => {
+		const sent = once(client, 'send');
+		const pending = client.read('40001,2');
+		await sent;
+		client.on_data(rtu_frame('018302'));
+		await assert.rejects(pending, /response error: 2/);
 	});
 
 	test('a broadcast write resolves with true once sent, without waiting for a response', async () => {

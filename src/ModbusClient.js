@@ -4,8 +4,9 @@ import {
 	TRANSACTION_START, DO_NOTHING, MAX_QUANTITY,
 	modbus_crc16, parse_modicon_range, parse_pdu_range,
 	parse_rtu_response, parse_tcp_response,
+	silence_option, mbap_frame_length, rtu_response_length, split_frames, resync_frames,
 } from './util.js';
-import { serial_settings, create_serial_port } from './serial.js';
+import { serial_settings, silence_time, create_serial_port } from './serial.js';
 
 const BROADCAST_ID = 0;
 
@@ -220,18 +221,23 @@ export class Modbus_Client extends EventEmitter {
 		} = options;
 		this.reconnect_time = reconnect_time;
 		this.#modicon_zero_based = options.modicon_zero_based ?? false;
+		// Bytes received and not yet delimited; emptied when the connection opens or closes
 		this.unprocessed_buffer = Buffer.alloc(0);
 		this.timeout = options.timeout ?? 1000;
 		this.delay = options.delay ?? 20;
+		const silence = silence_option(options.silence);
 
 		if (typeof address === 'string') {
 			this.set_tcp(address, port);
 			this.protocol = rtu ? 'rtu_over_tcp' : 'tcp';
+			this.#silence = silence;
 		} else {
 			// The serial device path is `port`; the options are checked here, the port is
 			// created when first opened
-			this.set_serial(serial_settings({ port, baud_rate, parity, data_bits, stop_bits }));
+			const settings = serial_settings({ port, baud_rate, parity, data_bits, stop_bits });
+			this.set_serial(settings);
 			this.protocol = 'rtu';
+			this.#silence = silence_time(settings, silence);
 		}
 
 		if (this.reconnect_time > 0) this.#start_connect();
@@ -402,12 +408,47 @@ export class Modbus_Client extends EventEmitter {
 		return this.process_packet_transaction(packet);
 	}
 
-	on_data(buffer) {
-		const responses = this.protocol !== 'tcp'
-			? parse_rtu_response(buffer)
-			: parse_tcp_response(buffer);
+	/**
+	 * Delimits the frames of a received chunk (see `spec-protocol.md`, "Frame delimiting") and
+	 * settles the matching requests. The bytes of an incomplete frame are kept for the next chunk.
+	 */
+	on_data(chunk) {
+		const pending = this.unprocessed_buffer;
+		const buffer = pending.length > 0 ? Buffer.concat([pending, chunk]) : chunk;
+		const { frames, rest } = split_frames(buffer, this.#frame_length);
+		this.#keep(rest);
+		this.#on_frames(frames);
+	}
 
-		for (const response of responses) {
+	get #frame_length() {
+		return this.protocol === 'tcp' ? mbap_frame_length : rtu_response_length;
+	}
+
+	// The silence after which the bytes left are resynchronized, in ms, and its timer
+	#silence;
+	#silence_timer;
+
+	/** Keeps the bytes left, and with `arm` restarts their silence timer. */
+	#keep(rest, arm = true) {
+		clearTimeout(this.#silence_timer);
+		this.unprocessed_buffer = rest;
+		if (arm && rest.length > 0) this.#silence_timer = setTimeout(() => this.#on_silence(), this.#silence);
+	}
+
+	/**
+	 * The connection went silent with bytes left: they are resynchronized; what is still left
+	 * is discarded on a serial line and kept, without a new timer, on a TCP connection.
+	 */
+	#on_silence() {
+		const { frames, rest } = resync_frames(this.unprocessed_buffer, this.#frame_length);
+		this.#keep(this.protocol === 'rtu' ? Buffer.alloc(0) : rest, false);
+		this.#on_frames(frames);
+	}
+
+	#on_frames(frames) {
+		const tcp = this.protocol === 'tcp';
+		for (const frame of frames) {
+			const response = tcp ? parse_tcp_response(frame) : parse_rtu_response(frame);
 			this.emit('receive', response.buffer);
 
 			if (response.func_code === 0) continue; // Invalid data
@@ -539,6 +580,7 @@ export class Modbus_Client extends EventEmitter {
 	#transport_opened() {
 		// A serial open that settles after disconnect() is closed by `_close`
 		if (!this.is_connecting) return;
+		this.#keep(Buffer.alloc(0));
 		this.#state = STATE.CONNECTED;
 		this.emit('connect');
 		for (const { on_connect } of this.#connect_waiters.splice(0)) on_connect();
@@ -554,6 +596,7 @@ export class Modbus_Client extends EventEmitter {
      */
 	#transport_lost(error, emit_disconnect) {
 		this.abort_pending();
+		this.#keep(Buffer.alloc(0));
 		const was_disconnecting = this.is_disconnecting;
 		// Taken before any event, so a listener that connects again keeps its own callbacks
 		const connect_waiters = this.#connect_waiters.splice(0);

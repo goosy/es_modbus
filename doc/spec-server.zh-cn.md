@@ -20,6 +20,7 @@ server.start();
 | `host`    | `'0.0.0.0'` | 绑定地址（仅 TCP）。                                                          |
 | `port`    | `502`       | `number` → 监听该 TCP 端口。`string` → 作为串口设备路径打开。其他值抛出 `Invalid port`；不接受串口实例。 |
 | `rtu`     | `false`     | `port` 为 `number` 时，在接受的 TCP 套接字上使用 RTU 帧格式（RTU-over-TCP）。串口忽略此项。 |
+| `silence` | `50`        | 静默时间（ms），超过之后处理不完整帧留下的残留字节（见 `spec-protocol.zh-cn.md` 的“帧的界定”）。必须是有限的正数（否则抛出 `Invalid silence`）。串口上至少为 3.5 个字符时间（19200 波特以上为 1.75 ms）。 |
 | `unit_id` | 全部        | 应答哪些 Modbus 单元 ID；省略时为所有 ID（见 `set_unit_ids`）。              |
 | `baud_rate` | `9600`    | 串口波特率，正整数（否则抛出 `Invalid baud rate`）。 |
 | `parity`  | `'none'`    | 串口校验位：`'none'`、`'odd'`、`'even'`，或 `0` = 无、`1` = 奇、`2` = 偶。其他值抛出 `Invalid parity`。 |

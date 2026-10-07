@@ -29,6 +29,7 @@ const client = new Modbus_Client(null, { port: 'COM3', baud_rate: 19200, parity:
 | `timeout`        | `1000`  | Per-transaction response timeout, ms. On expiry the request rejects and `timeout` is emitted. |
 | `delay`          | `20`    | Minimum gap between consecutive frame writes, ms (send pacing).       |
 | `reconnect_time` | `10000` | Reconnect delay for TCP and RTU-over-TCP, ms. `> 0` also makes the constructor connect immediately (for serial, open the port); `0` disables the timed reconnect. Both apply only while `enable_reconnect` is true. |
+| `silence`        | `50`    | Silence in ms after which the bytes left of an incomplete frame are resolved (see "Frame delimiting" in `spec-protocol.md`). A finite positive number (else `Invalid silence`). On a serial port at least 3.5 character times (1.75 ms above 19200 baud). |
 | `modicon_zero_based` | `false` | `true` selects 0-based Modicon point numbering (see below). |
 | `baud_rate`      | `9600`  | Serial baud rate, a positive integer (else `Invalid baud rate`). |
 | `parity`         | `'none'` | Serial parity: `'none'`, `'odd'`, `'even'`, or `0` = none, `1` = odd, `2` = even. Anything else throws `Invalid parity`. |

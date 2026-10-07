@@ -18,6 +18,7 @@ server.start();
 | `host`    | `'0.0.0.0'` | Bind address (TCP only).                                                    |
 | `port`    | `502`       | `number` → listen on that TCP port. `string` → open as a serial device path. Anything else throws `Invalid port`; a port instance is not accepted. |
 | `rtu`     | `false`     | With a `number` port, use RTU framing on the accepted TCP sockets (RTU-over-TCP). Ignored for serial ports. |
+| `silence` | `50`        | Silence in ms after which the bytes left of an incomplete frame are resolved (see "Frame delimiting" in `spec-protocol.md`). A finite positive number (else `Invalid silence`). On a serial port at least 3.5 character times (1.75 ms above 19200 baud). |
 | `unit_id` | all         | Which Modbus unit IDs to answer; every ID when omitted (see `set_unit_ids`). |
 | `baud_rate` | `9600`    | Serial baud rate, a positive integer (else `Invalid baud rate`). |
 | `parity`  | `'none'`    | Serial parity: `'none'`, `'odd'`, `'even'`, or `0` = none, `1` = odd, `2` = even. Anything else throws `Invalid parity`. |

@@ -5,7 +5,11 @@ import {
 	modbus_crc16, parse_modicon_range, parse_pdu_range,
 	parse_rtu_request, parse_rtu_response,
 	parse_tcp_request, parse_tcp_response,
+	NEED_MORE, INVALID, UNKNOWN,
+	mbap_frame_length, rtu_request_length, rtu_response_length, split_frames, resync_frames,
+	DEFAULT_SILENCE_MS, silence_option,
 } from '../src/util.js';
+import { serial_settings, silence_time } from '../src/serial.js';
 import { hex, rtu_frame, tcp_frame } from './helpers.js';
 
 describe('constants', () => {
@@ -178,17 +182,11 @@ describe('parse_pdu_range', () => {
 });
 
 describe('parse_rtu_request', () => {
-	test('returns a single-element array', () => {
-		const result = parse_rtu_request(rtu_frame('010300000002'));
-		assert.ok(Array.isArray(result));
-		assert.equal(result.length, 1);
-	});
-
 	for (const func_code of [1, 2, 3, 4]) {
 		test(`FC ${func_code} read request`, () => {
 			const body = Buffer.from([0x11, func_code, 0x00, 0x6b, 0x00, 0x03]);
 			const frame = rtu_frame(body);
-			const [request] = parse_rtu_request(frame);
+			const request = parse_rtu_request(frame);
 			assert.equal(request.tid, TRANSACTION_START);
 			assert.equal(request.unit_id, 0x11);
 			assert.equal(request.func_code, func_code);
@@ -199,21 +197,21 @@ describe('parse_rtu_request', () => {
 	}
 
 	test('FC 5 write single coil', () => {
-		const [request] = parse_rtu_request(rtu_frame('110500acff00'));
+		const request = parse_rtu_request(rtu_frame('110500acff00'));
 		assert.equal(request.func_code, 5);
 		assert.equal(request.start_address, 0xac);
 		assert.equal(request.data, 0xff00);
 	});
 
 	test('FC 6 write single register', () => {
-		const [request] = parse_rtu_request(rtu_frame('110600010003'));
+		const request = parse_rtu_request(rtu_frame('110600010003'));
 		assert.equal(request.func_code, 6);
 		assert.equal(request.start_address, 1);
 		assert.equal(request.data, 3);
 	});
 
 	test('FC 15 write multiple coils', () => {
-		const [request] = parse_rtu_request(rtu_frame('110f0013000a02cd01'));
+		const request = parse_rtu_request(rtu_frame('110f0013000a02cd01'));
 		assert.equal(request.func_code, 15);
 		assert.equal(request.start_address, 0x13);
 		assert.equal(request.quantity, 10);
@@ -222,7 +220,7 @@ describe('parse_rtu_request', () => {
 	});
 
 	test('FC 16 write multiple registers', () => {
-		const [request] = parse_rtu_request(rtu_frame('1110000100020400 0a0102'));
+		const request = parse_rtu_request(rtu_frame('1110000100020400 0a0102'));
 		assert.equal(request.func_code, 16);
 		assert.equal(request.start_address, 1);
 		assert.equal(request.quantity, 2);
@@ -233,54 +231,54 @@ describe('parse_rtu_request', () => {
 	test('rejects a bad CRC', () => {
 		const frame = rtu_frame('010300000002');
 		frame[frame.length - 1] ^= 0xff;
-		assert.equal(parse_rtu_request(frame)[0].func_code, 0);
+		assert.equal(parse_rtu_request(frame).func_code, 0);
 	});
 
 	test('rejects a PDU length that does not match the function code', () => {
 		for (const body of ['01030000000200', '0105000000', '01060000000100', '010f0000000a02cd', '0110000000010200']) {
-			assert.equal(parse_rtu_request(rtu_frame(body))[0].func_code, 0, body);
+			assert.equal(parse_rtu_request(rtu_frame(body)).func_code, 0, body);
 		}
 	});
 
 	test('rejects a multiple write with too short a PDU', () => {
-		assert.equal(parse_rtu_request(rtu_frame('010f00000001'))[0].func_code, 0);
+		assert.equal(parse_rtu_request(rtu_frame('010f00000001')).func_code, 0);
 	});
 
 	test('rejects unsupported function codes', () => {
 		for (const func_code of [0, 7, 8, 17, 0x83]) {
 			const body = Buffer.from([1, func_code, 0, 0, 0, 1]);
-			assert.equal(parse_rtu_request(rtu_frame(body))[0].func_code, 0, `FC ${func_code}`);
+			assert.equal(parse_rtu_request(rtu_frame(body)).func_code, 0, `FC ${func_code}`);
 		}
 	});
 
 	test('an unsupported function code with a valid CRC is reported as illegal_function', () => {
-		assert.equal(parse_rtu_request(rtu_frame('010800000000'))[0].illegal_function, 8);
-		assert.equal(parse_rtu_request(rtu_frame('012b0e01'))[0].illegal_function, 0x2b);
-		assert.equal(parse_rtu_request(rtu_frame('010300000001'))[0].illegal_function, undefined);
+		assert.equal(parse_rtu_request(rtu_frame('010800000000')).illegal_function, 8);
+		assert.equal(parse_rtu_request(rtu_frame('012b0e01')).illegal_function, 0x2b);
+		assert.equal(parse_rtu_request(rtu_frame('010300000001')).illegal_function, undefined);
 	});
 
 	test('no illegal_function for a bad CRC, a code 0 or a code >= 0x80', () => {
 		const frame = rtu_frame('010800000000');
 		frame[frame.length - 1] ^= 0xff;
-		assert.equal(parse_rtu_request(frame)[0].illegal_function, undefined);
+		assert.equal(parse_rtu_request(frame).illegal_function, undefined);
 		for (const body of ['010000000001', '018300000001']) {
-			assert.equal(parse_rtu_request(rtu_frame(body))[0].illegal_function, undefined, body);
+			assert.equal(parse_rtu_request(rtu_frame(body)).illegal_function, undefined, body);
 		}
 	});
 
 	test('rejects a frame that is too short or too long', () => {
-		assert.deepEqual(parse_rtu_request(hex('01030000')), [
-			{ tid: TRANSACTION_START, func_code: 0, buffer: hex('01030000') },
-		]);
+		assert.deepEqual(parse_rtu_request(hex('01030000')), {
+			tid: TRANSACTION_START, func_code: 0, buffer: hex('01030000'),
+		});
 		const long = Buffer.alloc(256);
-		assert.equal(parse_rtu_request(long)[0].func_code, 0);
+		assert.equal(parse_rtu_request(long).func_code, 0);
 	});
 });
 
 describe('parse_rtu_response', () => {
 	test('FC 3 read response', () => {
 		const frame = rtu_frame('1103040001000a');
-		const [response] = parse_rtu_response(frame);
+		const response = parse_rtu_response(frame);
 		assert.equal(response.tid, TRANSACTION_START);
 		assert.equal(response.unit_id, 0x11);
 		assert.equal(response.func_code, 3);
@@ -293,70 +291,70 @@ describe('parse_rtu_response', () => {
 	for (const func_code of [1, 2, 4]) {
 		test(`FC ${func_code} read response`, () => {
 			const body = Buffer.from([0x01, func_code, 0x02, 0xcd, 0x01]);
-			const [response] = parse_rtu_response(rtu_frame(body));
+			const response = parse_rtu_response(rtu_frame(body));
 			assert.equal(response.func_code, func_code);
 			assert.deepEqual(response.data, hex('cd01'));
 		});
 	}
 
 	test('FC 5 / FC 6 echo', () => {
-		const [coil] = parse_rtu_response(rtu_frame('010500acff00'));
+		const coil = parse_rtu_response(rtu_frame('010500acff00'));
 		assert.equal(coil.func_code, 5);
 		assert.equal(coil.start_address, 0xac);
 		assert.equal(coil.data, 0xff00);
-		const [register] = parse_rtu_response(rtu_frame('010600011234'));
+		const register = parse_rtu_response(rtu_frame('010600011234'));
 		assert.equal(register.func_code, 6);
 		assert.equal(register.data, 0x1234);
 	});
 
 	test('FC 15 / FC 16 echo', () => {
-		const [coils] = parse_rtu_response(rtu_frame('010f0013000a'));
+		const coils = parse_rtu_response(rtu_frame('010f0013000a'));
 		assert.equal(coils.func_code, 15);
 		assert.equal(coils.start_address, 0x13);
 		assert.equal(coils.quantity, 10);
-		const [registers] = parse_rtu_response(rtu_frame('011000010002'));
+		const registers = parse_rtu_response(rtu_frame('011000010002'));
 		assert.equal(registers.func_code, 16);
 		assert.equal(registers.quantity, 2);
 	});
 
 	test('exception response', () => {
-		const [response] = parse_rtu_response(rtu_frame('018302'));
+		const response = parse_rtu_response(rtu_frame('018302'));
 		assert.equal(response.func_code, 0x83);
 		assert.equal(response.exception_code, 2);
 	});
 
 	test('rejects an exception with the wrong length', () => {
-		assert.equal(parse_rtu_response(rtu_frame('01830200'))[0].func_code, 0);
+		assert.equal(parse_rtu_response(rtu_frame('01830200')).func_code, 0);
 	});
 
 	test('rejects a byte count that does not match', () => {
-		assert.equal(parse_rtu_response(rtu_frame('0103040001'))[0].func_code, 0);
+		assert.equal(parse_rtu_response(rtu_frame('0103040001')).func_code, 0);
 	});
 
 	test('rejects a write echo with the wrong length', () => {
-		assert.equal(parse_rtu_response(rtu_frame('0106000112'))[0].func_code, 0);
-		assert.equal(parse_rtu_response(rtu_frame('0110000100'))[0].func_code, 0);
+		assert.equal(parse_rtu_response(rtu_frame('0106000112')).func_code, 0);
+		assert.equal(parse_rtu_response(rtu_frame('0110000100')).func_code, 0);
 	});
 
 	test('rejects a bad CRC', () => {
 		const frame = rtu_frame('1103020001');
 		frame[frame.length - 2] ^= 0x01;
-		assert.equal(parse_rtu_response(frame)[0].func_code, 0);
+		assert.equal(parse_rtu_response(frame).func_code, 0);
 	});
 
 	test('rejects unsupported function codes', () => {
-		assert.equal(parse_rtu_response(rtu_frame('01070100'))[0].func_code, 0);
+		assert.equal(parse_rtu_response(rtu_frame('01070100')).func_code, 0);
 	});
 
 	test('rejects a frame that is too short', () => {
-		assert.equal(parse_rtu_response(hex('0183'))[0].func_code, 0);
+		assert.equal(parse_rtu_response(hex('0183')).func_code, 0);
 	});
 });
 
 describe('parse_tcp_request', () => {
 	test('FC 3 read request', () => {
 		const frame = tcp_frame(0x1234, '11030000000a');
-		const [request] = parse_tcp_request(frame);
+		const request = parse_tcp_request(frame);
 		assert.equal(request.tid, 0x1234);
 		assert.equal(request.pid, 0);
 		assert.equal(request.unit_id, 0x11);
@@ -367,81 +365,41 @@ describe('parse_tcp_request', () => {
 	});
 
 	test('FC 5 / FC 6 carry the value in data', () => {
-		assert.equal(parse_tcp_request(tcp_frame(1, '01050003ff00'))[0].data, 0xff00);
-		assert.equal(parse_tcp_request(tcp_frame(1, '01060003abcd'))[0].data, 0xabcd);
+		assert.equal(parse_tcp_request(tcp_frame(1, '01050003ff00')).data, 0xff00);
+		assert.equal(parse_tcp_request(tcp_frame(1, '01060003abcd')).data, 0xabcd);
 	});
 
 	test('FC 15 / FC 16 carry quantity, byte count and data', () => {
-		const [coils] = parse_tcp_request(tcp_frame(1, '010f0013000a02cd01'));
+		const coils = parse_tcp_request(tcp_frame(1, '010f0013000a02cd01'));
 		assert.equal(coils.quantity, 10);
 		assert.equal(coils.byte_count, 2);
 		assert.deepEqual(coils.data, hex('cd01'));
-		const [registers] = parse_tcp_request(tcp_frame(1, '0110000100020400 0a0102'));
+		const registers = parse_tcp_request(tcp_frame(1, '0110000100020400 0a0102'));
 		assert.equal(registers.quantity, 2);
 		assert.deepEqual(registers.data, hex('000a0102'));
 	});
 
-	test('splits coalesced frames', () => {
-		const chunk = Buffer.concat([
-			tcp_frame(1, '010300000001'),
-			tcp_frame(2, '020100000008'),
-			tcp_frame(3, '03060001ffff'),
-		]);
-		const requests = parse_tcp_request(chunk);
-		assert.deepEqual(requests.map((r) => [r.tid, r.unit_id, r.func_code]), [
-			[1, 1, 3], [2, 2, 1], [3, 3, 6],
-		]);
-	});
-
-	test('a non-zero protocol ID ends the extraction', () => {
-		assert.deepEqual(parse_tcp_request(tcp_frame(1, '010300000001', 1)), []);
-		const chunk = Buffer.concat([tcp_frame(1, '010300000001'), tcp_frame(2, '010300000001', 7)]);
-		assert.equal(parse_tcp_request(chunk).length, 1);
-	});
-
-	test('an out-of-range length field ends the extraction', () => {
-		const short = tcp_frame(1, '010300000001');
-		short.writeUInt16BE(2, 4);
-		assert.deepEqual(parse_tcp_request(short), []);
-		const long = tcp_frame(1, Buffer.alloc(254, 1));
-		assert.deepEqual(parse_tcp_request(long), []);
-	});
-
-	test('an incomplete trailing frame is not returned', () => {
-		const full = tcp_frame(1, '010300000001');
-		assert.deepEqual(parse_tcp_request(full.subarray(0, 10)), []);
-		assert.deepEqual(parse_tcp_request(full.subarray(0, 8)), []);
-		const chunk = Buffer.concat([full, full.subarray(0, 10)]);
-		assert.equal(parse_tcp_request(chunk).length, 1);
-	});
-
-	test('a frame with function code 0 is skipped', () => {
-		const chunk = Buffer.concat([tcp_frame(1, '010000000001'), tcp_frame(2, '010300000001')]);
-		const requests = parse_tcp_request(chunk);
-		assert.deepEqual(requests.map((r) => r.tid), [2]);
-	});
-
 	test('a PDU length that does not match the function code yields func_code 0', () => {
 		for (const body of ['01030000000100', '0105000000', '010f0000000a02cd', '010f00000001', '0110000000010200']) {
-			assert.equal(parse_tcp_request(tcp_frame(1, body))[0].func_code, 0, body);
+			assert.equal(parse_tcp_request(tcp_frame(1, body)).func_code, 0, body);
 		}
 	});
 
 	test('an unsupported function code yields func_code 0', () => {
-		assert.equal(parse_tcp_request(tcp_frame(1, '010800000000'))[0].func_code, 0);
+		assert.equal(parse_tcp_request(tcp_frame(1, '010800000000')).func_code, 0);
 	});
 
 	test('an unsupported function code is reported as illegal_function', () => {
-		assert.equal(parse_tcp_request(tcp_frame(1, '010800000000'))[0].illegal_function, 8);
-		assert.equal(parse_tcp_request(tcp_frame(1, '012b0e01'))[0].illegal_function, 0x2b);
-		assert.equal(parse_tcp_request(tcp_frame(1, '018300000001'))[0].illegal_function, undefined);
-		assert.equal(parse_tcp_request(tcp_frame(1, '01030000000100'))[0].illegal_function, undefined);
+		assert.equal(parse_tcp_request(tcp_frame(1, '010800000000')).illegal_function, 8);
+		assert.equal(parse_tcp_request(tcp_frame(1, '012b0e01')).illegal_function, 0x2b);
+		assert.equal(parse_tcp_request(tcp_frame(1, '018300000001')).illegal_function, undefined);
+		assert.equal(parse_tcp_request(tcp_frame(1, '01030000000100')).illegal_function, undefined);
 	});
 });
 
 describe('parse_tcp_response', () => {
 	test('FC 3 read response', () => {
-		const [response] = parse_tcp_response(tcp_frame(0x1f41, '1103040001000a'));
+		const response = parse_tcp_response(tcp_frame(0x1f41, '1103040001000a'));
 		assert.equal(response.tid, 0x1f41);
 		assert.equal(response.unit_id, 0x11);
 		assert.equal(response.func_code, 3);
@@ -450,28 +408,28 @@ describe('parse_tcp_response', () => {
 	});
 
 	test('FC 1 read response', () => {
-		const [response] = parse_tcp_response(tcp_frame(1, '010102cd01'));
+		const response = parse_tcp_response(tcp_frame(1, '010102cd01'));
 		assert.deepEqual(response.data, hex('cd01'));
 	});
 
 	test('FC 5 / FC 6 echo', () => {
-		const [coil] = parse_tcp_response(tcp_frame(1, '010500acff00'));
+		const coil = parse_tcp_response(tcp_frame(1, '010500acff00'));
 		assert.equal(coil.start_address, 0xac);
 		assert.equal(coil.data, 0xff00);
-		const [register] = parse_tcp_response(tcp_frame(1, '010600011234'));
+		const register = parse_tcp_response(tcp_frame(1, '010600011234'));
 		assert.equal(register.data, 0x1234);
 	});
 
 	test('FC 15 / FC 16 echo', () => {
-		const [coils] = parse_tcp_response(tcp_frame(1, '010f0013000a'));
+		const coils = parse_tcp_response(tcp_frame(1, '010f0013000a'));
 		assert.equal(coils.start_address, 0x13);
 		assert.equal(coils.quantity, 10);
-		const [registers] = parse_tcp_response(tcp_frame(1, '011000010002'));
+		const registers = parse_tcp_response(tcp_frame(1, '011000010002'));
 		assert.equal(registers.quantity, 2);
 	});
 
 	test('exception response', () => {
-		const [response] = parse_tcp_response(tcp_frame(5, '01830b'));
+		const response = parse_tcp_response(tcp_frame(5, '01830b'));
 		assert.equal(response.tid, 5);
 		assert.equal(response.func_code, 0x83);
 		assert.equal(response.exception_code, 0x0b);
@@ -479,13 +437,261 @@ describe('parse_tcp_response', () => {
 
 	test('rejects malformed responses', () => {
 		for (const body of ['0103040001', '0106000112', '0110000100', '01830200', '01070100']) {
-			assert.equal(parse_tcp_response(tcp_frame(1, body))[0].func_code, 0, body);
+			assert.equal(parse_tcp_response(tcp_frame(1, body)).func_code, 0, body);
+		}
+	});
+});
+
+describe('mbap_frame_length', () => {
+	test('6 + the length field', () => {
+		assert.equal(mbap_frame_length(tcp_frame(1, '010300000001')), 12);
+		assert.equal(mbap_frame_length(tcp_frame(1, '010300000001').subarray(0, 6)), 12);
+	});
+
+	test('fewer than 6 bytes need more', () => {
+		assert.equal(mbap_frame_length(hex('0001000000')), NEED_MORE);
+	});
+
+	test('a non-zero protocol ID or an out-of-range length field cannot be delimited', () => {
+		assert.equal(mbap_frame_length(tcp_frame(1, '010300000001', 1)), INVALID);
+		assert.equal(mbap_frame_length(hex('000100000002')), INVALID);
+		assert.equal(mbap_frame_length(hex('0001000000fe')), INVALID);
+		assert.equal(mbap_frame_length(hex('0001000000fd')), 259);
+	});
+});
+
+describe('rtu_request_length', () => {
+	test('FC 1..6 are 8 bytes', () => {
+		for (const func_code of [1, 2, 3, 4, 5, 6]) {
+			assert.equal(rtu_request_length(Buffer.from([1, func_code])), 8, `FC ${func_code}`);
 		}
 	});
 
+	test('FC 15 / 16 are 9 + the byte count', () => {
+		assert.equal(rtu_request_length(hex('010f00000003')), NEED_MORE);
+		assert.equal(rtu_request_length(hex('010f0000000301')), 10);
+		assert.equal(rtu_request_length(hex('01100000000204')), 13);
+		assert.equal(rtu_request_length(hex('011000000000f7')), 256);
+		assert.equal(rtu_request_length(hex('011000000000f8')), INVALID);
+	});
+
+	test('fewer than 2 bytes need more', () => {
+		assert.equal(rtu_request_length(hex('01')), NEED_MORE);
+	});
+
+	test('an unsupported function code within 1..127 is UNKNOWN, any other INVALID', () => {
+		assert.equal(rtu_request_length(hex('0108')), UNKNOWN);
+		assert.equal(rtu_request_length(hex('017f')), UNKNOWN);
+		assert.equal(rtu_request_length(hex('0100')), INVALID);
+		assert.equal(rtu_request_length(hex('0183')), INVALID);
+	});
+});
+
+describe('rtu_response_length', () => {
+	test('a function code above 127 is a 5-byte exception response', () => {
+		assert.equal(rtu_response_length(hex('0183')), 5);
+		assert.equal(rtu_response_length(hex('01ff')), 5);
+	});
+
+	test('FC 1..4 are 5 + the byte count', () => {
+		assert.equal(rtu_response_length(hex('0103')), NEED_MORE);
+		assert.equal(rtu_response_length(hex('010304')), 9);
+		assert.equal(rtu_response_length(hex('0101fb')), 256);
+		assert.equal(rtu_response_length(hex('0101fc')), INVALID);
+	});
+
+	test('FC 5, 6, 15, 16 are 8 bytes', () => {
+		for (const func_code of [5, 6, 15, 16]) {
+			assert.equal(rtu_response_length(Buffer.from([1, func_code])), 8, `FC ${func_code}`);
+		}
+	});
+
+	test('any other function code cannot be delimited', () => {
+		assert.equal(rtu_response_length(hex('01')), NEED_MORE);
+		assert.equal(rtu_response_length(hex('0100')), INVALID);
+		assert.equal(rtu_response_length(hex('0107')), INVALID);
+	});
+});
+
+describe('split_frames', () => {
+	const as_hex = (buffers) => buffers.map((b) => b.toString('hex'));
+	const req = (body) => rtu_frame(body);
+	const bad_crc = (body) => {
+		const frame = req(body);
+		frame[frame.length - 1] ^= 0xff;
+		return frame;
+	};
+
 	test('splits coalesced frames', () => {
-		const chunk = Buffer.concat([tcp_frame(7, '0103020001'), tcp_frame(8, '0103020002')]);
-		const responses = parse_tcp_response(chunk);
-		assert.deepEqual(responses.map((r) => [r.tid, r.data.readUInt16BE(0)]), [[7, 1], [8, 2]]);
+		const frames = [tcp_frame(1, '010300000001'), tcp_frame(2, '020100000008'), tcp_frame(3, '03060001ffff')];
+		const result = split_frames(Buffer.concat(frames), mbap_frame_length);
+		assert.deepEqual(as_hex(result.frames), as_hex(frames));
+		assert.equal(result.rest.length, 0);
+	});
+
+	test('keeps an incomplete trailing frame, which the next read completes', () => {
+		const full = tcp_frame(1, '010300000001');
+		for (const cut of [3, 8]) {
+			const first = split_frames(Buffer.concat([full, full.subarray(0, cut)]), mbap_frame_length);
+			assert.deepEqual(as_hex(first.frames), as_hex([full]));
+			assert.deepEqual(first.rest, full.subarray(0, cut));
+			const second = split_frames(Buffer.concat([first.rest, full.subarray(cut)]), mbap_frame_length);
+			assert.deepEqual(as_hex(second.frames), as_hex([full]));
+			assert.equal(second.rest.length, 0);
+		}
+	});
+
+	test('RTU frames are delimited by their function code and byte count', () => {
+		const frames = [req('010300000001'), req('01100000000204 00010002'), req('010600010005')];
+		const chunk = Buffer.concat(frames);
+		const first = split_frames(chunk.subarray(0, 20), rtu_request_length);
+		assert.deepEqual(as_hex(first.frames), as_hex(frames.slice(0, 1)));
+		const second = split_frames(Buffer.concat([first.rest, chunk.subarray(20)]), rtu_request_length);
+		assert.deepEqual(as_hex(second.frames), as_hex(frames.slice(1)));
+		assert.equal(second.rest.length, 0);
+	});
+
+	test('a request of unknown length stays in the rest', () => {
+		const known = req('010300000001');
+		const unknown = req('010800000000');
+		const result = split_frames(Buffer.concat([known, unknown]), rtu_request_length);
+		assert.deepEqual(as_hex(result.frames), as_hex([known]));
+		assert.deepEqual(result.rest, unknown);
+	});
+
+	describe('resynchronization', () => {
+		test('a complete frame with a bad CRC is skipped up to the next valid frame', () => {
+			const good = req('010300010001');
+			const result = split_frames(Buffer.concat([bad_crc('010300000001'), good]), rtu_request_length);
+			assert.deepEqual(as_hex(result.frames), as_hex([good]));
+			assert.equal(result.rest.length, 0);
+		});
+
+		test('a stray byte in front of a frame is skipped', () => {
+			const good = req('010300000001');
+			const result = split_frames(Buffer.concat([hex('ff'), good]), rtu_request_length);
+			assert.deepEqual(as_hex(result.frames), as_hex([good]));
+		});
+
+		test('leftover bytes in front of a new read are skipped', () => {
+			// 0x01 0x03 announces an 8-byte frame that the next read completes with the wrong bytes
+			const good = req('010300000001');
+			const result = split_frames(Buffer.concat([hex('0103'), good]), rtu_request_length);
+			assert.deepEqual(as_hex(result.frames), as_hex([good]));
+			assert.equal(result.rest.length, 0);
+		});
+
+		test('with no complete frame after it, a frame not yet complete is kept', () => {
+			const good = req('010300010001');
+			const first = split_frames(Buffer.concat([bad_crc('010300000001'), good.subarray(0, 5)]), rtu_request_length);
+			assert.deepEqual(first.frames, []);
+			const second = split_frames(Buffer.concat([first.rest, good.subarray(5)]), rtu_request_length);
+			assert.deepEqual(as_hex(second.frames), as_hex([good]));
+			assert.equal(second.rest.length, 0);
+		});
+
+		test('a stray byte in front of a frame head does not lose the frame', () => {
+			// The stray byte and the first 7 bytes of the frame make an 8-byte frame with a bad CRC
+			const good = req('010300000001');
+			const first = split_frames(Buffer.concat([hex('01'), good.subarray(0, 7)]), rtu_request_length);
+			assert.deepEqual(first.frames, []);
+			assert.deepEqual(first.rest, good.subarray(0, 7));
+			const second = split_frames(Buffer.concat([first.rest, good.subarray(7)]), rtu_request_length);
+			assert.deepEqual(as_hex(second.frames), as_hex([good]));
+		});
+
+		test('bytes that cannot start a frame are dropped', () => {
+			// Function code 0xff at every offset; the last byte alone may still start a frame
+			const result = split_frames(hex('ffffffffffffffff'), rtu_request_length);
+			assert.deepEqual(result, { frames: [], rest: hex('ff') });
+		});
+
+		test('an offset of unknown length is not a resynchronization point', () => {
+			const good = req('010300000001');
+			const result = split_frames(Buffer.concat([hex('ffffffff'), req('010800000000'), good]), rtu_request_length);
+			assert.deepEqual(as_hex(result.frames), as_hex([good]));
+			assert.equal(result.rest.length, 0);
+		});
+
+		test('with no complete frame after it, a request of unknown length is reached byte by byte', () => {
+			const unknown = req('010800000000');
+			const result = split_frames(Buffer.concat([hex('ffffffff'), unknown]), rtu_request_length);
+			assert.deepEqual(result, { frames: [], rest: unknown });
+		});
+
+		test('an MBAP frame with a non-zero protocol ID is skipped up to the next frame', () => {
+			const good = tcp_frame(2, '010300000001');
+			const result = split_frames(Buffer.concat([tcp_frame(1, '010300000001', 7), good]), mbap_frame_length);
+			assert.deepEqual(as_hex(result.frames), as_hex([good]));
+		});
+	});
+});
+
+describe('resync_frames', () => {
+	const as_hex = (buffers) => buffers.map((b) => b.toString('hex'));
+
+	test('a frame waiting behind bytes that announce a long frame is found', () => {
+		// FC 16 with a byte count of 0xf0 announces a 249-byte frame, which never completes
+		const good = rtu_frame('010300000001');
+		const waiting = split_frames(Buffer.concat([hex('011000000078f0'), good, good]), rtu_request_length);
+		assert.deepEqual(waiting.frames, []);
+		const result = resync_frames(waiting.rest, rtu_request_length);
+		assert.deepEqual(as_hex(result.frames), as_hex([good, good]));
+		assert.equal(result.rest.length, 0);
+	});
+
+	test('the bytes after the frames found are left', () => {
+		const good = rtu_frame('010300000001');
+		const result = resync_frames(Buffer.concat([hex('011000000078f0'), good, good.subarray(0, 3)]), rtu_request_length);
+		assert.deepEqual(as_hex(result.frames), as_hex([good]));
+		assert.deepEqual(result.rest, good.subarray(0, 3));
+	});
+
+	test('with no complete frame, the bytes are returned as they are', () => {
+		const partial = rtu_frame('01100000000408 0001000200030004').subarray(0, 12);
+		const result = resync_frames(partial, rtu_request_length);
+		assert.deepEqual(result, { frames: [], rest: partial });
+	});
+});
+
+describe('silence_option', () => {
+	test('defaults to 50 ms when nullish', () => {
+		assert.equal(DEFAULT_SILENCE_MS, 50);
+		assert.equal(silence_option(undefined), 50);
+		assert.equal(silence_option(null), 50);
+	});
+
+	test('takes a finite positive number as is', () => {
+		assert.equal(silence_option(200), 200);
+		assert.equal(silence_option(0.5), 0.5);
+	});
+
+	test('throws on anything else', () => {
+		for (const value of [0, -1, Number.NaN, Number.POSITIVE_INFINITY, '50', true]) {
+			assert.throws(() => silence_option(value), /Invalid silence/, String(value));
+		}
+	});
+});
+
+describe('silence_time', () => {
+	const settings = (options) => serial_settings({ port: 'COM9', ...options });
+
+	test('is the silence when it is longer than 3.5 character times', () => {
+		assert.equal(silence_time(settings(), 50), 50);
+		assert.equal(silence_time(settings({ baud_rate: 9600 }), 200), 200);
+	});
+
+	test('is at least 3.5 character times', () => {
+		// 300 baud, 8E1: 11 bits a character
+		assert.equal(silence_time(settings({ baud_rate: 300, parity: 'even' }), 50), 3.5 * 11 * 1000 / 300);
+		// 9600 baud, 8N1: 10 bits a character
+		assert.equal(silence_time(settings({ baud_rate: 9600 }), 1), 3.5 * 10 * 1000 / 9600);
+		assert.equal(silence_time(settings({ baud_rate: 19200 }), 0.5), 3.5 * 10 * 1000 / 19200);
+	});
+
+	test('3.5 character times is 1.75 ms above 19200 baud', () => {
+		assert.equal(silence_time(settings({ baud_rate: 38400 }), 0.5), 1.75);
+		assert.equal(silence_time(settings({ baud_rate: 115200 }), 1), 1.75);
+		assert.equal(silence_time(settings({ baud_rate: 115200 }), 2), 2);
 	});
 });

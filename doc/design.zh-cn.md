@@ -108,7 +108,12 @@
   `#trans_count`，创建 Promise，再将缓冲区入队并返回该 Promise。它把 `resolve` / `reject` 闭包以及 `timeout_id` 存放在 packet 上。
   `end_transaction` 递减计数，标记 `status`，清除定时器，并把 `resolve`/`reject` 换成
   `DO_NOTHING`，使迟到/重复的响应无效。
-- **匹配（`on_data`）。** 解析 → 发出 `receive` → 跳过 `func_code === 0` → 按 `tid` 查找 →
+- **界定（`on_data`）。** 数据块追加到 `unprocessed_buffer`，再用 `split_frames` 切分：`tcp` 用
+  `mbap_frame_length`，否则用 `rtu_response_length`。`#keep` 把 `rest` 存入 `unprocessed_buffer`，
+  不为空时重设 `#silence_timer`（`#silence`，见下文“静默”）。`#on_silence` 对残留字节调用 `resync_frames`，仍然剩下的字节在 TCP 上保留
+  （不再重设定时器），在串口上丢弃。`#transport_opened` 和 `#transport_lost` 会清空缓冲区。响应
+  的帧长不会是 `UNKNOWN`，所以客户端没有帧长未知的情况。
+- **匹配（`on_data`）。** 对每一帧：解析 → 发出 `receive` → 跳过 `func_code === 0` → 按 `tid` 查找 →
   除非 `status === 'pending'` 否则忽略 → 有 `exception_code` 则 `reject`，否则兑现：读以
   `response.data` 兑现，写以 `echo_matches()` 的结果兑现。
 - **写回显。** `transact()` 保存 `packet.echo`，即写响应在地址之后必须回显的值（`expected_echo()`：
@@ -228,9 +233,29 @@
   `0..65535` 范围内的整数。
 - 按功能码校验所支持的功能码和 PDU 长度：定长功能要求长度精确相等，多写请求要求
   `7 + byte_count`。任何失败都产生 `func_code: 0`，由调用方丢弃。
-- `parse_tcp` 要求 ≥ 9 字节、协议 ID `== 0`、长度字段在 `3..253`，且完整的 `6 + length` 字节
-  都已存在；它为每个帧切出 `6 + length` 字节，并循环从一个数据块中提取多个帧，直到缓冲区耗尽
-  或遇到格式错误的头。它会静默丢弃功能码字节 `< 1` 的帧。
+- **界定与解析分开。** 帧长函数（`mbap_frame_length`、`rtu_request_length`、
+  `rtu_response_length`）读取缓冲区开头，返回帧长或 `NEED_MORE` / `INVALID` / `UNKNOWN`（导出的
+  常量），规则见 `spec-protocol.zh-cn.md` 的“帧的界定”中的表。只要决定帧长的字节已经到齐，它们
+  就返回帧长；缓冲区是否够长由调用方比较。RTU 整帧到齐后，它们还会校验 CRC（`rtu_length`），
+  不对就返回 `INVALID`；因此帧长 > 0 且字节足够，就一定是一个完整、有效的帧。
+- **`split_frames(buffer, frame_length)`** 是纯函数，返回 `{ frames, rest }`；`rest` 由调用方持有，
+  下次与新数据块合并后再传入。从 `pos` 开始循环：完整的帧被切出；`INVALID` 时调用
+  `resynchronize`（`pos` 之后第一个帧长 > 0 且字节足够的偏移；`UNKNOWN` 的偏移不算），找不到就把
+  `pos` 前移一个字节；一旦某次查找一无所获，同一次调用里后面的查找都跳过（`none_follows`），因为
+  更靠后的 `pos` 之后同样没有。遇到 `NEED_MORE`、`UNKNOWN` 或字节不够时停止循环。只有一个数据块时
+  直接使用，不复制。
+- **`resync_frames(rest, frame_length)`** 由静默定时器调用：从 `rest` 开头之后的第一个完整帧处
+  重新界定（从 0 开始 `resynchronize`），找不到就原样返回 `rest`。查找在任何时刻进行都是安全的：
+  字节流是有序的，一个正确的帧还没收全时，它后面不可能出现完整的帧。不需要单独的长度上限：帧长
+  函数的结果不会超过最大 ADU，所以 `rest` 总是短于一个最大 ADU。一次重新同步对几百个字节的每个
+  偏移至多算一次 CRC，而且只在出错，或有残留字节时静默之后才进行。
+- **静默。** 两个构造函数都用 `silence_option`（`util.js`）读取 `silence` 选项：为空时取
+  `DEFAULT_SILENCE_MS`（50），否则必须是有限的正数，否则抛出 `Invalid silence`。TCP 系列传输直接
+  使用该值；串口使用 `silence_time(settings, silence)`（`serial.js`），即 `max(t3.5, silence)`，
+  其中 t3.5 为 3.5 个字符时间，19200 波特以上为 1.75 ms。结果存为 `#silence`。
+- 四个解析器（`parse_tcp_request` / `_response`、`parse_rtu_request` / `_response`）都只解析
+  **一个**已界定的帧，返回一个对象。它们仍然校验 PDU 布局和 CRC，因为帧长未知的请求是以已收到的
+  字节整体交给它们的。
 - `modbus_crc16(bytes, previous?)` 采用查表实现（256 项 `Int32Array`）；`previous` 允许跨数据块
   增量计算。
 - RTU 解析器合成 `tid = TRANSACTION_START`（8000，因为 RTU 没有事务字段），校验 PDU 长度（`3..253`），校验各 FC 的字节布局，
@@ -250,8 +275,16 @@
 
 ### 请求流程
 
-1. `on_data(buffer, socket?)` — `tcp` 时用 `parse_tcp_request` 解析，否则用
-   `parse_rtu_request`。逐帧发出 `receive`。`func_code: 0` 的帧被丢弃，除非解析器设置了
+1. `on_data(chunk, socket?)` — 把数据块追加到该 socket 的残留字节（`#pending`，以 socket 为键的
+   `Map`；串口的以 `undefined` 为键），再用 `split_frames` 切分（`tcp` 用 `mbap_frame_length`，
+   否则用 `rtu_request_length`）。在 `rtu_over_tcp` 上，帧长为 `UNKNOWN` 的 `rest` 立即作为一帧
+   （`take_unknown`）。`#keep` 保存剩下的字节，不为空时重设它在 `#silence_timers` 中的定时器
+   （`#silence`，见编解码说明中的“静默”）；socket 的这两项
+   在其 `close` 时清除，串口的在串口 `close` 时清除。`#on_silence`：串口上帧长为 `UNKNOWN` 的
+   `rest` 作为一帧，否则调用 `resync_frames`，RTU 上再调用 `take_unknown`；仍然剩下的字节在串口上
+   丢弃，在 TCP 上保留，不再重设定时器。
+   每一帧交给 `#on_frame`：`tcp` 时用 `parse_tcp_request` 解析，否则用
+   `parse_rtu_request`，然后发出 `receive`。`func_code: 0` 的帧被丢弃，除非解析器设置了
    `illegal_function`；此时以该功能码继续处理。
 2. `_on_data(request, socket?)` — RTU 帧格式（`rtu` 和 `rtu_over_tcp`）时 `serial_bus` 为真。在串行总线上，广播（单元 `0`）从不应答：若单元 `0` 被接受且功能为写
    （5、6、15、16），则执行并丢弃响应，其余一律丢弃；未被接受的单元 ID 静默丢弃。在 TCP 上单元
@@ -289,10 +322,6 @@
 
 ### 服务端
 
-- [ ] **没有 RTU 帧界定。** `spec-protocol.zh-cn.md`（“帧的界定”）要求串口帧以至少 3.5 个字符
-  时间的静默来界定，RTU-over-TCP 的帧则由功能码和字节数隐含的长度来界定。`on_data` 却把每个收到
-  的数据块直接交给 `parse_rtu_request`，因此跨数据块拆分的帧，或一个数据块里的多个帧，会被丢弃
-  或误解析。（由代码推断，未在硬件上验证。）
 - [ ] **串口路径未经端到端验证。** `test/serial.test.js` 通过一对串口测试 RTU 服务端和客户端，
   但在开发机上 com0com 端口对未通过套件的预检，串口测试被跳过（见 `spec-test.zh-cn.md`
   “串口测试环境”）。RTU 服务端路径目前只由使用伪串口的单元测试覆盖。

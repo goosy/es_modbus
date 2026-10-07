@@ -1,7 +1,10 @@
 import { createServer } from 'node:net';
 import { EventEmitter } from 'node:events';
-import { serial_settings, create_serial_port } from './serial.js';
-import { MAX_QUANTITY, modbus_crc16, parse_tcp_request, parse_rtu_request } from './util.js';
+import { serial_settings, silence_time, create_serial_port } from './serial.js';
+import {
+	MAX_QUANTITY, UNKNOWN, silence_option, modbus_crc16, parse_tcp_request, parse_rtu_request,
+	mbap_frame_length, rtu_request_length, split_frames, resync_frames,
+} from './util.js';
 
 /**
  * Checks the data of a supported request as the Modbus application protocol does, before any
@@ -30,6 +33,17 @@ function check_request({ func_code, start_address, quantity, byte_count, data })
 }
 
 const BROADCAST_ID = 0;
+const EMPTY = Buffer.alloc(0);
+
+/**
+ * Moves a request of unknown length left in `rest` to `frames`, as one frame; returns what is
+ * still left.
+ */
+function take_unknown(frames, rest) {
+	if (rest.length === 0 || rtu_request_length(rest) !== UNKNOWN) return rest;
+	frames.push(rest);
+	return EMPTY;
+}
 const WRITE_FUNCTIONS = new Set([5, 6, 15, 16]);
 
 // Wraps an exception thrown by a `vector` function
@@ -71,6 +85,8 @@ export class Modbus_Server extends EventEmitter {
      * @param {'none'|'odd'|'even'|0|1|2} [options.parity='none'] - Serial parity, used with a serial port path.
      * @param {number} [options.data_bits=8] - Serial data bits, used with a serial port path.
      * @param {number} [options.stop_bits=1] - Serial stop bits, used with a serial port path.
+     * @param {number} [options.silence=50] - The silence, in ms, after which the bytes left are resolved;
+     *   on a serial port at least 3.5 character times.
      * @param {number|number[]|'all'|'*'} [options.unit_id] - The Modbus unit ID(s) to accept and respond to;
      *   every ID when omitted (see `set_unit_ids()` for details)
      */
@@ -80,13 +96,16 @@ export class Modbus_Server extends EventEmitter {
 		this.set_unit_ids(options.unit_id);
 		this.host = options.host ?? '0.0.0.0';
 		const port = options.port ?? 502;
+		const silence = silence_option(options.silence);
 		if (typeof port === 'string') {
 			// A serial device path; the options are checked here, the port is created by start()
 			const { baud_rate, parity, data_bits, stop_bits } = options;
 			this.serial_settings = serial_settings({ port, baud_rate, parity, data_bits, stop_bits });
 			this.protocol = 'rtu';
+			this.#silence = silence_time(this.serial_settings, silence);
 		} else if (typeof port === 'number') {
 			this.protocol = options.rtu ? 'rtu_over_tcp' : 'tcp';
+			this.#silence = silence;
 		} else {
 			throw new Error(`Invalid port: ${port}`);
 		}
@@ -179,6 +198,7 @@ export class Modbus_Server extends EventEmitter {
 		serial_port.on('data', (data) => this.on_data(data));
 		serial_port.on('error', (err) => this.emit('error', err));
 		serial_port.on('close', () => {
+			this.#keep(undefined, EMPTY);
 			this.emit('stop');
 		});
 	}
@@ -192,6 +212,7 @@ export class Modbus_Server extends EventEmitter {
 			socket.on('error', (error) => this.emit('socket_error', error));
 			socket.on('close', () => {
 				this.sockets.delete(socket);
+				this.#keep(socket, EMPTY);
 				this.emit('socket_disconnect', socket);
 			});
 		});
@@ -285,21 +306,73 @@ export class Modbus_Server extends EventEmitter {
 		}
 	}
 
-	on_data(buffer, socket) {
-		const requests = this.protocol === 'tcp'
-			? parse_tcp_request(buffer)
-			: parse_rtu_request(buffer);
+	// Bytes received and not yet delimited, and their silence timers, by socket; the serial
+	// port's under `undefined`
+	#pending = new Map();
+	#silence_timers = new Map();
+	// The silence after which the bytes left are resolved, in ms
+	#silence;
 
-		for (const request of requests) {
-			this.emit('receive', request.buffer);
-			if (request.func_code !== 0) {
-				this._on_data(request, socket);
-			} else if (request.illegal_function !== undefined) {
-				// Answered with exception 0x01 under its own function code
-				this._on_data({ ...request, func_code: request.illegal_function }, socket);
-			}
-			// Any other invalid frame is dropped
+	get #frame_length() {
+		return this.protocol === 'tcp' ? mbap_frame_length : rtu_request_length;
+	}
+
+	/**
+	 * Keeps the bytes left for `socket` (the serial port when undefined), and with `arm`
+	 * restarts their silence timer; no bytes left clears both.
+	 */
+	#keep(socket, rest, arm = true) {
+		clearTimeout(this.#silence_timers.get(socket));
+		this.#silence_timers.delete(socket);
+		if (rest.length === 0) {
+			this.#pending.delete(socket);
+			return;
 		}
+		this.#pending.set(socket, rest);
+		if (arm) this.#silence_timers.set(socket, setTimeout(() => this.#on_silence(socket), this.#silence));
+	}
+
+	/**
+	 * Delimits the frames of a received chunk (see `spec-protocol.md`, "Frame delimiting") and
+	 * serves each. The bytes of an incomplete frame are kept for the next chunk.
+	 */
+	on_data(chunk, socket) {
+		const pending = this.#pending.get(socket);
+		const buffer = pending ? Buffer.concat([pending, chunk]) : chunk;
+		const { frames, rest } = split_frames(buffer, this.#frame_length);
+		// A stream has no silence to wait for: a request of unknown length is what has been received
+		this.#keep(socket, this.protocol === 'rtu_over_tcp' ? take_unknown(frames, rest) : rest);
+		for (const frame of frames) this.#on_frame(frame, socket);
+	}
+
+	/**
+	 * The connection went silent with bytes left: a request of unknown length on a serial line
+	 * is served as one frame; anything else is resynchronized. What is still left is discarded
+	 * on a serial line and kept, without a new timer, on a TCP connection.
+	 */
+	#on_silence(socket) {
+		const rest = this.#pending.get(socket) ?? EMPTY;
+		const rtu = this.protocol !== 'tcp';
+		let frames = [];
+		let kept = rest;
+		if (!(rtu && rtu_request_length(rest) === UNKNOWN)) {
+			({ frames, rest: kept } = resync_frames(rest, this.#frame_length));
+		}
+		if (rtu) kept = take_unknown(frames, kept);
+		this.#keep(socket, this.protocol === 'rtu' ? EMPTY : kept, false);
+		for (const frame of frames) this.#on_frame(frame, socket);
+	}
+
+	#on_frame(frame, socket) {
+		const request = this.protocol === 'tcp' ? parse_tcp_request(frame) : parse_rtu_request(frame);
+		this.emit('receive', request.buffer);
+		if (request.func_code !== 0) {
+			this._on_data(request, socket);
+		} else if (request.illegal_function !== undefined) {
+			// Answered with exception 0x01 under its own function code
+			this._on_data({ ...request, func_code: request.illegal_function }, socket);
+		}
+		// Any other invalid frame is dropped
 	}
 
 	/**

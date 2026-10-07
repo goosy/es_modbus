@@ -45,6 +45,26 @@ export function serial_settings({
 	};
 }
 
+// Above this baud rate the Modbus serial line specification fixes 3.5 character times
+const FIXED_T35_BAUD_RATE = 19200;
+const FIXED_T35_MS = 1.75;
+
+/**
+ * The silence after which a receiver resolves the bytes left on a serial line, in ms:
+ * max(3.5 character times, `silence`). 3.5 character times is the floor, since a shorter
+ * silence would cut a frame still being received; above 19200 baud it is 1.75 ms. A character
+ * is 1 start bit + data bits + a parity bit (unless none) + stop bits.
+ *
+ * @param {Object} settings - serial port settings made by serial_settings().
+ * @param {number} silence - the `silence` option, checked by silence_option().
+ * @returns {number}
+ */
+export function silence_time({ baudRate, parity, dataBits, stopBits }, silence) {
+	const char_bits = 1 + dataBits + (parity === 'none' ? 0 : 1) + stopBits;
+	const t35 = baudRate > FIXED_T35_BAUD_RATE ? FIXED_T35_MS : 3.5 * char_bits * 1000 / baudRate;
+	return Math.max(t35, silence);
+}
+
 /**
  * Creates a closed serial port stream. serialport is bundled, but loaded only here, on first
  * use: loading it loads its native binding, which must not break a TCP-only user where that

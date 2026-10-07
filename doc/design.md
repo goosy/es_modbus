@@ -126,7 +126,14 @@ A single routine builds every outgoing frame regardless of transport:
   then enqueues the buffer and returns the Promise. It stores `resolve` / `reject` closures on the packet plus a
   `timeout_id`. `end_transaction` decrements the count, stamps `status`, clears the timer, and
   swaps `resolve`/`reject` for `DO_NOTHING` so a late/duplicate response is inert.
-- **Matching (`on_data`).** Parse → emit `receive` → skip `func_code === 0` → look up by `tid` →
+- **Framing (`on_data`).** The chunk is appended to `unprocessed_buffer` and cut by
+  `split_frames` with `mbap_frame_length` (`tcp`) or `rtu_response_length`. `#keep` stores `rest`
+  in `unprocessed_buffer` and, when it is not empty, restarts `#silence_timer` (`#silence`, see
+  "Silence" below).
+  `#on_silence` runs `resync_frames` on the bytes left, keeps what is still left on TCP (without
+  a new timer) and discards it on a serial port. `#transport_opened` and `#transport_lost` empty
+  the buffer. A response length is never `UNKNOWN`, so the client has no unknown-length case.
+- **Matching (`on_data`).** For each frame: parse → emit `receive` → skip `func_code === 0` → look up by `tid` →
   ignore unless `status === 'pending'` → `reject` on `exception_code`, else resolve: a read with
   `response.data`, a write with `echo_matches()`.
 - **Write echo.** `transact()` stores `packet.echo`, the value a write response must echo after
@@ -263,10 +270,35 @@ the move into `CONNECTING`; a caller that arrives while `CONNECTING` is added to
 - Supported function codes and PDU lengths are validated per function: exact length for
   fixed-size functions, `7 + byte_count` for the multiple-write requests. Any failure yields
   `func_code: 0`, which callers drop.
-- `parse_tcp` requires ≥ 9 bytes, protocol ID `== 0`, length field in `3..253`, and a full
-  `6 + length` bytes present; it slices `6 + length` bytes per frame and loops to extract
-  multiple frames from one chunk until the buffer is exhausted or a malformed header is hit. It
-  silently drops frames whose function-code byte is `< 1`.
+- **Framing is separate from parsing.** The frame length functions (`mbap_frame_length`,
+  `rtu_request_length`, `rtu_response_length`) read the start of a buffer and return a length or
+  `NEED_MORE` / `INVALID` / `UNKNOWN` (exported constants), following the table in
+  `spec-protocol.md` ("Frame delimiting"). They return a length as soon as the bytes that decide
+  it are present; whether the buffer holds that many is the caller's test. Once the whole RTU
+  frame is present they also check its CRC (`rtu_length`) and return `INVALID` when it is wrong,
+  so a frame length > 0 with enough bytes always means a complete, valid frame.
+- **`split_frames(buffer, frame_length)`** is pure and returns `{ frames, rest }`; the caller
+  holds `rest` and passes it back joined with the next chunk. In a loop from `pos`: a complete
+  frame is cut off; `INVALID` calls `resynchronize` (the first offset after `pos` whose length is
+  > 0 and fully present; `UNKNOWN` offsets never qualify) and else moves `pos` on by one byte;
+  once a search finds nothing, later ones in the same call are skipped (`none_follows`), since
+  nothing follows a later `pos` either. `NEED_MORE`, `UNKNOWN` or too few bytes stop the loop.
+  A single chunk is used without a copy.
+- **`resync_frames(rest, frame_length)`** is what a silence timer calls: it resumes delimiting at
+  the first complete frame after the start of `rest` (`resynchronize` from 0), or returns `rest`
+  unchanged. The search is safe at any time: a stream is ordered, so a complete frame cannot
+  follow a correct frame that is still incomplete. No separate size cap is needed: a length
+  function never exceeds the maximum ADU, so `rest` stays below one. A resynchronization costs
+  at most one CRC per offset over a few hundred bytes, and runs only on an error or a silence
+  with bytes left.
+- **Silence.** Both constructors read the `silence` option with `silence_option` (`util.js`):
+  `DEFAULT_SILENCE_MS` (50) when nullish, else a finite positive number, or `Invalid silence` is
+  thrown. A TCP-family transport uses it as is; a serial one uses `silence_time(settings,
+  silence)` (`serial.js`), which is `max(t3.5, silence)`, t3.5 being 3.5 character times, or
+  1.75 ms above 19200 baud. The result is `#silence`.
+- The four parsers (`parse_tcp_request` / `_response`, `parse_rtu_request` / `_response`) each
+  parse **one** delimited frame and return one object. They still check the PDU layout and the
+  CRC, since an unknown-length request reaches them as whatever bytes were received.
 - `modbus_crc16(bytes, previous?)` is table-driven (256-entry `Int32Array`); `previous` allows
   incremental computation across chunks.
 - RTU parsers synthesize `tid = TRANSACTION_START` (8000, since RTU has no transaction field), validate PDU length (`3..253`), validate the
@@ -287,8 +319,18 @@ the move into `CONNECTING`; a caller that arrives while `CONNECTING` is added to
 
 ### Request flow
 
-1. `on_data(buffer, socket?)` — parse with `parse_tcp_request` for `tcp`, else
-   `parse_rtu_request`. Emit `receive` per frame. A frame with `func_code: 0` is dropped, unless
+1. `on_data(chunk, socket?)` — append the chunk to the bytes left for that socket (`#pending`,
+   a `Map` keyed by socket; the serial port's under `undefined`), and cut them with
+   `split_frames` (`mbap_frame_length` for `tcp`, else `rtu_request_length`). On `rtu_over_tcp`
+   a `rest` of `UNKNOWN` length is taken at once as one frame (`take_unknown`). `#keep` stores
+   the rest and, when it is not empty, restarts its timer in `#silence_timers` (`#silence`:
+   see "Silence" under the codec notes); a socket's
+   entries are cleared on its `close`, the serial port's on its `close`. `#on_silence` takes a
+   serial `rest` of `UNKNOWN` length as one frame, and otherwise runs `resync_frames`, then
+   `take_unknown` on RTU; what is still left is discarded on a serial port and kept on TCP,
+   without a new timer.
+   Each frame goes to `#on_frame`, which parses it with `parse_tcp_request` for `tcp`, else
+   `parse_rtu_request`, and emits `receive`. A frame with `func_code: 0` is dropped, unless
    the parser set `illegal_function`; then it goes on with that function code.
 2. `_on_data(request, socket?)` — `serial_bus` is true for RTU framing (`rtu` and
    `rtu_over_tcp`). On a serial bus a broadcast (unit `0`) is never
@@ -335,11 +377,6 @@ Each item is a defect or missing piece, not intended behavior.
 
 ### Server
 
-- [ ] **No RTU frame delimiting.** `spec-protocol.md` ("Frame delimiting") requires serial frames
-  to be delimited by a silence of at least 3.5 character times, and RTU-over-TCP frames by the
-  length implied by the function code and byte count. `on_data` instead passes each received
-  chunk straight to `parse_rtu_request`, so a frame split across chunks, or several frames in one
-  chunk, are dropped or misparsed. (Inferred from the code; not verified on hardware.)
 - [ ] **Serial path not verified end to end.** `test/serial.test.js` exercises the RTU server and
   client over a serial port pair, but on the development machine the com0com pair fails the
   suite's pre-check and the serial tests are skipped (see `spec-test.md`, "Serial test

@@ -117,10 +117,6 @@ Commands:
 
 Decisions the spec does not make yet. Settle them in the spec first, then implement.
 
-- **Partial TCP frames.** For TCP the spec only requires splitting coalesced frames (for
-  RTU-over-TCP it requires length-based delimiting). The code also drops an incomplete trailing
-  frame instead of buffering it for the next read (the client's `unprocessed_buffer` field is
-  unused). Decide whether buffering is required for TCP as well.
 - **Return value of `start()` / `stop()`.** `listen()` and serial `open()` complete
   asynchronously; the unified `start` / `stop` events are the signal. Decide whether `start()` /
   `stop()` should also return a Promise (resolved when ready, rejected on failure).

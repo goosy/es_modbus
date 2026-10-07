@@ -165,13 +165,13 @@ export function parse_modicon_range(range_str, zero_based = false) {
 }
 
 /**
- * Parses a Modbus RTU request buffer.
+ * Parses one Modbus RTU request frame, already delimited (see split_frames).
  *
  * This function extracts and interprets the various fields of a Modbus RTU request,
  * including the function-specific data and CRC.
  *
  * @param {Buffer} buffer - The buffer containing the Modbus RTU request.
- * @returns {Array} An array containing an object with the parsed request data:
+ * @returns {Object} An object with the parsed request data:
  *   - tid: Transaction ID (always TRANSACTION_START for RTU)
  *   - unit_id: Unit ID
  *   - func_code: Function code (0 when the frame is invalid or the function unsupported)
@@ -186,7 +186,7 @@ export function parse_rtu_request(buffer) {
 	const PDU_length = buffer.length - 2;          // Length of PDU
 	// PDU length must be between 3-253
 	if (PDU_length < 3 || PDU_length > 253) {
-		return [{ tid: TRANSACTION_START, func_code: 0, buffer }];
+		return { tid: TRANSACTION_START, func_code: 0, buffer };
 	}
 
 	const tid = TRANSACTION_START;                 // Transaction Id
@@ -255,21 +255,21 @@ export function parse_rtu_request(buffer) {
 		}
 	}
 
-	return [{
+	return {
 		tid, unit_id, func_code, illegal_function,
 		start_address, quantity, byte_count,
 		data, buffer,
-	}];
+	};
 }
 
 /**
- * Parses a Modbus RTU response buffer.
+ * Parses one Modbus RTU response frame, already delimited (see split_frames).
  *
  * This function extracts and interprets the various fields of a Modbus RTU response,
  * including the function-specific data and CRC.
  *
  * @param {Buffer} buffer - The buffer containing the Modbus RTU response.
- * @returns {Array} An array containing an object with the parsed response data:
+ * @returns {Object} An object with the parsed response data:
  *   - tid: Transaction ID (always TRANSACTION_START for RTU)
  *   - unit_id: Unit ID
  *   - func_code: Function code
@@ -283,7 +283,7 @@ export function parse_rtu_request(buffer) {
 export function parse_rtu_response(buffer) {
 	const PDU_length = buffer.length - 2;
 	if (PDU_length < 3 || PDU_length > 253) {  // PDU length must be between 3-253
-		return [{ tid: TRANSACTION_START, func_code: 0, buffer }];
+		return { tid: TRANSACTION_START, func_code: 0, buffer };
 	}
 
 	const tid = TRANSACTION_START;
@@ -347,15 +347,15 @@ export function parse_rtu_response(buffer) {
 		}
 	}
 
-	return [{
+	return {
 		tid, unit_id, func_code,
 		start_address, quantity, byte_count,
 		data, exception_code, buffer,
-	}];
+	};
 }
 
 /**
- * Parses a Modbus TCP request buffer.
+ * Parses one Modbus TCP request frame, already delimited (see split_frames).
  *
  * This function extracts and interprets the various fields of a Modbus TCP request,
  * including the MBAP header and the function-specific data.
@@ -374,11 +374,11 @@ export function parse_rtu_response(buffer) {
  *   - data: Data to be written (for write functions)
  *   - buffer: The original buffer
  */
-function parse_mt_request(buffer) {
+export function parse_tcp_request(buffer) {
 	const PDU_length = buffer.readUInt16BE(4);     // Length of PDU
 	// PDU length must be between 3-253
 	if (PDU_length < 3 || PDU_length > 253) {
-		return [{ tid: TRANSACTION_START, func_code: 0, buffer }];
+		return { tid: TRANSACTION_START, func_code: 0, buffer };
 	}
 
 	const tid = buffer.readUInt16BE(0);            // Transaction Id
@@ -448,7 +448,7 @@ function parse_mt_request(buffer) {
 }
 
 /**
- * Parses a Modbus TCP response buffer.
+ * Parses one Modbus TCP response frame, already delimited (see split_frames).
  *
  * This function extracts and interprets the various fields of a Modbus TCP response,
  * including the MBAP header and the function-specific data.
@@ -467,10 +467,10 @@ function parse_mt_request(buffer) {
  *   - exception_code: Exception code (if it's an exception response)
  *   - buffer: The original buffer
  */
-function parse_mt_response(buffer) {
+export function parse_tcp_response(buffer) {
 	const PDU_length = buffer.readUInt16BE(4);
 	if (PDU_length < 3 || PDU_length > 253) {  // PDU length must be between 3-253
-		return [{ tid: TRANSACTION_START, func_code: 0, buffer }];
+		return { tid: TRANSACTION_START, func_code: 0, buffer };
 	}
 
 	const tid = buffer.readUInt16BE(0);    // Transaction Id
@@ -534,45 +534,141 @@ function parse_mt_response(buffer) {
 	};
 }
 
+// Results of a frame length function, besides a length
+export const NEED_MORE = 0;  // the bytes so far do not yet give the length
+export const INVALID = -1;   // the frame cannot be delimited
+export const UNKNOWN = -2;   // a request of unknown length (an unsupported function code)
+
+const MAX_RTU_ADU = 256;
+const EMPTY = Buffer.alloc(0);
+
+// The default silence after which the bytes left are resolved, in ms (see silence_option)
+export const DEFAULT_SILENCE_MS = 50;
+
 /**
- * Parses the TCP combined buffer and validates Modbus TCP packets.
+ * Checks the `silence` option, in ms: a finite positive number, or the default when nullish.
+ * Throws on anything else, so a constructor fails at once.
  *
- * @param {Buffer} combined_buffer - The combined buffer to parse.
- * @return {Array} An array containing valid Modbus TCP packets.
+ * @param {number|null|undefined} silence
+ * @returns {number}
  */
-function parse_tcp(combined_buffer) {
-	const ret = [];
-	let buffer = combined_buffer;
-	while (buffer.length >= 9) { // MBAP header + PDU is at least 6+3 bytes
-		// Check if protocol identifier is 0
-		if (buffer.readUInt16BE(2) !== 0) {
-			break; // non-Modbus TCP packet, stop parsing
-		}
-		const length = buffer.readUInt16BE(4);
-		if (length < 3 || length > 253) { // PDU length must be between 3-253
-			break; // Invalid length, stop parsing
-		}
-		const fullLength = 6 + length; // MBAP header + PDU
-		if (buffer.length >= fullLength) {
-			const mt_buffer = buffer.subarray(0, fullLength);
-			// Validate PDU
-			const func_code = mt_buffer[7];
-			if (func_code < 1) {
-				buffer = buffer.subarray(fullLength);
-				continue; // Skip invalid function code
-			}
-			buffer = buffer.subarray(fullLength);
-			ret.push(mt_buffer);
-		} else {
-			break; // Empty data or non-Modbus TCP packet, stop parsing
-		}
+export function silence_option(silence) {
+	if (silence == null) return DEFAULT_SILENCE_MS;
+	if (typeof silence !== 'number' || !Number.isFinite(silence) || silence <= 0) {
+		throw new Error(`Invalid silence: ${silence}`);
 	}
-	return ret;
+	return silence;
 }
 
-export function parse_tcp_response(res_buffer) {
-	return parse_tcp(res_buffer).map(parse_mt_response);
+/**
+ * Length of the MBAP frame at the start of `buffer`: 6 + the MBAP length field.
+ * A protocol ID other than 0, or a length field outside 3..253, cannot be delimited.
+ */
+export function mbap_frame_length(buffer) {
+	if (buffer.length < 6) return NEED_MORE;
+	if (buffer.readUInt16BE(2) !== 0) return INVALID;
+	const length = buffer.readUInt16BE(4);
+	if (length < 3 || length > 253) return INVALID;
+	return 6 + length;
 }
-export function parse_tcp_request(req_buffer) {
-	return parse_tcp(req_buffer).map(parse_mt_request);
+
+/**
+ * An RTU frame `length`, once checked: beyond the maximum ADU it cannot be delimited, and once
+ * the whole frame is in `buffer` its CRC must be valid.
+ */
+function rtu_length(buffer, length) {
+	if (length > MAX_RTU_ADU) return INVALID;
+	if (buffer.length < length) return length;
+	const crc = modbus_crc16(buffer.subarray(0, length - 2));
+	return crc === buffer.readUInt16LE(length - 2) ? length : INVALID;
+}
+
+/**
+ * Length of the RTU request frame at the start of `buffer`, from its function code and, for
+ * FC 15 / 16, its byte count. An unsupported function code within 1..127 gives UNKNOWN.
+ * A complete frame with an invalid CRC cannot be delimited.
+ */
+export function rtu_request_length(buffer) {
+	if (buffer.length < 2) return NEED_MORE;
+	const func_code = buffer[1];
+	if (func_code >= 1 && func_code <= 6) return rtu_length(buffer, 8);
+	if (func_code === 15 || func_code === 16) {
+		return buffer.length < 7 ? NEED_MORE : rtu_length(buffer, 9 + buffer[6]);
+	}
+	return func_code >= 1 && func_code <= 127 ? UNKNOWN : INVALID;
+}
+
+/**
+ * Length of the RTU response frame at the start of `buffer`, from its function code and, for
+ * FC 1..4, its byte count. A function code above 127 is a 5-byte exception response.
+ * A complete frame with an invalid CRC cannot be delimited.
+ */
+export function rtu_response_length(buffer) {
+	if (buffer.length < 2) return NEED_MORE;
+	const func_code = buffer[1];
+	if (func_code > 127) return rtu_length(buffer, 5);
+	if (func_code >= 1 && func_code <= 4) {
+		return buffer.length < 3 ? NEED_MORE : rtu_length(buffer, 5 + buffer[2]);
+	}
+	if ([5, 6, 15, 16].includes(func_code)) return rtu_length(buffer, 8);
+	return INVALID;
+}
+
+/**
+ * The first offset after `from` where a complete frame can be delimited, or -1.
+ * An offset of unknown length is skipped.
+ */
+function resynchronize(buffer, from, frame_length) {
+	for (let offset = from + 1; offset < buffer.length; offset++) {
+		const length = frame_length(buffer.subarray(offset));
+		if (length > 0 && buffer.length - offset >= length) return offset;
+	}
+	return -1;
+}
+
+/**
+ * Cuts the complete frames off the start of `buffer`, delimited by `frame_length` (see
+ * `spec-protocol.md`, "Frame delimiting"). `rest` holds the bytes to keep for the next read:
+ * an incomplete frame, or a request of UNKNOWN length, which the caller resolves.
+ *
+ * A frame that cannot be delimited (INVALID) is resynchronized: delimiting resumes at the next
+ * complete frame, searched byte by byte, or else at the frame's next byte, which may start a
+ * frame not yet complete.
+ *
+ * @param {Buffer} buffer - the bytes kept from the previous call, then the new chunk.
+ * @param {(buffer: Buffer) => number} frame_length - mbap_frame_length, rtu_request_length
+ *   or rtu_response_length.
+ * @returns {{ frames: Buffer[], rest: Buffer }}
+ */
+export function split_frames(buffer, frame_length) {
+	const frames = [];
+	let pos = 0;
+	// Set once a search found no complete frame after `pos`: none follows any later `pos` either
+	let none_follows = false;
+	while (pos < buffer.length) {
+		const length = frame_length(buffer.subarray(pos));
+		if (length > 0 && buffer.length - pos >= length) {
+			frames.push(buffer.subarray(pos, pos + length));
+			pos += length;
+			continue;
+		}
+		if (length !== INVALID) break;
+		const next = none_follows ? -1 : resynchronize(buffer, pos, frame_length);
+		none_follows = next < 0;
+		pos = next >= 0 ? next : pos + 1;
+	}
+	return { frames, rest: pos < buffer.length ? buffer.subarray(pos) : EMPTY };
+}
+
+/**
+ * Resynchronizes the bytes left once the connection has been silent: delimiting resumes at the
+ * first complete frame after the start of `rest`, if any; otherwise `rest` is returned as is.
+ *
+ * @param {Buffer} rest - the bytes left by split_frames.
+ * @param {(buffer: Buffer) => number} frame_length
+ * @returns {{ frames: Buffer[], rest: Buffer }}
+ */
+export function resync_frames(rest, frame_length) {
+	const next = resynchronize(rest, 0, frame_length);
+	return next < 0 ? { frames: [], rest } : split_frames(rest.subarray(next), frame_length);
 }
