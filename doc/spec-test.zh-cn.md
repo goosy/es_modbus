@@ -31,7 +31,7 @@
 | `test/helpers.js`     | 共享夹具：内存 `vector`、RTU / MBAP 帧构造、伪 TCP 从站、原始 TCP 对端、服务端与客户端的搭建。不是测试文件。 |
 | `test/util.test.js`   | 常量、`modbus_crc16`、`parse_modicon_range`、RTU 与 TCP 的请求 / 响应解析器、帧长函数和 `split_frames`。   |
 | `test/client.test.js` | `Modbus_Client` 对接伪 TCP 从站：构造、参数校验、线路上的帧、事务匹配、超时、发送节流、队列溢出、事件、连接与重连、连接阶段转移（TCP 和串口）、RTU-over-TCP 帧格式。 |
-| `test/server.test.js` | `Modbus_Server`：构造、单元 ID、TCP 与 RTU 帧格式下的每个功能码（通过伪套接字 / 伪串口）、帧的界定、异常、事件，以及真实套接字上的 TCP 生命周期。 |
+| `test/server.test.js` | `Modbus_Server`：构造、单元 ID、TCP 与 RTU 帧格式下的每个功能码（通过伪套接字 / 伪串口）、帧的界定、异常、事件、真实套接字上的 TCP 生命周期，以及 `start()` / `stop()` 的 Promise：顺序、并入、重启，以及失败由谁处理（用子进程检查无人处理的失败会终止进程）。 |
 | `test/tcp.test.js`    | 端到端：`Modbus_Client` 与 `Modbus_Server` 在回环地址上通过 Modbus TCP 互测。 |
 | `test/serial.test.js` | 通过一对串口的端到端测试：RTU 模式的 `Modbus_Server` 对接原始串口对端，以及 RTU 模式的 `Modbus_Client` 对接 `Modbus_Server`。 |
 | `test/serial-bridge.test.js` | 通过模拟串行线路（`test/serial-bridge.js`）测试串口路径，总是运行：串口端的 `Modbus_Client` 对接 RTU-over-TCP 的 `Modbus_Server`，串口端的 `Modbus_Server` 对接原始套接字或 RTU-over-TCP 客户端；覆盖按波特率逐字节到达和分块、字节损坏、丢帧、延迟、帧中停顿、噪声以及拔出设备。 |

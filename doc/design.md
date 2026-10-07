@@ -17,9 +17,9 @@ into `design-<topic>.md` files when it grows.
   It sets `this.protocol` with the client's values: `tcp`, `rtu_over_tcp` (number port with
   `rtu: true`), or `rtu` (string port; `rtu` is ignored). `is_tcp` is a getter:
   `typeof this.port === 'number'`, true for both TCP-family transports. The serial port is
-  `this.serial_port`, created by the first `start()` (`start_serial`, which shares one pending
+  `this.serial_port`, created by the first `start()` (`#open_serial`, which shares one pending
   creation and resets it on failure so a later `start()` retries); `send_response` and `stop`
-  use it.
+  use it. See "Server lifecycle".
 - **`src/serial.js`.** `serial_settings` validates the snake_case options and maps them to the
   `serialport` settings (`port` → `path`, `baud_rate` → `baudRate`, `parity` with `0`/`1`/`2`
   mapped to `none`/`odd`/`even`, `data_bits` → `dataBits`, `stop_bits` → `stopBits`).
@@ -370,6 +370,46 @@ the move into `CONNECTING`; a caller that arrives while `CONNECTING` is added to
 3. `send_response(pdu, socket?, tid, pid)` — `tcp`: prepend a fresh MBAP header. `rtu` and
    `rtu_over_tcp`: append CRC-16 (LE). Emit `send`, then write to `socket`, or to the serial port
    when there is none.
+
+## Server lifecycle
+
+`start()` and `stop()` (see "Lifecycle" in `spec-server.md`) each go through `#enqueue(kind,
+run)`, which returns the call's promise.
+
+- **Queue.** `#queue` is the settlement of the last run; a new run is chained after it, so runs
+  never overlap. The chained promise never rejects (it resolves to `{ failed, error, handled }`),
+  so a failure does not stop the queue. The public promise is derived from it and nothing in the
+  class attaches a handler to it, except as below.
+- **Joining.** `#last` is `{ kind, promise }` of the last call still pending. A call of the same
+  kind returns `#last.promise`. `#running` is the entry of the run in progress. `#end_run(kind)`
+  clears `#last` when the running call of that kind is about to emit its outcome: the transport's
+  `listening` / `open` handler (`start`), its `close` handler (`stop`), and a failure path of a
+  start, each before it emits. A call made from a listener of that event therefore runs anew; it
+  would otherwise join a run whose outcome is already out and wait forever for a `start` that has
+  passed. The `then` that settles the public promise also clears `#last` if it is still that
+  call.
+- **Runs.** `#run_start` first runs `#run_stop` (the restart; it does nothing when stopped), then
+  `#listen` (TCP-family) or `#open_serial`. `#run_stop` destroys the live sockets and waits for
+  `server.close`, or waits for `serial_port.close`; it returns at once when the listener is not
+  listening or the port is not open, so it never needs a state of its own: the transport is the
+  state. `#listen` creates the `net.Server` on the first run (`set_tcp`) and waits for
+  `listening` or `error`, registering after `set_tcp`'s listeners so `start` / `error` is
+  emitted before the promise settles; `server.listen` throwing at once (an invalid port number)
+  is a failure too. `#open_serial` opens the port with a callback: `@serialport/stream` then
+  passes an open failure to the callback instead of emitting `error`, and emits `open` before
+  calling it.
+- **Errors.** `#busy` is true while a run is in progress. While busy, a transport `error` goes
+  through `#report`, which emits it only when someone listens, and records it in `#reported`.
+  Failures that come with no event (a creation failure, an open failure in the callback, a close
+  failure) are reported by the run itself. When the run fails, `handled` is whether its error is
+  in `#reported`; if so, the settling `then` attaches `catch` to the public promise before it
+  rejects, so no `unhandledRejection` follows. Otherwise the rejection is left unhandled. The
+  check is made at emission, not from `listenerCount` at rejection: a `once('error')` listener
+  is gone by then. `#reported` is cleared after each run. Outside a run a transport `error` is
+  emitted as before, and throws with no listener.
+- **Self-close.** A port closed by its device emits `stop` through the same `close` handler;
+  with no run in progress, `#end_run` changes nothing, and a later `stop()` finds the port closed
+  and resolves at once.
 
 
 ---

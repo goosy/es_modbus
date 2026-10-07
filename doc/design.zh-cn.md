@@ -17,8 +17,8 @@
   `serial_settings` 校验后存入 `this.serial_settings`；其他值抛出异常。构造函数按与客户端相同的
   取值设置 `this.protocol`：`tcp`、`rtu_over_tcp`（数字端口且 `rtu: true`）或 `rtu`（字符串端口，
   忽略 `rtu`）。`is_tcp` 是一个 getter：`typeof this.port === 'number'`，对两种 TCP 系列传输都为真。串口是 `this.serial_port`，由首次 `start()` 创建
-  （`start_serial`：共用同一个待决的创建，失败时将其重置，使之后的 `start()` 重试）；
-  `send_response` 和 `stop` 使用它。
+  （`#open_serial`：共用同一个待决的创建，失败时将其重置，使之后的 `start()` 重试）；
+  `send_response` 和 `stop` 使用它。见“服务端生命周期”。
 - **`src/serial.js`。** `serial_settings` 校验 snake_case 选项，并转换为 `serialport` 的参数
   （`port` → `path`，`baud_rate` → `baudRate`，`parity` 中 `0`/`1`/`2` 映射为 `none`/`odd`/`even`，
   `data_bits` → `dataBits`，`stop_bits` → `stopBits`）。`create_serial_port` 以
@@ -314,6 +314,36 @@
      没有监听者的 `vector_error` 会被忽略。其他异常属于程序缺陷，会向外传播。
 3. `send_response(pdu, socket?, tid, pid)` — `tcp`：前置新的 MBAP 头。`rtu` 和 `rtu_over_tcp`：
    追加 CRC-16（小端）。发出 `send`，然后写入 `socket`；没有 `socket` 时写入串口。
+
+## 服务端生命周期
+
+`start()` 和 `stop()`（见 `spec-server.zh-cn.md` 的“生命周期”）都经过 `#enqueue(kind, run)`，由它
+返回该调用的 Promise。
+
+- **队列。** `#queue` 是上一次执行的落定结果；新的执行接在它之后，因此执行从不重叠。接出来的
+  Promise 从不拒绝（它兑现为 `{ failed, error, handled }`），因此一次失败不会让队列停下。对外的
+  Promise 由它派生，类中除下文所述之外，没有任何代码给它挂处理函数。
+- **并入。** `#last` 是最后一个尚未落定的调用的 `{ kind, promise }`。同类的调用直接返回
+  `#last.promise`。`#running` 是正在执行的那一项。`#end_run(kind)` 在该类的执行即将发出其结果
+  时清除 `#last`：传输的 `listening` / `open` 处理函数（`start`）、`close` 处理函数（`stop`），
+  以及启动的失败路径，都在发出事件之前调用它。因此在该事件的监听函数中发起的调用会重新执行；
+  否则它会并入一个结果已经发出的执行，永远等待一个已经过去的 `start`。落定对外 Promise 的那个
+  `then` 如果发现 `#last` 仍是该调用，也会将其清除。
+- **执行。** `#run_start` 先执行 `#run_stop`（即重启；未启动时什么也不做），再执行 `#listen`
+  （TCP 系列）或 `#open_serial`。`#run_stop` 销毁存活的套接字并等待 `server.close`，或等待
+  `serial_port.close`；监听器未在监听或串口未打开时立即返回，因此它不需要自己的状态：传输本身
+  就是状态。`#listen` 在首次执行时创建 `net.Server`（`set_tcp`），并等待 `listening` 或 `error`；
+  它的监听函数注册在 `set_tcp` 的之后，因此 `start` / `error` 先于 Promise 落定发出；
+  `server.listen` 立即抛出（无效的端口号）也算失败。`#open_serial` 以回调方式打开串口：此时
+  `@serialport/stream` 把打开失败交给回调，而不是发出 `error`，并且在调用回调之前发出 `open`。
+- **错误。** 执行期间 `#busy` 为真。此时传输的 `error` 经过 `#report`：只在有监听者时发出，并
+  记入 `#reported`。不伴随事件的失败（创建失败、回调中的打开失败、关闭失败）由执行本身报告。
+  执行失败时，`handled` 表示其错误是否在 `#reported` 中；若是，落定的 `then` 在 Promise 拒绝之前
+  给它挂上 `catch`，因此不会出现 `unhandledRejection`；否则该拒绝保持未处理。这一判断在发出事件
+  时做出，而不是在拒绝时看 `listenerCount`：`once('error')` 的监听者那时已经移除。每次执行结束后
+  清空 `#reported`。不在执行期间时，传输的 `error` 照旧发出，没有监听者时抛出。
+- **自行关闭。** 串口被设备关闭时，同一个 `close` 处理函数发出 `stop`；没有执行在进行时
+  `#end_run` 不起作用，之后的 `stop()` 发现串口已关闭，立即兑现。
 
 ---
 

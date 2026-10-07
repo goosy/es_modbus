@@ -8,7 +8,7 @@ Slave/server. `extends EventEmitter`.
 import { Modbus_Server } from 'es-modbus';
 
 const server = new Modbus_Server(vector, options);
-server.start();
+await server.start();
 ```
 
 ### options
@@ -100,12 +100,67 @@ with an exception and the `vector` is not called.
 
 ## Methods
 
-- `start()` — begins listening (TCP) or opens the serial port. Safe to call again after a prior
-  `start()`: it closes and re-opens the listener/port. The first serial `start()` creates the
-  serial port, which loads `serialport` and its native binding; a failure to create or open the
-  port is emitted as `error`, and a later `start()` tries again.
-- `stop()` — TCP: destroys all live sockets and closes the server. Serial: closes the port.
+- `start()`, `stop()` — see "Lifecycle".
 - `is_valid_unit_id(unit_id)` — whether the server accepts the given unit ID.
+
+## Lifecycle
+
+`start()` and `stop()` return Promises. The `start` / `stop` events are kept and fire as before;
+the Promises settle after them.
+
+### `start() → Promise<void>`
+
+Begins listening (TCP-family) or opens the serial port. The first serial `start()` creates the
+serial port, which loads `serialport` and its native binding.
+
+- The promise resolves once the listener is listening or the port is open, after the `start`
+  event.
+- It rejects with the first error before that point: an address in use (`EADDRINUSE`), a serial
+  port that cannot be created (for example, its native binding fails to load) or opened. The
+  server is then stopped, and a later `start()` tries again.
+- **Who handles the failure.** A failure the caller handles in neither way crashes the process,
+  as an `error` with no listener always has:
+  - With an `error` listener, the server first marks the promise as handled, then emits the error
+    as `error` and rejects. A caller that does not await it gets no `unhandledRejection`, so code
+    that listens to `error` behaves as before.
+  - Without one, nothing is emitted and the promise just rejects. Any ordinary rejection
+    handling catches the error: `await` inside `try`, `.then(on_ready, on_fail)`, or
+    `.then(on_ready).catch(on_fail)`. Otherwise the rejection is unhandled and Node.js
+    terminates the process.
+- **Restart.** If the server is already started, `start()` first stops it as `stop()` does (every
+  live socket is destroyed, `stop` is emitted), then starts it again; the promise settles on the
+  new start.
+
+### `stop() → Promise<void>`
+
+Stops the server. TCP-family: destroys all live sockets and closes the listener. Serial: closes
+the port.
+
+- The promise resolves once the listener or the port is fully closed, after the `stop` event; or
+  at once if the server is not started (never started, already stopped, or its transport closed
+  by itself).
+- It never rejects: the caller has nothing to recover, and the server counts as stopped anyway. An
+  error while closing is emitted as `error` when the server has an `error` listener, and is
+  dropped otherwise.
+
+### Overlapping calls
+
+`start()` and `stop()` run one at a time, in call order: a call made while another is still
+pending waits for it to settle, then runs. When the last pending call is of the same kind, a new
+call joins it instead and returns the same promise: a second `start()` during a start does not
+restart, and a second `stop()` during a stop does not close twice. A call stops being joinable
+once it emits its outcome: `start` or `stop`, or the `error` that fails it. A call made from a
+listener of that event, or after it, runs anew: `start()` after `start` restarts, and `start()`
+after a failure retries instead of receiving the same failure.
+
+For example, `start(); stop(); start();` called together opens, closes and opens again, while
+`start(); start();` opens once.
+
+### Errors after start
+
+Once started, a transport error is emitted as `error` as before; with no `error` listener,
+`EventEmitter` throws it. A transport that closes by itself (for example, a serial adapter
+unplugged) emits `stop`, and the server counts as stopped.
 
 ## Events
 
@@ -116,7 +171,7 @@ TCP-family transports (TCP and RTU-over-TCP).
 | ------------------- | --------------- | -------- | ------------------------------------------- |
 | `start`             | all             | —        | The listener or serial port is ready.       |
 | `stop`              | all             | —        | The listener or serial port is closed, whether by `stop()` or by the transport itself. |
-| `error`             | all             | `Error`  | Transport error.                            |
+| `error`             | all             | `Error`  | Transport error. While `start()` or `stop()` is pending, emitted only when listened to (see "Lifecycle"). |
 | `socket_connect`    | TCP-family      | `socket` | A client connected.                         |
 | `socket_disconnect` | TCP-family      | `socket` | A client disconnected.                      |
 | `socket_error`      | TCP-family      | `Error`  | A per-connection error.                     |

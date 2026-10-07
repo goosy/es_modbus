@@ -117,9 +117,6 @@ Commands:
 
 Decisions the spec does not make yet. Settle them in the spec first, then implement.
 
-- **Return value of `start()` / `stop()`.** `listen()` and serial `open()` complete
-  asynchronously; the unified `start` / `stop` events are the signal. Decide whether `start()` /
-  `stop()` should also return a Promise (resolved when ready, rejected on failure).
 - **Connection flapping (debounce).** The client sets `is_connected` from the socket's
   `connect` / `close` / `error` events and nothing else: no keep-alive, no heartbeat, no
   smoothing. A closed TCP socket cannot recover, and responses to requests sent on it can never

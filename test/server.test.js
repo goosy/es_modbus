@@ -1,6 +1,7 @@
 import { describe, test, before, after, beforeEach, afterEach } from 'node:test';
 import assert from 'node:assert/strict';
 import { once } from 'node:events';
+import { execFile } from 'node:child_process';
 import { Modbus_Server } from '../src/ModbusServer.js';
 import { set_serial_port_factory } from '../src/serial.js';
 import {
@@ -894,5 +895,242 @@ describe('Modbus_Server RTU-over-TCP', () => {
 		} finally {
 			await stop_tcp_server(server);
 		}
+	});
+});
+
+/** Records the server events in `events`, in order. */
+function record_events(server, names = ['start', 'stop', 'error']) {
+	const events = [];
+	for (const name of names) server.on(name, () => events.push(name));
+	return events;
+}
+
+/** Waits until the pending promise jobs and `unhandledRejection` checks have run. */
+function settle() {
+	return new Promise((resolve) => setImmediate(() => setImmediate(resolve)));
+}
+
+describe('Modbus_Server start() / stop() promises (TCP)', () => {
+	let server;
+	afterEach(async () => {
+		await server?.stop();
+	});
+
+	test('start() resolves after start, stop() after stop', async () => {
+		server = new Modbus_Server({}, { host: HOST, port: 0 });
+		const events = record_events(server);
+		await server.start();
+		assert.deepEqual(events, ['start']);
+		assert.equal(server.server.listening, true);
+		await server.stop();
+		assert.deepEqual(events, ['start', 'stop']);
+		assert.equal(server.server.listening, false);
+	});
+
+	test('stop() resolves at once when not started', async () => {
+		server = new Modbus_Server({}, { host: HOST, port: 0 });
+		const events = record_events(server);
+		await server.stop();
+		await server.start();
+		await server.stop();
+		await server.stop();
+		assert.deepEqual(events, ['start', 'stop']);
+	});
+
+	test('stop() destroys the live sockets before it resolves', async () => {
+		server = new Modbus_Server({}, { host: HOST, port: 0 });
+		await server.start();
+		const socket = await raw_connect(server.server.address().port);
+		await sleep(20);
+		const closed = once(socket, 'close');
+		await server.stop();
+		assert.equal(server.sockets.size, 0);
+		await closed;
+	});
+
+	test('start() while started restarts: stop, then start; live sockets are destroyed', async () => {
+		server = new Modbus_Server({}, { host: HOST, port: 0 });
+		await server.start();
+		const socket = await raw_connect(server.server.address().port);
+		await sleep(20);
+		const closed = once(socket, 'close');
+		const events = record_events(server);
+		await server.start();
+		assert.deepEqual(events, ['stop', 'start']);
+		assert.equal(server.server.listening, true);
+		await closed;
+	});
+
+	test('a start() during a start joins it; a stop() during a stop joins it', async () => {
+		server = new Modbus_Server({}, { host: HOST, port: 0 });
+		const events = record_events(server);
+		const a = server.start();
+		const b = server.start();
+		assert.equal(a, b);
+		await a;
+		const c = server.stop();
+		const d = server.stop();
+		assert.equal(c, d);
+		await c;
+		assert.deepEqual(events, ['start', 'stop']);
+	});
+
+	test('start(); stop(); start(); runs in call order', async () => {
+		server = new Modbus_Server({}, { host: HOST, port: 0 });
+		const events = record_events(server);
+		await Promise.all([server.start(), server.stop(), server.start()]);
+		assert.deepEqual(events, ['start', 'stop', 'start']);
+		assert.equal(server.server.listening, true);
+	});
+
+	test('a start() from the start listener restarts instead of joining', async () => {
+		server = new Modbus_Server({}, { host: HOST, port: 0 });
+		const events = record_events(server);
+		let restarted;
+		server.once('start', () => {
+			restarted = server.start();
+		});
+		await server.start();
+		await restarted;
+		assert.deepEqual(events, ['start', 'stop', 'start']);
+	});
+
+	describe('a port in use', () => {
+		let other;
+		beforeEach(async () => {
+			other = new Modbus_Server({}, { host: HOST, port: 0 });
+			await other.start();
+		});
+		afterEach(async () => {
+			await other.stop();
+		});
+
+		test('without an error listener, start() rejects and nothing is emitted', async () => {
+			server = new Modbus_Server({}, { host: HOST, port: other.server.address().port });
+			await assert.rejects(server.start(), { code: 'EADDRINUSE' });
+			assert.equal(server.server.listening, false);
+		});
+
+		test('with an error listener, the error is emitted and the rejection is handled', async () => {
+			server = new Modbus_Server({}, { host: HOST, port: other.server.address().port });
+			const errors = [];
+			server.on('error', (error) => errors.push(error));
+			const unhandled = [];
+			const on_unhandled = (reason) => unhandled.push(reason);
+			process.on('unhandledRejection', on_unhandled);
+			try {
+				// Not awaited, as code written before start() returned a promise
+				server.start();
+				await once(server, 'error');
+				await settle();
+			} finally {
+				process.off('unhandledRejection', on_unhandled);
+			}
+			assert.equal(errors.length, 1);
+			assert.equal(errors[0].code, 'EADDRINUSE');
+			assert.deepEqual(unhandled, []);
+		});
+
+		test('with an error listener, an awaiting caller also gets the rejection', async () => {
+			server = new Modbus_Server({}, { host: HOST, port: other.server.address().port });
+			server.on('error', () => { });
+			await assert.rejects(server.start(), { code: 'EADDRINUSE' });
+		});
+
+		test('a later start() retries', async () => {
+			server = new Modbus_Server({}, { host: HOST, port: other.server.address().port });
+			await assert.rejects(server.start());
+			await other.stop();
+			await server.start();
+			assert.equal(server.server.listening, true);
+		});
+
+		test('handled by nobody, the failure terminates the process', async () => {
+			const url = new URL('../src/ModbusServer.js', import.meta.url).href;
+			const script = `import { Modbus_Server } from '${url}';
+				new Modbus_Server({}, { host: '${HOST}', port: ${other.server.address().port} }).start();`;
+			const [exit_code, stderr] = await new Promise((resolve) => {
+				execFile(process.execPath, ['--input-type=module', '-e', script], (error, _, stderr) => {
+					resolve([error?.code ?? 0, stderr]);
+				});
+			});
+			assert.notEqual(exit_code, 0);
+			assert.match(stderr, /EADDRINUSE/);
+		});
+	});
+});
+
+describe('Modbus_Server start() / stop() promises (serial)', () => {
+	before(() => set_serial_port_factory(async (settings) => new Fake_Serial_Port(settings)));
+	after(() => set_serial_port_factory(null));
+
+	test('start() resolves after start, stop() after stop', async () => {
+		const server = new Modbus_Server({}, { port: 'COM9' });
+		const events = record_events(server);
+		await server.start();
+		assert.deepEqual(events, ['start']);
+		assert.equal(server.serial_port.isOpen, true);
+		await server.stop();
+		assert.deepEqual(events, ['start', 'stop']);
+		assert.equal(server.serial_port.isOpen, false);
+	});
+
+	test('start() while open closes and re-opens the port', async () => {
+		const server = new Modbus_Server({}, { port: 'COM9' });
+		await server.start();
+		const events = record_events(server);
+		await server.start();
+		assert.deepEqual(events, ['stop', 'start']);
+		assert.equal(server.serial_port.opens, 2);
+		await server.stop();
+	});
+
+	test('stop() resolves at once after the port closed by itself', async () => {
+		const server = new Modbus_Server({}, { port: 'COM9' });
+		await server.start();
+		const stopped = once(server, 'stop');
+		server.serial_port.close();
+		await stopped;
+		const events = record_events(server);
+		await server.stop();
+		assert.deepEqual(events, []);
+	});
+
+	test('an open failure rejects start(); without a listener nothing is emitted', async () => {
+		const server = new Modbus_Server({}, { port: 'COM9' });
+		const ports = [];
+		set_serial_port_factory(async (settings) => {
+			const port = Object.assign(new Fake_Serial_Port(settings), { fail_open: true });
+			ports.push(port);
+			return port;
+		});
+		try {
+			await assert.rejects(server.start(), /open failed/);
+			// The port was created; the next start() opens it again
+			ports[0].fail_open = false;
+			await server.start();
+			assert.equal(ports.length, 1);
+			await server.stop();
+		} finally {
+			set_serial_port_factory(async (settings) => new Fake_Serial_Port(settings));
+		}
+	});
+
+	test('a creation failure rejects start(); a start() from the error listener retries', async () => {
+		let attempts = 0;
+		set_serial_port_factory(async (settings) => {
+			if (++attempts === 1) throw new Error('no native binding');
+			return new Fake_Serial_Port(settings);
+		});
+		const server = new Modbus_Server({}, { port: 'COM9' });
+		let retried;
+		server.once('error', () => {
+			retried = server.start();
+		});
+		await assert.rejects(server.start(), /no native binding/);
+		await retried;
+		assert.equal(attempts, 2);
+		assert.equal(server.serial_port.isOpen, true);
+		await server.stop();
 	});
 });

@@ -148,57 +148,186 @@ export class Modbus_Server extends EventEmitter {
 		return this.accept_all_units || this.unit_ids.has(unit_id);
 	}
 
+	// The start/stop queue: the settlement of the last run, and the last call still pending
+	#queue = Promise.resolve();
+	#last = null; // { kind, promise }
+	#running = null; // the entry of the running call
+	#busy = false; // a start or stop is running
+	#reported = new Set(); // errors emitted as `error` by the current run
+
+	/**
+	 * Begins listening (TCP-family) or opens the serial port; restarts a started server. Resolves
+	 * once ready, after the `start` event; rejects with the first error before that.
+	 * @return {Promise<void>}
+	 */
 	start() {
-		if (!this.is_tcp) {
-			this.start_serial();
+		return this.#enqueue('start', () => this.#run_start());
+	}
+
+	/**
+	 * Destroys the live sockets and closes the listener, or closes the serial port. Resolves once
+	 * closed, after the `stop` event, or at once when not started; never rejects.
+	 * @return {Promise<void>}
+	 */
+	stop() {
+		return this.#enqueue('stop', () => this.#run_stop());
+	}
+
+	/**
+	 * Runs `run` after every earlier start/stop has settled. A call of the same kind as the last
+	 * pending one joins it. A failure emitted as `error` is marked handled before the promise
+	 * rejects; any other is left to the caller, unhandled when the caller ignores it.
+	 */
+	#enqueue(kind, run) {
+		if (this.#last?.kind === kind) return this.#last.promise;
+		const last = { kind, promise: null };
+		// Never rejects, so a failure does not stop the queue
+		const settled = this.#queue.then(async () => {
+			this.#busy = true;
+			this.#running = last;
+			try {
+				await run();
+				return { failed: false };
+			} catch (error) {
+				return { failed: true, error, handled: this.#reported.has(error) };
+			} finally {
+				this.#busy = false;
+				this.#running = null;
+				this.#reported.clear();
+			}
+		});
+		this.#queue = settled;
+		last.promise = settled.then(({ failed, error, handled }) => {
+			if (this.#last === last) this.#last = null;
+			if (!failed) return;
+			if (handled) last.promise.catch(() => { });
+			throw error;
+		});
+		this.#last = last;
+		return last.promise;
+	}
+
+	/**
+	 * The running call of that kind is about to emit its outcome: from then on, as from a
+	 * listener of that event, a new call starts a new run instead of joining it.
+	 */
+	#end_run(kind) {
+		if (this.#running?.kind === kind && this.#last === this.#running) this.#last = null;
+	}
+
+	// Emits an error of a running start/stop as `error`, only when someone listens
+	#report(error) {
+		if (this.listenerCount('error') === 0) return;
+		this.#reported.add(error);
+		this.emit('error', error);
+	}
+
+	// A transport `error`: owned by the running start/stop, if any
+	#transport_error(error) {
+		if (this.#busy) this.#report(error);
+		else this.emit('error', error);
+	}
+
+	async #run_start() {
+		// A restart stops first; nothing to do when stopped
+		await this.#run_stop();
+		if (this.is_tcp) await this.#listen();
+		else await this.#open_serial();
+	}
+
+	async #run_stop() {
+		if (this.is_tcp) {
+			if (!this.server?.listening) return;
+			for (const socket of this.sockets) socket.destroy();
+			this.sockets.clear();
+			// The callback runs on `close`, after the `stop` event
+			await new Promise((resolve) => this.server.close(() => resolve()));
 			return;
 		}
-		if (this.initialized) {
-			if (this.server.listening) this.server.close();
-			this.server.listen(this.port, this.host);
-			return;
+		const serial_port = this.serial_port;
+		if (!serial_port?.isOpen) return;
+		await new Promise((resolve) => serial_port.close((error) => {
+			// The port counts as closed anyway
+			if (error) this.#report(error);
+			resolve();
+		}));
+	}
+
+	// Listens on the TCP server, created by the first start
+	#listen() {
+		if (!this.initialized) {
+			this.set_tcp();
+			this.initialized = true;
 		}
-		this.set_tcp();
-		this.server.listen(this.port, this.host);
-		this.initialized = true;
+		const server = this.server;
+		return new Promise((resolve, reject) => {
+			// Registered after `set_tcp`'s listeners: `start` or `error` is emitted first
+			const on_listening = () => {
+				server.off('error', on_error);
+				resolve();
+			};
+			const on_error = (error) => {
+				server.off('listening', on_listening);
+				reject(error);
+			};
+			server.once('listening', on_listening);
+			server.once('error', on_error);
+			try {
+				server.listen(this.port, this.host);
+			} catch (error) {
+				// An invalid port number throws at once
+				server.off('listening', on_listening);
+				server.off('error', on_error);
+				this.#end_run('start');
+				this.#report(error);
+				reject(error);
+			}
+		});
 	}
 
 	// The serial port creation, done once
 	#creating = null;
 
 	/**
-	 * Creates the serial port on the first start, then (re)opens it. A failure, including a
-	 * serialport native binding that cannot be loaded, is emitted as `error`.
+	 * Creates the serial port on the first start, then opens it. A failed creation, including a
+	 * serialport native binding that cannot be loaded, is forgotten so a later start retries.
 	 */
-	async start_serial() {
+	async #open_serial() {
+		let serial_port;
 		try {
-			this.#creating ??= create_serial_port(this.serial_settings).then((serial_port) => {
-				this.serial_port = serial_port;
+			this.#creating ??= create_serial_port(this.serial_settings).then((port) => {
+				this.serial_port = port;
 				this.set_rtu();
 				this.initialized = true;
-				return serial_port;
+				return port;
 			});
-			const serial_port = await this.#creating;
-			if (serial_port.isOpen) {
-				await new Promise((resolve) => serial_port.close(() => resolve()));
-			}
-			// An open failure is emitted as `error` by the port
-			serial_port.open();
+			serial_port = await this.#creating;
 		} catch (error) {
 			this.#creating = null;
-			this.emit('error', error);
+			this.#end_run('start');
+			this.#report(error);
+			throw error;
 		}
+		// With a callback, an open failure is passed to it, not emitted; `open` comes first
+		await new Promise((resolve, reject) => serial_port.open((error) => {
+			if (!error) return resolve();
+			this.#end_run('start');
+			this.#report(error);
+			reject(error);
+		}));
 	}
 
 	set_rtu() {
 		const serial_port = this.serial_port;
 		serial_port.on('open', () => {
+			this.#end_run('start');
 			this.emit('start');
 		});
 		serial_port.on('data', (data) => this.on_data(data));
-		serial_port.on('error', (err) => this.emit('error', err));
+		serial_port.on('error', (error) => this.#transport_error(error));
 		serial_port.on('close', () => {
 			this.#keep(undefined, EMPTY);
+			this.#end_run('stop');
 			this.emit('stop');
 		});
 	}
@@ -216,9 +345,19 @@ export class Modbus_Server extends EventEmitter {
 				this.emit('socket_disconnect', socket);
 			});
 		});
-		this.server.on('listening', () => this.emit('start'));
-		this.server.on('error', (error) => this.emit('error', error));
-		this.server.on('close', () => this.emit('stop'));
+		this.server.on('listening', () => {
+			this.#end_run('start');
+			this.emit('start');
+		});
+		this.server.on('error', (error) => {
+			// A server error during a run is a listen failure
+			this.#end_run('start');
+			this.#transport_error(error);
+		});
+		this.server.on('close', () => {
+			this.#end_run('stop');
+			this.emit('stop');
+		});
 	}
 
 	_on_data(request, socket) {
@@ -515,17 +654,5 @@ export class Modbus_Server extends EventEmitter {
 		buffer.writeUInt8(function_code | 0x80, 1);
 		buffer.writeUInt8(exception_code, 2);
 		return buffer;
-	}
-
-	stop() {
-		if (this.server) {
-			for (const socket of this.sockets) {
-				socket.destroy();
-			}
-			this.sockets.clear();
-			this.server.close();
-		} else if (this.serial_port?.isOpen) {
-			this.serial_port.close();
-		}
 	}
 }
