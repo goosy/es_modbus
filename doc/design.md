@@ -2,8 +2,8 @@
 
 **How** the library is built: internal mechanics, implementation status, known gaps, and TODOs.
 Behavior contracts are in the `spec-*` series; this file documents implementation and rough edges
-so future changes are made with eyes open. This is the single design document for now; split it
-into `design-<topic>.md` files when it grows.
+so future changes are made with eyes open. A topic that grows is split into a `design-<topic>.md`
+file; so far [design-test.md](./design-test.md), the test suite.
 
 ## Transport selection
 
@@ -441,6 +441,6 @@ Since Node.js v26.4.0, a native module that calls into JavaScript from async wor
 microtask queue itself. On Windows, `@serialport/bindings-cpp` 13 does not do this after it
 completes a read or write. Received data and write completions are therefore delivered only when
 another macrotask runs, and the client and the server stall on a serial port until then. Details
-and upstream issues are in `spec-test.md`, "Serial test environment".
+and upstream issues are in `design-test.md`, "Serial test environment".
 
 If an upgraded `serialport` does not fix this, consider a workaround in this library.

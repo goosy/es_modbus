@@ -3,8 +3,8 @@
 > 本文是 [design.md](design.md) 的中文译本。
 
 本库**如何**构建：内部机制、实现现状、已知缺陷和待办事项。行为约定见 `spec-*` 系列；本文记录
-实现及粗糙之处，以便后续改动时心中有数。目前这是唯一的设计文档；内容变多后再拆分为
-`design-<topic>.md`。
+实现及粗糙之处，以便后续改动时心中有数。内容变多的主题拆分为 `design-<topic>.md`；目前已拆出
+[design-test.zh-cn.md](./design-test.zh-cn.md)，即测试套件。
 
 ## 传输方式选择
 
@@ -369,7 +369,7 @@
 
 自 Node.js v26.4.0 起，原生模块在异步工作中调用 JavaScript 之后，须自行执行 microtask 队列。在
 Windows 上，`@serialport/bindings-cpp` 13 完成读写后没有这样做。因此收到的数据和写入完成要等下一个宏任务
-执行时才被交付，在此之前串口上的客户端和服务端都会停滞。详情和上游 issue 见 `spec-test.zh-cn.md` 的
+执行时才被交付，在此之前串口上的客户端和服务端都会停滞。详情和上游 issue 见 `design-test.zh-cn.md` 的
 “串口测试环境”。
 
 如果 `serialport` 升级后仍未修复这个问题，再考虑在本库中加入规避措施。

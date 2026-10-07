@@ -9,10 +9,10 @@ Sub-documents:
 - [spec-protocol.md](./spec-protocol.md) — Modbus framing, range notation, function codes, CRC.
 - [spec-client.md](./spec-client.md) — `Modbus_Client` API, options, events, behavior contract.
 - [spec-server.md](./spec-server.md) — `Modbus_Server` API, the `vector` handler interface, events.
-- [spec-test.md](./spec-test.md) — the automated test suite: coverage, commands, serial test
-  environment, known-gap convention.
 - [design.md](./design.md) — how it is built: internal mechanics, implementation status, known
   gaps and TODOs.
+- [design-test.md](./design-test.md) — how it is tested: what is tested where, commands, the
+  serial test environment, the known-gap convention.
 
 ## Goal
 
@@ -41,7 +41,7 @@ mix. The server works in PDU addresses only.
 - Client-side transaction tracking, per-request timeout, send pacing, and automatic reconnect
   for TCP and RTU-over-TCP.
 - Event emitters on both classes for wire tracing (`send` / `receive`) and lifecycle.
-- An automated test suite for the codec, the server and the client (see `spec-test.md`).
+- An automated test suite for the codec, the server and the client (see `design-test.md`).
 
 ### Out of scope
 
@@ -88,7 +88,7 @@ mix. The server works in PDU addresses only.
 | `dist/modbus.js`      | Build output (one ES module) and the package `exports` entry.   |
 | `prebuilds/`          | Build output: the `@serialport/bindings-cpp` native prebuilds, found by the bundle at `dist/../prebuilds`. |
 | `THIRD_PARTY_LICENSES` | Build output: the license texts of the bundled packages.       |
-| `test/*.test.js`      | Automated tests (see `spec-test.md`).                           |
+| `test/*.test.js`      | Automated tests (see `design-test.md`).                         |
 | `test/helpers.js`     | Shared test fixtures.                                           |
 
 The build outputs are git-ignored, produced by `pnpm build` / `prepare`, and published through

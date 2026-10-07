@@ -10,9 +10,9 @@
 - [spec-protocol.zh-cn.md](./spec-protocol.zh-cn.md) — Modbus 帧格式、区间表示法、功能码、CRC。
 - [spec-client.zh-cn.md](./spec-client.zh-cn.md) — `Modbus_Client` 的 API、选项、事件、行为约定。
 - [spec-server.zh-cn.md](./spec-server.zh-cn.md) — `Modbus_Server` 的 API、`vector` 处理接口、事件。
-- [spec-test.zh-cn.md](./spec-test.zh-cn.md) — 自动化测试套件：覆盖范围、命令、串口测试环境、
-  已知缺陷的标记约定。
 - [design.zh-cn.md](./design.zh-cn.md) — 如何构建：内部机制、实现现状、已知缺陷与待办事项。
+- [design-test.zh-cn.md](./design-test.zh-cn.md) — 如何测试：什么在哪里测、命令、串口测试环境、
+  已知缺陷的标记约定。
 
 ## 目标
 
@@ -36,7 +36,7 @@
 - 多单元服务端：单个服务端实例可承载多个单元 ID（unit ID），并按单元 ID 路由。
 - 客户端的事务跟踪、单请求超时、发送节流，以及 TCP 和 RTU-over-TCP 的自动重连。
 - 两个类都提供事件发射器，用于线路跟踪（`send` / `receive`）和生命周期通知。
-- 覆盖编解码、服务端和客户端的自动化测试套件（见 `spec-test.zh-cn.md`）。
+- 覆盖编解码、服务端和客户端的自动化测试套件（见 `design-test.zh-cn.md`）。
 
 ### 范围之外
 
@@ -80,7 +80,7 @@
 | `dist/modbus.js`      | 构建产物（单个 ES 模块），也是包 `exports` 的入口。              |
 | `prebuilds/`          | 构建产物：`@serialport/bindings-cpp` 的原生预编译文件，打包产物在 `dist/../prebuilds` 处查找它们。 |
 | `THIRD_PARTY_LICENSES` | 构建产物：被打包的包的许可证文本。                              |
-| `test/*.test.js`      | 自动化测试（见 `spec-test.zh-cn.md`）。                          |
+| `test/*.test.js`      | 自动化测试（见 `design-test.zh-cn.md`）。                        |
 | `test/helpers.js`     | 共享的测试夹具。                                                 |
 
 构建产物已被 git 忽略，由 `pnpm build` / `prepare` 生成，并通过 `package.json` 的 `files` 发布。
