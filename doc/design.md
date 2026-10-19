@@ -451,10 +451,15 @@ run)`, which returns the call's promise.
 
 ## Known issue: serial I/O stalls on Windows with Node.js v26.4.0 and later
 
-Since Node.js v26.4.0, a native module that calls into JavaScript from async work has to run the
-microtask queue itself. On Windows, `@serialport/bindings-cpp` 13 does not do this after it
-completes a read or write. Received data and write completions are therefore delivered only when
-another macrotask runs, and the client and the server stall on a serial port until then. Details
-and upstream issues are in `design-test.md`, "Serial test environment".
+Since Node.js v26.4.0, Node.js no longer runs the microtask queue and `process.nextTick` handlers
+after a native module calls into JavaScript from async work; the module has to do it itself with
+`CallbackScope` or `MakeCallback` ([nodejs/node#66158](https://github.com/nodejs/node/issues/66158),
+closed as not planned; [nodejs/node-addon-api#1756](https://github.com/nodejs/node-addon-api/issues/1756)).
+On Windows, `@serialport/bindings-cpp` 13 completes reads and writes with a plain call
+([serialport/node-serialport#3148](https://github.com/serialport/node-serialport/issues/3148)).
+Received data and write completions are therefore delivered only when another macrotask runs,
+such as a timer, closing the port, or another write, and the client and the server stall on a
+serial port until then. The serial driver is not the cause: through native Win32 calls, a pending
+read on the same port completes as soon as data arrives.
 
 If an upgraded `serialport` does not fix this, consider a workaround in this library.

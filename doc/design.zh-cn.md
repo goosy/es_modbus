@@ -378,9 +378,14 @@
 
 ## 已知问题：在 Windows 上，Node.js v26.4.0 及以后的版本中串口读写会停滞
 
-自 Node.js v26.4.0 起，原生模块在异步工作中调用 JavaScript 之后，须自行执行 microtask 队列。在
-Windows 上，`@serialport/bindings-cpp` 13 完成读写后没有这样做。因此收到的数据和写入完成要等下一个宏任务
-执行时才被交付，在此之前串口上的客户端和服务端都会停滞。详情和上游 issue 见 `design-test.zh-cn.md` 的
-“串口测试环境”。
+自 Node.js v26.4.0 起，原生模块在异步工作中调用 JavaScript 之后，Node.js 不再代为执行 microtask 队列和
+`process.nextTick` 处理函数，模块须自行用 `CallbackScope` 或 `MakeCallback` 完成
+（[nodejs/node#66158](https://github.com/nodejs/node/issues/66158)，以“不予修复”关闭；
+[nodejs/node-addon-api#1756](https://github.com/nodejs/node-addon-api/issues/1756)）。
+`@serialport/bindings-cpp` 13 在 Windows 上用普通调用完成读写
+（[serialport/node-serialport#3148](https://github.com/serialport/node-serialport/issues/3148)）。
+因此收到的数据和写入完成要等下一个宏任务（例如定时器、关闭端口或再一次写入）执行时才被交付，在此之前
+串口上的客户端和服务端都会停滞。原因不在串口驱动：用原生 Win32 调用，同一个端口上挂起的读操作在数据
+到达时会立即完成。
 
 如果 `serialport` 升级后仍未修复这个问题，再考虑在本库中加入规避措施。

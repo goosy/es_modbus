@@ -50,26 +50,39 @@ missing or older than any file in `src/`.
 
 ## Serial tests
 
-- The serial tests need a pair of serial ports linked like a null-modem cable, such as a
-  com0com pair. The server side opens the first port, the peer (a raw `SerialPort`, or
-  `Modbus_Client`) the second.
-- The pair is set with the environment variable `MODBUS_SERIAL_PORTS="<server>,<peer>"`; the
-  default is `COM11,COM12`. `MODBUS_SERIAL_PORTS=none` skips the serial tests.
-- Before the serial tests run, a pre-check opens both ports. If either port cannot be opened, the
-  serial suites are skipped with the reason, and the rest of the suite still runs.
+The serial tests run over a link whose two ends are set by the environment variable
+`MODBUS_SERIAL_PORTS="<first>,<second>"`. They are off by default, since a machine need not have
+serial ports, virtual or physical: when the variable is unset, the serial suites are skipped.
 
-### Serial test environment
+The variable takes one of three forms. An end containing `:` is a TCP end; any other end is a
+serial device path.
 
-The serial suites run on Windows 11 over a com0com 3.0.0.0 pair with default parameters.
+| Form                     | Link                                                                                                      |
+| ------------------------ | --------------------------------------------------------------------------------------------------------- |
+| `COM11,COM12`            | Two serial ports linked like a null-modem cable: a com0com pair, or two physical ports wired together.    |
+| `COM3,192.168.1.10:4001` | A serial port wired to a transparent serial-to-TCP converter in TCP server mode; the tests connect to it. |
+| `COM3,:4001`             | The same, with the converter in TCP client mode; the tests listen on the port and wait for it.            |
 
-On Windows with Node.js v26.4.0 and later, the serial tests fail. Since v26.4.0, Node.js no
-longer runs the microtask queue and `process.nextTick` handlers after a native module calls into
-JavaScript from async work; the module has to do it itself with `CallbackScope` or
-`MakeCallback` ([nodejs/node#66158](https://github.com/nodejs/node/issues/66158), closed as not
-planned; [nodejs/node-addon-api#1756](https://github.com/nodejs/node-addon-api/issues/1756)).
-On Windows, `@serialport/bindings-cpp` 13 completes reads and writes with a plain call, so the
-promise that delivers the result settles only when another macrotask runs, such as a timer,
-closing the port, or another write
-([serialport/node-serialport#3148](https://github.com/serialport/node-serialport/issues/3148)).
-The serial driver is not the cause: through native Win32 calls, the same com0com pair completes
-a pending read as soon as data arrives.
+- **Transparent converters only.** A TCP end must be a converter that passes bytes through
+  unchanged. A Modbus RTU-to-TCP gateway is not supported: it rewrites the frames, so the tests
+  could not see the bytes on the line. The tests speak RTU-over-TCP on a TCP end.
+- **Serial settings.** The suites run at 9600 baud, 8 data bits, no parity, 1 stop bit (9600 8N1),
+  the usual Modbus default. A converter's serial side must be set to the same.
+- **Baud-rate sweep.** With two serial ports, a sweep runs first: at each of 1200, 2400, 4800,
+  9600, 19200, 38400, 57600 and 115200 baud (8N1) it sends a request from the peer and checks the
+  response. A rate that fails is not an error, since a port need not support every rate. The sweep
+  always tries every rate and, when done, lists all the rates that worked; it passes when at least
+  one worked. When none works, it fails and the other serial suites are not run. With a TCP end
+  there is no sweep, since the converter's rate is fixed.
+- **Suite baud rate with two serial ports.** 9600 is the industry default, so the other serial
+  suites use it whenever the rates that worked include it. Only when that list lacks 9600 do they
+  run at the first rate in it.
+- **Roles.** With two serial ports, the server side opens the first and the peer (a raw serial
+  port, or `Modbus_Client`) the second. With a TCP end, the library under test is on the serial
+  port in both roles, and the TCP end is its peer: a client, a server or a raw socket, whichever
+  the connection direction allows (`Modbus_Server` only listens; `Modbus_Client` only connects).
+- **Set means required.** Before the serial suites run, a pre-check opens every serial end and
+  connects or waits for every TCP end. When `MODBUS_SERIAL_PORTS` is set and an end cannot be
+  used, the serial suites fail with the reason; they are skipped only when the variable is unset.
+- On Windows with Node.js v26.4.0 and later the serial tests stall and fail; see `design.md`,
+  "Known issue: serial I/O stalls on Windows with Node.js v26.4.0 and later".
