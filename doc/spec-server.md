@@ -111,7 +111,7 @@ the Promises settle after them.
 ### `start() → Promise<void>`
 
 Begins listening (TCP-family) or opens the serial port. The first serial `start()` creates the
-serial port, which loads `serialport` and its native binding.
+serial port, which loads `serialport-rs` and its native addon.
 
 - The promise resolves once the listener is listening or the port is open, after the `start`
   event.

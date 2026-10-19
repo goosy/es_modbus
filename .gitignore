@@ -24,7 +24,7 @@ yarn.lock
 .vscode/
 .vs/
 /dist/
-/prebuilds/
+/native/
 /THIRD_PARTY_LICENSES
 
 # AI guidance (local only; canonical rules live in doc/ and the ancestor AGENTS.md)

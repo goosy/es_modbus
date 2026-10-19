@@ -265,8 +265,8 @@ export class Modbus_Server extends EventEmitter {
 	#creating = null;
 
 	/**
-	 * Creates the serial port on the first start, then opens it. A failed creation, including a
-	 * serialport native binding that cannot be loaded, is forgotten so a later start retries.
+	 * Creates the serial port on the first start, then opens it. A failed creation is forgotten so
+	 * a later start retries; a native addon that cannot be loaded fails the open.
 	 */
 	async #open_serial() {
 		let serial_port;

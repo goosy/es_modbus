@@ -244,7 +244,7 @@ it is already closed. It never rejects. Concurrent calls settle together, on the
   enough for the probes to run; the timeout count covers a client that polls often.
 - **Serial port.** The port is created and opened at construction when `reconnect_time > 0`,
   otherwise on demand by the first request or `connect()`; concurrent callers share one open.
-  Creating the port loads `serialport` and its native binding, so a platform where the binding
+  Creating the port loads `serialport-rs` and its native addon, so a platform where the addon
   cannot load fails here, not at import. A failed creation or open emits `error`, rejects
   `connect()`, and rejects every pending request with `connection lost`; a later request or
   `connect()` tries again. A closed serial port is never re-opened automatically (a close usually

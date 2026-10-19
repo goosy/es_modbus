@@ -23,7 +23,7 @@ needs. A topic split out of [design.md](./design.md).
 `test/util.test.js` covers `src/util.js`; `test/client.test.js` and `test/server.test.js` cover
 each class alone; `test/tcp.test.js`, `test/serial.test.js` and `test/serial-bridge.test.js` run
 the classes end to end over loopback TCP, a serial port pair and a simulated serial line;
-`test/bundle.test.js` covers the build output `dist/modbus.js` with `prebuilds/`. Fixtures live in
+`test/bundle.test.js` covers the build output `dist/modbus.js` with `native/`. Fixtures live in
 `test/helpers.js` and `test/serial-bridge.js`.
 
 ## Commands
@@ -84,5 +84,3 @@ serial device path.
 - **Set means required.** Before the serial suites run, a pre-check opens every serial end and
   connects or waits for every TCP end. When `MODBUS_SERIAL_PORTS` is set and an end cannot be
   used, the serial suites fail with the reason; they are skipped only when the variable is unset.
-- On Windows with Node.js v26.4.0 and later the serial tests stall and fail; see `design.md`,
-  "Known issue: serial I/O stalls on Windows with Node.js v26.4.0 and later".

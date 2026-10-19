@@ -48,20 +48,22 @@
 ## 工具与依赖
 
 - **运行时：** 使用 ES 模块的 Node.js（`"type": "module"`）。运行时只使用 Node 内置模块
-  （`node:net`、`node:events`），串口/RTU 路径另外使用 `serialport`。
-  发布的包**没有任何运行时依赖**：用户只需安装 `es-modbus`。`serialport`（其中的
-  `@serialport/stream` 和 `@serialport/bindings-cpp` 两部分）被打包进 `dist/modbus.js`，
-  `@serialport/bindings-cpp` 的原生预编译文件随包放在 `prebuilds/` 中（基于 N-API，每个平台一份文件
-  即可用于所有 Node.js 版本）。打包产物只在首次使用串口时才加载 `serialport`，绝不在导入时加载：
-  加载它会加载原生绑定，而在没有预编译文件的平台上（或禁止原生模块的进程中），TCP 也必须可用。
-  被打包的包的许可证随包放在 `THIRD_PARTY_LICENSES` 中。
+  （`node:net`、`node:events`），串口/RTU 路径另外使用 `serialport-rs`。
+  发布的包**没有任何运行时依赖**：用户只需安装 `es-modbus`。`serialport-rs` 的 JavaScript 部分
+  （其中的 stream 和 binding 模块）被打包进 `dist/modbus.js`，它的原生模块随包放在 `native/` 中
+  （基于 N-API，每个平台一份文件即可用于所有 Node.js 版本）。打包产物只在首次使用串口时才加载
+  `serialport-rs`，绝不在导入时加载：加载它会加载原生模块，而在没有原生模块的平台上（或禁止原生模块
+  的进程中），TCP 也必须可用。被打包的包的许可证随包放在 `THIRD_PARTY_LICENSES` 中，原生模块所含
+  Rust crate 的许可证放在 `native/THIRD_PARTY_LICENSES.md` 中。
+- **串口支持的平台：** 随包提供原生模块的平台有 Windows（x64、ia32、arm64）、macOS（x64、arm64）、
+  使用 glibc 或 musl 的 Linux（x64、arm64、armv7）、使用 glibc 的 armv6 Linux，以及 Android（arm64、
+  armv7）。在其他平台上，串口路径在首次使用时失败；TCP 在所有平台上都可用。
 - **Node.js 版本：** `>=20.11`（`engines`），因为用到了 `import.meta.dirname`。
 - **包管理器：** pnpm（必须使用 — 见 `AGENTS.md`）。
 - **打包器：** Rolldown，由 `build.js` 通过其 API 调用（内置 Node 模块解析与 CommonJS 互操作，
   无需插件）。
-- **测试：** Node.js 内置测试运行器（`node:test`）。`serialport`、`@serialport/stream` 和
-  `@serialport/bindings-cpp` 列在 `devDependencies` 中：构建时打包它们，串口测试用 `serialport`
-  作为原始对端串口。
+- **测试：** Node.js 内置测试运行器（`node:test`）。`serialport-rs` 列在 `devDependencies` 中：
+  构建时打包它，串口测试用它的 `SerialPort` 作为原始对端串口。
 - **代码检查：** ESLint 加 `@stylistic/eslint-plugin`（`eslint.config.js`），均在 `devDependencies`
   中锁定精确版本。ESLint 推荐规则负责发现代码问题；`@stylistic` 只统一空白（Tab 缩进、空格、引号、
   分号），不重新折行，因此手工排版的表格保持原样。不使用会重排代码的格式化工具（Prettier、Biome）。
@@ -74,11 +76,11 @@
 | `src/ModbusClient.js` | 客户端类。                                                       |
 | `src/ModbusServer.js` | 服务端类。                                                       |
 | `src/util.js`         | 纯协议编解码（帧解析、CRC、区间解析）。无 I/O。                  |
-| `src/serial.js`       | 串口选项校验，以及串口创建（首次使用时才加载 `serialport`）。    |
-| `build.js`            | 构建：将 `src/index.js` 打包为 `dist/modbus.js`，复制 `prebuilds/`，生成 `THIRD_PARTY_LICENSES`。 |
+| `src/serial.js`       | 串口选项校验，以及串口创建（首次使用时才加载 `serialport-rs`）。 |
+| `build.js`            | 构建：将 `src/index.js` 打包为 `dist/modbus.js`，复制 `native/`，生成 `THIRD_PARTY_LICENSES`。 |
 | `eslint.config.js`    | ESLint 与 `@stylistic` 配置。                                    |
 | `dist/modbus.js`      | 构建产物（单个 ES 模块），也是包 `exports` 的入口。              |
-| `prebuilds/`          | 构建产物：`@serialport/bindings-cpp` 的原生预编译文件，打包产物在 `dist/../prebuilds` 处查找它们。 |
+| `native/`             | 构建产物：`serialport-rs` 的原生模块（打包产物在 `dist/../native` 处查找它们）及其 Rust crate 的许可证。 |
 | `THIRD_PARTY_LICENSES` | 构建产物：被打包的包的许可证文本。                              |
 | `test/*.test.js`      | 自动化测试（见 `design-test.zh-cn.md`）。                        |
 | `test/helpers.js`     | 共享的测试夹具。                                                 |

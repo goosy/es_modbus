@@ -102,7 +102,7 @@ Modicon 表示法（服务端只使用 PDU 地址）。始终会提供 `unit_id`
 
 ### `start() → Promise<void>`
 
-开始监听（TCP 系列）或打开串口。首次串口 `start()` 会创建串口，此时才加载 `serialport` 及其原生
+开始监听（TCP 系列）或打开串口。首次串口 `start()` 会创建串口，此时才加载 `serialport-rs` 及其原生
 绑定。
 
 - 监听器开始监听或串口打开后兑现，晚于 `start` 事件。

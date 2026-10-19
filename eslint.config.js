@@ -5,7 +5,7 @@ import globals from 'globals';
 // ESLint finds code problems; @stylistic normalizes whitespace without
 // re-wrapping lines, so hand-laid tables keep their layout.
 export default [
-	{ ignores: ['dist/', 'prebuilds/'] },
+	{ ignores: ['dist/', 'native/'] },
 	js.configs.recommended,
 	stylistic.configs.customize({
 		indent: 'tab',

@@ -19,14 +19,16 @@
   忽略 `rtu`）。`is_tcp` 是一个 getter：`typeof this.port === 'number'`，对两种 TCP 系列传输都为真。串口是 `this.serial_port`，由首次 `start()` 创建
   （`#open_serial`：共用同一个待决的创建，失败时将其重置，使之后的 `start()` 重试）；
   `send_response` 和 `stop` 使用它。见“服务端生命周期”。
-- **`src/serial.js`。** `serial_settings` 校验 snake_case 选项，并转换为 `serialport` 的参数
-  （`port` → `path`，`baud_rate` → `baudRate`，`parity` 中 `0`/`1`/`2` 映射为 `none`/`odd`/`even`，
-  `data_bits` → `dataBits`，`stop_bits` → `stopBits`）。`create_serial_port` 以
-  `@serialport/bindings-cpp` 的 `autoDetect()` 绑定和 `autoOpen: false` 创建一个未打开的
-  `SerialPortStream`（`@serialport/stream`）。它通过动态 `import()` 引用这两个包，绝不静态导入：
-  Rolldown 会把对 CommonJS 包的静态导入变成顶层的 `require`，在导入时就执行并加载原生绑定；动态
-  导入则变成同一文件内延迟执行的 `require`（`codeSplitting: false`）。只导入这两个包而不导入
-  `serialport`，可以把用不到的 parser 排除在打包产物之外。`set_serial_port_factory` 供测试替换工厂。
+- **`src/serial.js`。** `serial_settings` 校验 snake_case 选项，并转换为 `serialport-rs` 的参数，
+  它们与 `serialport` 的参数相同（`port` → `path`，`baud_rate` → `baudRate`，`parity` 中
+  `0`/`1`/`2` 映射为 `none`/`odd`/`even`，`data_bits` → `dataBits`，`stop_bits` → `stopBits`）。
+  `create_serial_port` 以 `serialport-rs` 的 `RustBinding` 和 `autoOpen: false` 创建一个未打开的
+  `SerialPortStream`。它通过动态 `import()` 引用 `serialport-rs/lib/stream.js` 和
+  `serialport-rs/lib/binding.js`，绝不静态导入：Rolldown 会把对 CommonJS 模块的静态导入变成顶层的
+  `require`，在导入时就执行；动态导入则变成同一文件内延迟执行的 `require`（`codeSplitting: false`）。
+  原生模块本身要到第一个串口打开时才加载。只导入这两个模块而不导入包入口，可以把 parser 和 mock
+  绑定排除在打包产物之外；该包没有 `exports` 映射，因此可以按路径导入它的文件。
+  `set_serial_port_factory` 供测试替换工厂。
 - **客户端串口生命周期。** `set_serial` 为 `_open` 赋值：它只创建一次串口（创建失败会被遗忘，
   下次尝试会重试），挂接串口事件（`listen_serial`），并打开它（并发调用者共用一次尝试）。失败时执行 `abort_pending()` 并发出 `error`。连接阶段跟随串口的 `open` / `close` /
   `error` 事件（见“客户端连接状态”）。串口绝不进入 `BACKING_OFF`：关闭后转入 `IDLE`，已关闭的
@@ -35,16 +37,18 @@
 ## 构建（`build.js`）
 
 - 用 Rolldown API 把 `src/index.js` 打包为单个 ES 模块 `dist/modbus.js`。`transform.define` 把
-  `__dirname` 替换为 `import.meta.dirname`：绑定以 `path.join(__dirname, "../")` 查找预编译文件，
-  而 ES 模块没有 `__dirname`。因此打包产物在 `dist/../prebuilds`（即包根目录）处找到它们。打包代码
-  中只有这一处 `__dirname`，替换不会影响其他代码。
-- 用 `@serialport/bindings-cpp` 的 `prebuilds/` 原样替换 `prebuilds/`：`node-gyp-build` 会选择
-  `prebuilds/<平台>-<架构>/`，在 Linux 上再按 glibc 或 musl 选择文件。
+  `__dirname` 替换为 `import.meta.dirname`：`serialport-rs` 在 `path.join(__dirname, "..", "native")`
+  下查找原生模块，而 ES 模块没有 `__dirname`。因此打包产物在 `dist/../native`（即包根目录）处找到
+  它们。打包代码中只有这一处 `__dirname`，替换不会影响其他代码。
+- 用 `serialport-rs` 的 `native/` 中受支持平台的原生模块替换 `native/`：每个 Rust 目标三元组一个
+  `<目标>/serialport-rs.node`，由它的加载器按平台、架构、libc 和 ARM 版本选择。`build.js` 中的
+  `NATIVE_TARGETS` 列出这些三元组，与 `spec.zh-cn.md` 的“串口支持的平台”一致。同时复制
+  `serialport-rs` 的 `THIRD_PARTY_LICENSES.md`，即编译进原生模块的 Rust crate 的许可证。
 - 依据打包产物的模块 ID 生成 `THIRD_PARTY_LICENSES`：列出产物中每个来自 `node_modules` 的包的
-  名称、版本、许可证和许可证文件，许可证文本相同的包共用一项。原生预编译文件属于
-  `@serialport/bindings-cpp`，它也在其中。
+  名称、版本、许可证和许可证文件，许可证文本相同的包共用一项。包有 `NOTICE` 文件时，按 Apache-2.0
+  的要求附在其许可证文本之后。原生模块属于 `serialport-rs`，它也在其中。
 - 用户若再次打包 es-modbus，`import.meta.dirname` 会变成其自身产物的目录；他们需要把
-  `prebuilds/` 复制到产物旁边，或把 es-modbus 设为 external。
+  `native/` 复制到产物旁边，或把 es-modbus 设为 external。
 
 ## 客户端区间参数（`read` / `write`）
 
@@ -364,7 +368,7 @@
   就是状态。`#listen` 在首次执行时创建 `net.Server`（`set_tcp`），并等待 `listening` 或 `error`；
   它的监听函数注册在 `set_tcp` 的之后，因此 `start` / `error` 先于 Promise 落定发出；
   `server.listen` 立即抛出（无效的端口号）也算失败。`#open_serial` 以回调方式打开串口：此时
-  `@serialport/stream` 把打开失败交给回调，而不是发出 `error`，并且在调用回调之前发出 `open`。
+  `SerialPortStream` 把打开失败交给回调，而不是发出 `error`，并且在调用回调之前发出 `open`。
 - **错误。** 执行期间 `#busy` 为真。此时传输的 `error` 经过 `#report`：只在有监听者时发出，并
   记入 `#reported`。不伴随事件的失败（创建失败、回调中的打开失败、关闭失败）由执行本身报告。
   执行失败时，`handled` 表示其错误是否在 `#reported` 中；若是，落定的 `then` 在 Promise 拒绝之前
@@ -376,16 +380,11 @@
 
 ---
 
-## 已知问题：在 Windows 上，Node.js v26.4.0 及以后的版本中串口读写会停滞
+## 已知问题：在 Windows 上，串口读操作晚一个定时器周期才完成
 
-自 Node.js v26.4.0 起，原生模块在异步工作中调用 JavaScript 之后，Node.js 不再代为执行 microtask 队列和
-`process.nextTick` 处理函数，模块须自行用 `CallbackScope` 或 `MakeCallback` 完成
-（[nodejs/node#66158](https://github.com/nodejs/node/issues/66158)，以“不予修复”关闭；
-[nodejs/node-addon-api#1756](https://github.com/nodejs/node-addon-api/issues/1756)）。
-`@serialport/bindings-cpp` 13 在 Windows 上用普通调用完成读写
-（[serialport/node-serialport#3148](https://github.com/serialport/node-serialport/issues/3148)）。
-因此收到的数据和写入完成要等下一个宏任务（例如定时器、关闭端口或再一次写入）执行时才被交付，在此之前
-串口上的客户端和服务端都会停滞。原因不在串口驱动：用原生 Win32 调用，同一个端口上挂起的读操作在数据
-到达时会立即完成。
-
-如果 `serialport` 升级后仍未修复这个问题，再考虑在本库中加入规避措施。
+在 Windows 上，`serialport-rs` 0.7.0 把 `COMMTIMEOUTS.ReadIntervalTimeout` 设为 1 ms。串口驱动按系统
+定时器度量这个间隔，因此一次读操作要在最后一个字节到达后约一个定时器周期（通常 12 到 16 ms）才完成。
+帧按长度切分，默认 `silence` 为 50 ms，所以帧切分不受影响；只是每次串口事务都要多花这么长时间。
+在一对虚拟串口上实测，把 `ReadIntervalTimeout` 和 `ReadTotalTimeoutMultiplier` 设为 `MAXDWORD`、
+`ReadTotalTimeoutConstant` 设为 `MAXDWORD - 1`，读操作就会在数据到达时立即完成；这个修复应在
+`serialport-rs` 中进行。

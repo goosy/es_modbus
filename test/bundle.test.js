@@ -1,4 +1,4 @@
-// Checks the build output `dist/modbus.js` (the package entry) and `prebuilds/`, not `src/`.
+// Checks the build output `dist/modbus.js` (the package entry) and `native/`, not `src/`.
 // Skipped when the bundle is missing or older than `src/`; run `pnpm build` first.
 import { describe, test, before, after } from 'node:test';
 import assert from 'node:assert/strict';
@@ -27,9 +27,9 @@ async function check_bundle() {
 
 const skip = await check_bundle();
 
-/** Whether the serialport native binding is loaded in this process. */
-function native_binding_loaded() {
-	return process.report.getReport().sharedObjects.some((file) => /bindings-cpp.*\.node$/.test(file));
+/** Whether the serialport-rs native addon is loaded in this process. */
+function native_addon_loaded() {
+	return process.report.getReport().sharedObjects.some((file) => /serialport-rs\.node$/.test(file));
 }
 
 describe('build output dist/modbus.js', { skip }, () => {
@@ -49,32 +49,34 @@ describe('build output dist/modbus.js', { skip }, () => {
 		assert.equal(pkg.exports['.'], './dist/modbus.js');
 	});
 
-	test('serialport is bundled, not imported from outside', async () => {
+	test('serialport-rs is bundled without its parsers, not imported from outside', async () => {
 		const code = await readFile(bundle_url, 'utf8');
 		assert.match(code, /SerialPortStream = class extends/);
-		assert.doesNotMatch(code, /from\s*["']@?serialport/);
-		assert.doesNotMatch(code, /require\(\s*["']@?serialport/);
-		// ES modules have no __dirname; the bindings find prebuilds/ from the bundle's directory
+		assert.doesNotMatch(code, /ReadlineParser/);
+		assert.doesNotMatch(code, /from\s*["']serialport-rs/);
+		assert.doesNotMatch(code, /require\(\s*["']serialport-rs/);
+		// ES modules have no __dirname; serialport-rs finds native/ from the bundle's directory
 		assert.doesNotMatch(code, /\b__dirname\b/);
 	});
 
-	test('the native prebuilds and the third-party licenses are next to dist/', async () => {
-		const platforms = await readdir(new URL('prebuilds/', root_url));
-		assert.ok(platforms.some((name) => name.startsWith(`${process.platform}-`)), platforms.join());
+	test('the native addons and the third-party licenses are next to dist/', async () => {
+		const entries = await readdir(new URL('native/', root_url));
+		assert.ok(entries.includes('THIRD_PARTY_LICENSES.md'), entries.join());
+		assert.ok(entries.some((name) => name.endsWith('-pc-windows-msvc')), entries.join());
 		const licenses = await readFile(new URL('THIRD_PARTY_LICENSES', root_url), 'utf8');
-		for (const name of ['@serialport/stream', '@serialport/bindings-cpp', 'debug', 'node-gyp-build']) {
-			assert.match(licenses, new RegExp(`^${name}@`, 'm'), name);
-		}
+		assert.match(licenses, /^serialport-rs@/m);
+		// Its NOTICE follows its license text
+		assert.match(licenses, /^Copyright \d+ DragonWork$/m);
 	});
 
-	test('importing the bundle does not load the native binding; the first serial start does', async () => {
-		assert.equal(native_binding_loaded(), false);
+	test('importing the bundle does not load the native addon; the first serial start does', async () => {
+		assert.equal(native_addon_loaded(), false);
 		const server = new bundle.Modbus_Server({}, { port: 'COM_NONEXISTENT_ES_MODBUS' });
 		server.start();
 		const [error] = await once(server, 'error');
-		// Opening a missing device fails in the native binding, which therefore loaded
+		// Opening a missing device fails in the native addon, which therefore loaded
 		assert.doesNotMatch(error.message, /native build/);
-		assert.equal(native_binding_loaded(), true);
+		assert.equal(native_addon_loaded(), true);
 	});
 
 	describe('TCP round trip with the bundled classes', () => {

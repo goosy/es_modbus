@@ -21,7 +21,7 @@
 `test/util.test.js` 覆盖 `src/util.js`；`test/client.test.js` 和 `test/server.test.js` 分别单独
 覆盖一个类；`test/tcp.test.js`、`test/serial.test.js` 和 `test/serial-bridge.test.js` 分别通过回环
 TCP、一对串口和模拟串行线路对两个类做端到端测试；`test/bundle.test.js` 覆盖构建产物 `dist/modbus.js`
-及 `prebuilds/`。夹具位于 `test/helpers.js` 和 `test/serial-bridge.js`。
+及 `native/`。夹具位于 `test/helpers.js` 和 `test/serial-bridge.js`。
 
 ## 命令
 
@@ -72,5 +72,3 @@ TCP、一对串口和模拟串行线路对两个类做端到端测试；`test/bu
   服务端或原始套接字（`Modbus_Server` 只监听，`Modbus_Client` 只主动连接）。
 - **设置即必需。** 串口测试组运行前会做一次预检：打开每个串口端，连接或等待每个 TCP 端。设置了
   `MODBUS_SERIAL_PORTS` 而某一端无法使用时，串口测试组失败并注明原因；只有未设置该变量时才跳过。
-- 在 Windows 上，Node.js v26.4.0 及以后的版本中串口测试会停滞并失败；见 `design.zh-cn.md` 的
-  “已知问题：在 Windows 上，Node.js v26.4.0 及以后的版本中串口读写会停滞”。

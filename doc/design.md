@@ -21,15 +21,17 @@ file; so far [design-test.md](./design-test.md), the test suite.
   creation and resets it on failure so a later `start()` retries); `send_response` and `stop`
   use it. See "Server lifecycle".
 - **`src/serial.js`.** `serial_settings` validates the snake_case options and maps them to the
-  `serialport` settings (`port` → `path`, `baud_rate` → `baudRate`, `parity` with `0`/`1`/`2`
-  mapped to `none`/`odd`/`even`, `data_bits` → `dataBits`, `stop_bits` → `stopBits`).
-  `create_serial_port` makes a closed `SerialPortStream` (`@serialport/stream`) with the
-  `autoDetect()` binding of `@serialport/bindings-cpp` and `autoOpen: false`. It reaches both
-  packages through dynamic `import()`, never a static one: Rolldown turns a static import of a
-  CommonJS package into a top-level `require` that would run at import and load the native
-  binding, while a dynamic import becomes a deferred `require` inside the same file
-  (`codeSplitting: false`). Importing the two packages instead of `serialport` leaves its unused
-  parsers out of the bundle. `set_serial_port_factory` swaps the factory for tests.
+  `serialport-rs` settings, which are those of `serialport` (`port` → `path`, `baud_rate` →
+  `baudRate`, `parity` with `0`/`1`/`2` mapped to `none`/`odd`/`even`, `data_bits` → `dataBits`,
+  `stop_bits` → `stopBits`). `create_serial_port` makes a closed `SerialPortStream` with the
+  `RustBinding` of `serialport-rs` and `autoOpen: false`. It reaches `serialport-rs/lib/stream.js`
+  and `serialport-rs/lib/binding.js` through dynamic `import()`, never a static one: Rolldown
+  turns a static import of a CommonJS module into a top-level `require` that would run at import,
+  while a dynamic import becomes a deferred `require` inside the same file (`codeSplitting:
+  false`). The native addon itself loads only when the first port opens. Importing the two
+  modules instead of the package entry leaves its parsers and mock binding out of the bundle; the
+  package has no `exports` map, so its files can be imported by path. `set_serial_port_factory`
+  swaps the factory for tests.
 - **Client serial lifecycle.** `set_serial` assigns `_open`, which creates the port once (a
   failed creation is forgotten, so the next attempt retries), attaches its events
   (`listen_serial`), and opens it (concurrent callers share one attempt). A failure runs
@@ -40,18 +42,21 @@ file; so far [design-test.md](./design-test.md), the test suite.
 ## Build (`build.js`)
 
 - Bundles `src/index.js` with the Rolldown API into the single ES module `dist/modbus.js`.
-  `transform.define` replaces `__dirname` with `import.meta.dirname`: the bindings locate their
-  prebuilds with `path.join(__dirname, "../")`, and an ES module has no `__dirname`. The bundle
-  therefore finds them at `dist/../prebuilds`, the package root. `__dirname` appears only there
-  in the bundled code, so the replacement touches nothing else.
-- Replaces `prebuilds/` with a copy of `@serialport/bindings-cpp`'s `prebuilds/`, unchanged:
-  `node-gyp-build` picks `prebuilds/<platform>-<arch>/` and, on Linux, the glibc or musl file.
+  `transform.define` replaces `__dirname` with `import.meta.dirname`: `serialport-rs` locates its
+  native addon under `path.join(__dirname, "..", "native")`, and an ES module has no
+  `__dirname`. The bundle therefore finds the addons at `dist/../native`, the package root.
+  `__dirname` appears only there in the bundled code, so the replacement touches nothing else.
+- Replaces `native/` with the addons of the supported platforms from `serialport-rs`'s
+  `native/`, one `<target>/serialport-rs.node` per Rust target triple, which its loader picks by
+  platform, architecture, libc and ARM version. `NATIVE_TARGETS` in `build.js` lists the triples,
+  matching "Serial platforms" in `spec.md`. It also copies `serialport-rs`'s
+  `THIRD_PARTY_LICENSES.md`, the licenses of the Rust crates compiled into the addons.
 - Writes `THIRD_PARTY_LICENSES` from the bundle's module IDs: every `node_modules` package in
   the bundle with its name, version, license and license file, packages with the same license
-  text sharing an entry. The native prebuilds belong to `@serialport/bindings-cpp`, which is
-  among them.
+  text sharing an entry. A package's `NOTICE` file, when it has one, follows its license text, as
+  Apache-2.0 requires. The native addons belong to `serialport-rs`, which is among them.
 - A user who bundles es-modbus again moves `import.meta.dirname` to their own bundle; they must
-  copy `prebuilds/` next to it, or keep es-modbus external.
+  copy `native/` next to it, or keep es-modbus external.
 
 ## Client range argument (`read` / `write`)
 
@@ -430,7 +435,7 @@ run)`, which returns the call's promise.
   state. `#listen` creates the `net.Server` on the first run (`set_tcp`) and waits for
   `listening` or `error`, registering after `set_tcp`'s listeners so `start` / `error` is
   emitted before the promise settles; `server.listen` throwing at once (an invalid port number)
-  is a failure too. `#open_serial` opens the port with a callback: `@serialport/stream` then
+  is a failure too. `#open_serial` opens the port with a callback: `SerialPortStream` then
   passes an open failure to the callback instead of emitting `error`, and emits `open` before
   calling it.
 - **Errors.** `#busy` is true while a run is in progress. While busy, a transport `error` goes
@@ -449,17 +454,12 @@ run)`, which returns the call's promise.
 
 ---
 
-## Known issue: serial I/O stalls on Windows with Node.js v26.4.0 and later
+## Known issue: serial reads on Windows complete one timer tick late
 
-Since Node.js v26.4.0, Node.js no longer runs the microtask queue and `process.nextTick` handlers
-after a native module calls into JavaScript from async work; the module has to do it itself with
-`CallbackScope` or `MakeCallback` ([nodejs/node#66158](https://github.com/nodejs/node/issues/66158),
-closed as not planned; [nodejs/node-addon-api#1756](https://github.com/nodejs/node-addon-api/issues/1756)).
-On Windows, `@serialport/bindings-cpp` 13 completes reads and writes with a plain call
-([serialport/node-serialport#3148](https://github.com/serialport/node-serialport/issues/3148)).
-Received data and write completions are therefore delivered only when another macrotask runs,
-such as a timer, closing the port, or another write, and the client and the server stall on a
-serial port until then. The serial driver is not the cause: through native Win32 calls, a pending
-read on the same port completes as soon as data arrives.
-
-If an upgraded `serialport` does not fix this, consider a workaround in this library.
+On Windows, `serialport-rs` 0.7.0 sets `COMMTIMEOUTS.ReadIntervalTimeout` to 1 ms. The serial
+driver measures that interval with the system timer, so a read completes about one timer tick
+(typically 12 to 16 ms) after its last byte arrives. Frames are delimited by their length and the
+default `silence` is 50 ms, so framing is unaffected; each serial transaction takes that much
+longer. Measured over a virtual pair, setting `ReadIntervalTimeout` and
+`ReadTotalTimeoutMultiplier` to `MAXDWORD` and `ReadTotalTimeoutConstant` to `MAXDWORD - 1`
+makes reads complete as soon as data arrives; the fix belongs in `serialport-rs`.

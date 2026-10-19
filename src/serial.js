@@ -66,23 +66,24 @@ export function silence_time({ baudRate, parity, dataBits, stopBits }, silence) 
 }
 
 /**
- * Creates a closed serial port stream. serialport is bundled, but loaded only here, on first
- * use: loading it loads its native binding, which must not break a TCP-only user where that
- * binding is unavailable.
+ * Creates a closed serial port stream. serialport-rs is bundled, but loaded only here, on first
+ * use: a TCP-only user must not depend on it, nor on its native addon, which loads when the
+ * first port opens. Only its stream and binding modules are imported, so its parsers stay out
+ * of the bundle.
  */
 async function create_stream(settings) {
-	const [{ SerialPortStream }, { autoDetect }] = await Promise.all([
-		import('@serialport/stream'),
-		import('@serialport/bindings-cpp'),
+	const [{ SerialPortStream }, { RustBinding }] = await Promise.all([
+		import('serialport-rs/lib/stream.js'),
+		import('serialport-rs/lib/binding.js'),
 	]);
-	return new SerialPortStream({ binding: autoDetect(), ...settings, autoOpen: false });
+	return new SerialPortStream({ binding: RustBinding, ...settings, autoOpen: false });
 }
 
 let factory = create_stream;
 
 /**
  * Creates a closed serial port from settings made by serial_settings().
- * @returns {Promise<import('@serialport/stream').SerialPortStream>}
+ * @returns {Promise<import('serialport-rs').SerialPortStream>}
  */
 export function create_serial_port(settings) {
 	return factory(settings);

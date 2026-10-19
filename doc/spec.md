@@ -54,21 +54,25 @@ mix. The server works in PDU addresses only.
 ## Tools and dependencies
 
 - **Runtime:** Node.js with ES modules (`"type": "module"`). Only Node built-ins are used at
-  runtime (`node:net`, `node:events`), plus `serialport` for the serial/RTU paths.
-  The published package has **no runtime dependencies**: users install `es-modbus` alone.
-  `serialport` (its `@serialport/stream` and `@serialport/bindings-cpp` parts) is bundled into
-  `dist/modbus.js`, and the native prebuilds of `@serialport/bindings-cpp` ship in `prebuilds/`
-  (N-API, so one file per platform serves every Node.js version). The bundle loads `serialport`
-  only on the first use of a serial port, never at import: loading it loads the native binding,
-  and a platform without a prebuild (or a process that forbids native addons) must still be able
-  to use TCP. The licenses of the bundled packages ship in `THIRD_PARTY_LICENSES`.
+  runtime (`node:net`, `node:events`), plus `serialport-rs` for the serial/RTU paths.
+  The published package has **no runtime dependencies**: users install `es-modbus` alone. The
+  JavaScript of `serialport-rs` (its stream and binding modules) is bundled into
+  `dist/modbus.js`, and its native addons ship in `native/` (N-API, so one file per platform
+  serves every Node.js version). The bundle loads `serialport-rs` only on the first use of a
+  serial port, never at import: loading it loads the native addon, and a platform without an
+  addon (or a process that forbids native addons) must still be able to use TCP. The licenses of
+  the bundled packages ship in `THIRD_PARTY_LICENSES`, those of the Rust crates in the native
+  addons in `native/THIRD_PARTY_LICENSES.md`.
+- **Serial platforms:** native addons ship for Windows (x64, ia32, arm64), macOS (x64, arm64),
+  Linux with glibc or musl (x64, arm64, armv7), Linux with glibc on armv6, and Android (arm64,
+  armv7). On any other platform the serial paths fail on first use; TCP works everywhere.
 - **Node.js version:** `>=20.11` (`engines`), for `import.meta.dirname`.
 - **Package manager:** pnpm (required — see `AGENTS.md`).
 - **Bundler:** Rolldown, driven by `build.js` through its API (built-in node resolution and
   CommonJS interop; no plugins).
-- **Tests:** the Node.js built-in test runner (`node:test`). `serialport`,
-  `@serialport/stream` and `@serialport/bindings-cpp` are `devDependencies`: the build bundles
-  them, and the serial tests use `serialport` for a raw peer port.
+- **Tests:** the Node.js built-in test runner (`node:test`). `serialport-rs` is a
+  `devDependency`: the build bundles it, and the serial tests use its `SerialPort` for a raw peer
+  port.
 - **Linter:** ESLint with `@stylistic/eslint-plugin` (`eslint.config.js`), all pinned to exact
   versions in `devDependencies`. ESLint's recommended rules find code problems; `@stylistic`
   normalizes whitespace (tab indent, spacing, quotes, semicolons) without re-wrapping lines, so
@@ -82,11 +86,11 @@ mix. The server works in PDU addresses only.
 | `src/ModbusClient.js` | Client class.                                                   |
 | `src/ModbusServer.js` | Server class.                                                   |
 | `src/util.js`         | Pure protocol codec (frame parsing, CRC, range parsing). No I/O. |
-| `src/serial.js`       | Serial options check, and serial port creation (loads `serialport` on first use). |
-| `build.js`            | The build: bundles `src/index.js` → `dist/modbus.js`, copies `prebuilds/`, writes `THIRD_PARTY_LICENSES`. |
+| `src/serial.js`       | Serial options check, and serial port creation (loads `serialport-rs` on first use). |
+| `build.js`            | The build: bundles `src/index.js` → `dist/modbus.js`, copies `native/`, writes `THIRD_PARTY_LICENSES`. |
 | `eslint.config.js`    | ESLint and `@stylistic` configuration.                          |
 | `dist/modbus.js`      | Build output (one ES module) and the package `exports` entry.   |
-| `prebuilds/`          | Build output: the `@serialport/bindings-cpp` native prebuilds, found by the bundle at `dist/../prebuilds`. |
+| `native/`             | Build output: the `serialport-rs` native addons, found by the bundle at `dist/../native`, and the licenses of their Rust crates. |
 | `THIRD_PARTY_LICENSES` | Build output: the license texts of the bundled packages.       |
 | `test/*.test.js`      | Automated tests (see `design-test.md`).                         |
 | `test/helpers.js`     | Shared test fixtures.                                           |

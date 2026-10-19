@@ -10,7 +10,7 @@ import { describe, test, before, after, beforeEach } from 'node:test';
 import assert from 'node:assert/strict';
 import { once } from 'node:events';
 import { createServer, connect } from 'node:net';
-import { SerialPort } from 'serialport';
+import { SerialPort } from 'serialport-rs';
 import { Modbus_Client } from '../src/ModbusClient.js';
 import { Modbus_Server } from '../src/ModbusServer.js';
 import { sleep, hex, rtu_frame, collect, create_memory_vector } from './helpers.js';
