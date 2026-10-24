@@ -7,7 +7,7 @@ Slave/server. `extends EventEmitter`.
 ```js
 import { Modbus_Server } from 'es-modbus';
 
-const server = new Modbus_Server(vector, options);
+const server = new Modbus_Server(handler, options);
 await server.start();
 ```
 
@@ -41,7 +41,7 @@ The server's transport is chosen at construction from `port` and `rtu`:
 | `string`                      | ignored | RTU            | Opens the serial port and answers as a Modbus RTU slave.         |
 
 An RTU server is a Modbus slave on a serial line: it has no connections and frames its responses
-with CRC-16. Request handling (unit ID routing, the `vector`, exception responses) is identical
+with CRC-16. Request handling (unit ID routing, the `handler`, exception responses) is identical
 across the three transports; only the framing and the lifecycle events differ.
 
 ### `set_unit_ids(unit_id)`
@@ -55,19 +55,19 @@ across the three transports; only the framing and the lifecycle events differ.
 How unit IDs behave depends on the transport (see "Unit ID" in `spec-protocol.md`):
 
 - **TCP.** Every unit ID, `0` included, is an ordinary unit. A request to an accepted unit is
-  served through the `vector`; a request to a non-accepted unit gets an exception response with
+  served through the `handler`; a request to a non-accepted unit gets an exception response with
   code `0x0B`.
 - **Serial bus (RTU, RTU-over-TCP).** The server is one slave on a shared line, so a request to a
   non-accepted unit ID is not answered at all. A request to unit `0` is a broadcast: if unit `0`
   is accepted (explicitly, or because every ID is accepted) a write request is executed; a read
   request is ignored. A broadcast is never answered, whether or not unit `0` is accepted.
 
-## The `vector` interface
+## The `handler` interface
 
 The server holds no data. Every request is serviced by calling one of these caller-supplied
 functions (names are `snake_case`). Addresses passed in are **PDU addresses**: the **raw on-wire
 (0-based)** value as a `number`, never Modicon notation (the server works in PDU addresses only).
-`unit_id` is always supplied so one `vector` can back multiple units.
+`unit_id` is always supplied so one `handler` can back multiple units.
 
 | Method                                            | Used for                        | Returns            |
 | ------------------------------------------------- | ------------------------------- | ------------------ |
@@ -91,14 +91,14 @@ Argument types: `addr`, `quantity` and `unit_id` are `number`s; for `set_coil`, 
 `boolean`; for `set_holding_register`, `value` is an integer in `0..65535`. For `set_coils`,
 `values` is an `Array` of `boolean`s; for `set_holding_registers`, an `Array` of integers in
 `0..65535`. `values[i]` is the value for address `addr + i`, and `values.length` is the quantity
-of the request. The array is new for each call; the `vector` may keep it.
+of the request. The array is new for each call; the `handler` may keep it.
 
 A batch read method returns an `Array` or a typed array (for example a `Uint16Array`) of exactly
 `quantity` values, `values[i]` being the value at address `addr + i`. The server reads it before
-the method is called again; the `vector` may return a view of its own storage.
+the method is called again; the `handler` may return a view of its own storage.
 
 **Batch methods.** The six batch methods (`get_coils`, `get_discrete_inputs`,
-`get_holding_registers`, `get_input_registers`, `set_coils`, `set_holding_registers`) are optional. They let a `vector`
+`get_holding_registers`, `get_input_registers`, `set_coils`, `set_holding_registers`) are optional. They let a `handler`
 handle the points of one request as a whole:
 
 - **Batch writes, consistency**: update a multi-register value in one step instead of exposing
@@ -107,12 +107,12 @@ handle the points of one request as a whole:
   changes and notifying observers, once per request instead of once per point.
 - **Batch reads**: a data source with side effects on each read (diagnostic events, access
   counts, refresh on demand) has them once per request instead of once per point, and a request
-  can become one range read of the data source. Consistency is not a reason here: the `vector`
+  can become one range read of the data source. Consistency is not a reason here: the `handler`
   is synchronous, so point-by-point reads already see one snapshot.
 
 The rules:
 
-- A request calls its batch method once with every point of the request when the `vector` has
+- A request calls its batch method once with every point of the request when the `handler` has
   that function; otherwise it calls the single-point method once per point, in ascending address
   order. FC 1 uses `get_coils` / `get_coil`, FC 2 `get_discrete_inputs` / `get_discrete_input`
   (see "Discrete inputs" below), FC 3 `get_holding_registers` /
@@ -121,48 +121,48 @@ The rules:
 - The choice is made by function code, not by quantity: a request for a single point still uses
   the batch method when there is one. FC 5 and FC 6 always call `set_coil` and
   `set_holding_register`.
-- The batch methods are independent: a `vector` may provide any of them.
+- The batch methods are independent: a `handler` may provide any of them.
 - The choice is made for each request, when it is served.
-- A batch method is called only for a valid request, like any other `vector` function, and a
-  throwing one is handled the same way (`vector_error`, exception `0x04`). Without the batch
+- A batch method is called only for a valid request, like any other `handler` function, and a
+  throwing one is handled the same way (`handler_error`, exception `0x04`). Without the batch
   method, a `set_coil` / `set_holding_register` that throws stops the request: the points before
   it are written, the rest are not.
 - A batch read result that is not an `Array` or typed array, or whose length is not `quantity`,
-  is handled as a throwing `vector`: `vector_error` with a `TypeError`, and exception `0x04`.
+  is handled as a throwing `handler`: `handler_error` with a `TypeError`, and exception `0x04`.
   Its register values are checked like those of the single-point accessors (see "An invalid
   register value" below).
 
-**The `vector` is synchronous.** Its functions return their values directly; a returned Promise
+**The `handler` is synchronous.** Its functions return their values directly; a returned Promise
 is not supported. The data must be reachable in real time when a function is called. Keeping the
 data in memory (for example in a `Buffer`) is the recommended pattern. Data that lives elsewhere,
 such as a PLC, is the caller's responsibility to bring into memory and keep in sync, for example
 event-driven; reading from a slow source is not a use case of `Modbus_Server`.
 
-**Discrete inputs.** `get_discrete_input` and `get_discrete_inputs` let a `vector` keep discrete
+**Discrete inputs.** `get_discrete_input` and `get_discrete_inputs` let a `handler` keep discrete
 inputs (FC 2) apart from coils (FC 1); both are optional.
 
-- When the `vector` has either of them, FC 2 uses them: `get_discrete_inputs` once per request
+- When the `handler` has either of them, FC 2 uses them: `get_discrete_inputs` once per request
   when present, otherwise `get_discrete_input` once per point.
-- When it has neither, FC 2 is served like FC 1, through `get_coils` / `get_coil`, so a `vector`
+- When it has neither, FC 2 is served like FC 1, through `get_coils` / `get_coil`, so a `handler`
   that does not tell the two tables apart keeps working.
 - FC 1 always uses the coil methods.
 
 The server packs/serializes the values read into the response.
 
-**A throwing `vector`.** If a `vector` function throws, the server emits `vector_error` with the
+**A throwing `handler`.** If a `handler` function throws, the server emits `handler_error` with the
 error and answers the request with exception `0x04` (Server Device Failure) instead of a data
-response. Unlike `error`, `vector_error` is ignored when nobody listens, so a faulty `vector`
+response. Unlike `error`, `handler_error` is ignored when nobody listens, so a faulty `handler`
 never brings the server down.
 
 **An invalid register value.** A register read accessor that returns anything other than an
 integer in `0..65535` (`undefined`, `null`, a fraction, a string, a value out of range) is handled
-as a throwing `vector`: the server emits `vector_error` with a `TypeError` and answers exception
+as a throwing `handler`: the server emits `handler_error` with a `TypeError` and answers exception
 `0x04`. The value is never coerced. Coil read accessors return truthy or falsy, so any value is
 valid.
 
-**Invalid requests.** Before calling the `vector`, the server validates the request data and the
+**Invalid requests.** Before calling the `handler`, the server validates the request data and the
 address range (see "Exception responses" in `spec-protocol.md`); an invalid request is answered
-with an exception and the `vector` is not called.
+with an exception and the `handler` is not called.
 
 ## Methods
 
@@ -243,4 +243,4 @@ TCP-family transports (TCP and RTU-over-TCP).
 | `socket_error`      | TCP-family      | `Error`  | A per-connection error.                     |
 | `send`              | all             | `Buffer` | A frame was written.                        |
 | `receive`           | all             | `Buffer` | A frame was received.                       |
-| `vector_error`      | all             | `Error`, request | A `vector` function threw; the request was answered with `0x04`. |
+| `handler_error`     | all             | `Error`, request | A `handler` function threw; the request was answered with `0x04`. |

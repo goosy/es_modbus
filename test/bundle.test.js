@@ -4,7 +4,7 @@ import { describe, test, before, after } from 'node:test';
 import assert from 'node:assert/strict';
 import { once } from 'node:events';
 import { readFile, readdir, stat } from 'node:fs/promises';
-import { HOST, hex, create_memory_vector } from './helpers.js';
+import { HOST, hex, create_memory_handler } from './helpers.js';
 
 const bundle_url = new URL('../dist/modbus.js', import.meta.url);
 const root_url = new URL('../', import.meta.url);
@@ -84,8 +84,8 @@ describe('build output dist/modbus.js', { skip }, () => {
 		let server;
 		let client;
 		before(async () => {
-			memory = create_memory_vector();
-			server = new bundle.Modbus_Server(memory.vector, { host: HOST, port: 0, unit_id: [18, 19] });
+			memory = create_memory_handler();
+			server = new bundle.Modbus_Server(memory.handler, { host: HOST, port: 0, unit_id: [18, 19] });
 			server.on('error', () => { });
 			const started = once(server, 'start');
 			server.start();

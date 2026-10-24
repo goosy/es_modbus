@@ -1,4 +1,4 @@
-// Shared test fixtures: in-memory vector, frame builders, fake peers.
+// Shared test fixtures: in-memory handler, frame builders, fake peers.
 import { createServer, Socket } from 'node:net';
 import { once, EventEmitter } from 'node:events';
 import { Modbus_Client } from '../src/ModbusClient.js';
@@ -33,10 +33,10 @@ export function tcp_frame(tid, body, pid = 0) {
 }
 
 /**
- * An in-memory vector backed by one 65536-point table per kind and unit.
+ * An in-memory handler backed by one 65536-point table per kind and unit.
  * Every call is recorded in `calls` as `[name, ...args]`.
  */
-export function create_memory_vector() {
+export function create_memory_handler() {
 	const units = new Map();
 	const calls = [];
 	const unit = (unit_id) => {
@@ -49,7 +49,7 @@ export function create_memory_vector() {
 		}
 		return units.get(unit_id);
 	};
-	const vector = {
+	const handler = {
 		get_coil(addr, unit_id) {
 			calls.push(['get_coil', addr, unit_id]);
 			return unit(unit_id).coils[addr] === 1;
@@ -71,7 +71,7 @@ export function create_memory_vector() {
 			unit(unit_id).holding[addr] = value;
 		},
 	};
-	return { vector, unit, calls };
+	return { handler, unit, calls };
 }
 
 /** A stand-in for a server-side TCP socket that records what is written. */
@@ -151,8 +151,8 @@ export function collect(stream, length, ms = 500) {
 }
 
 /** Starts a Modbus_Server on an ephemeral TCP port. */
-export async function start_tcp_server(vector, options = {}) {
-	const server = new Modbus_Server(vector, { host: HOST, port: 0, ...options });
+export async function start_tcp_server(handler, options = {}) {
+	const server = new Modbus_Server(handler, { host: HOST, port: 0, ...options });
 	server.on('error', () => { });
 	server.on('socket_error', () => { });
 	const started = once(server, 'start');

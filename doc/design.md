@@ -372,7 +372,7 @@ the move into `CONNECTING`; a caller that arrives while `CONNECTING` is added to
   `send_response` the framing, and `_on_data` the serial-bus semantics from it. The `socket` argument only says where the
   response is written: a socket for both TCP-family transports, the serial port when absent.
 - `handle_read_bits` serves FC 1 and FC 2. For FC 2 it uses the discrete-input methods when the
-  `vector` has `get_discrete_inputs` or `get_discrete_input`, else the coil methods;
+  `handler` has `get_discrete_inputs` or `get_discrete_input`, else the coil methods;
   `read_points` then picks the batch or single-point one as for any request.
   `handle_read_registers` serves FC 3 (holding) and FC 4 (input), branching on
   `function_code === 3`.
@@ -394,34 +394,34 @@ the move into `CONNECTING`; a caller that arrives while `CONNECTING` is added to
    the response discarded, anything else is dropped; a non-accepted unit ID is dropped silently.
    On TCP unit `0` is ordinary and a non-accepted unit ID gets `0x0B`. Otherwise `serve()` calls
    `dispatch()`, which switches on `func_code` to the matching `handle_*` method; that method
-   calls into `vector` and builds the response PDU. An unsupported function code → exception
+   calls into `handler` and builds the response PDU. An unsupported function code → exception
    `0x01` under its own function code (`fc | 0x80`).
-   - Before any `vector` call, `check_request()` (`util.js`) validates a supported request as the Modbus
+   - Before any `handler` call, `check_request()` (`util.js`) validates a supported request as the Modbus
      application protocol does: `0x03` for a quantity outside `1..MAX_QUANTITY[fc]`, a byte count
      that does not match the quantity (FC 15/16) or an FC 5 value other than `0xFF00` /
      `0x0000`; then `0x02` for a range ending past address 65535. A failing request is answered
-     with that exception and the `vector` is not called. An over-limit FC 15/16 request with a
+     with that exception and the `handler` is not called. An over-limit FC 15/16 request with a
      matching byte count cannot occur: it does not fit in a 253-byte PDU. An unsupported function
      code passes the check, and `dispatch()` answers it with `0x01`.
    - Exception and write responses are built by the module functions `exception_response` and
      `write_response`.
    - `handle_read_registers` checks the values read with `check_register_values` before packing
-     them: a value that `is_register_value` rejects is thrown as a `Vector_Error` wrapping a
-     `TypeError`, so it takes the `vector_error` / `0x04` path below instead of escaping from
+     them: a value that `is_register_value` rejects is thrown as a `Handler_Error` wrapping a
+     `TypeError`, so it takes the `handler_error` / `0x04` path below instead of escaping from
      `Buffer.writeUInt16BE` as a `RangeError` or being coerced.
    - Batch methods: `read_points` and `write_points` take the batch and single-point method
-     names. If `typeof vector[batch_name]` is `'function'` they make one call, otherwise one call
-     per point. The check is made on every request, so a `vector` swapped on `server.vector`
+     names. If `typeof handler[batch_name]` is `'function'` they make one call, otherwise one call
+     per point. The check is made on every request, so a `handler` swapped on `server.handler`
      takes effect at once.
      - `handle_write_multiple_coils` / `handle_write_multiple_registers` decode the request data
        into a new `Array` of values and pass it to `write_points`.
      - `handle_read_bits` / `handle_read_registers` get the values from `read_points` and pack
        them. `read_points` checks a batch result's shape (`Array` or typed array, length
-       `quantity`) and throws a `Vector_Error` wrapping a `TypeError` otherwise; the register
+       `quantity`) and throws a `Handler_Error` wrapping a `TypeError` otherwise; the register
        values of both paths then go through `check_register_values`.
-   - Every `vector` call goes through `call_vector`, which wraps a thrown exception in a private
-     `Vector_Error`. `serve()` catches only `Vector_Error`: it emits `vector_error` with the
-     original error and the request, and answers exception `0x04`. A `vector_error` with no
+   - Every `handler` call goes through `call_handler`, which wraps a thrown exception in a private
+     `Handler_Error`. `serve()` catches only `Handler_Error`: it emits `handler_error` with the
+     original error and the request, and answers exception `0x04`. A `handler_error` with no
      listener is ignored. Any other exception is a bug and propagates.
 3. `send_response(pdu, socket?, tid)` — `tcp`: `encode_tcp_frame`, whose protocol ID is 0 like
    that of every request served (`mbap_frame_length` never delimits another). `rtu` and

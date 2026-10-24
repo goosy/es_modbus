@@ -9,7 +9,7 @@
 
 - [spec-protocol.zh-cn.md](./spec-protocol.zh-cn.md) — Modbus 帧格式、区间表示法、功能码、CRC。
 - [spec-client.zh-cn.md](./spec-client.zh-cn.md) — `Modbus_Client` 的 API、选项、事件、行为约定。
-- [spec-server.zh-cn.md](./spec-server.zh-cn.md) — `Modbus_Server` 的 API、`vector` 处理接口、事件。
+- [spec-server.zh-cn.md](./spec-server.zh-cn.md) — `Modbus_Server` 的 API、`handler` 处理接口、事件。
 - [design.zh-cn.md](./design.zh-cn.md) — 如何构建：内部机制、实现现状、已知缺陷与待办事项。
 - [design-test.zh-cn.md](./design-test.zh-cn.md) — 如何测试：什么在哪里测、命令、串口测试环境、
   已知缺陷的标记约定。
@@ -19,7 +19,7 @@
 为 Node.js 提供一个小巧、依赖很少的 Modbus 实现，在同一个包里同时提供 Modbus 通信的两端：
 
 - `Modbus_Client` — 主站/客户端，发出读写请求，并以 Promise 返回结果。
-- `Modbus_Server` — 从站/服务端，接收请求，并通过用户提供的数据访问回调（即 `vector`）作答。
+- `Modbus_Server` — 从站/服务端，接收请求，并通过用户提供的数据访问回调（即 `handler`）作答。
 
 客户端读写的是*区间*（range）：一个起始地址加一个长度。区间可以用 Modicon 表示法以 `string` 给出
 （5 位或 6 位，例如 `"40001,73"`、`"400001,73"`），也可以是结构化的 PDU 区间（功能码、PDU 地址和
@@ -42,7 +42,7 @@
 
 - 上述列表以外的功能码（诊断 `0x08`、文件记录访问、FIFO、封装传输等）。解析器会拒绝它们。
 - ASCII 传输。
-- 服务端上的任何持久化数据模型 — 存储完全由调用者的 `vector` 负责。
+- 服务端上的任何持久化数据模型 — 存储完全由调用者的 `handler` 负责。
 - TypeScript 类型（代码用 JSDoc typedef 描述数据形状）。
 
 ## 工具与依赖

@@ -317,7 +317,7 @@
 - 帧格式取决于 `this.protocol`：`on_data` 据此选择帧长函数，`#on_frame` 据此选择解析器，`send_response` 据此组帧，`_on_data`
   据此确定串行总线语义。`socket` 参数只表示响应写到哪里：两种 TCP 系列传输写入套接字，没有
   `socket` 时写入串口。
-- `handle_read_bits` 服务 FC 1 和 FC 2。对 FC 2，`vector` 有 `get_discrete_inputs` 或
+- `handle_read_bits` 服务 FC 1 和 FC 2。对 FC 2，`handler` 有 `get_discrete_inputs` 或
   `get_discrete_input` 时使用离散输入的方法，否则使用线圈的方法；随后与其他请求一样由
   `read_points` 选择成批方法或单点方法。`handle_read_registers` 服务 FC 3（保持）和 FC 4（输入），
   通过 `function_code === 3` 分支。
@@ -335,28 +335,28 @@
 2. `_on_data(request, socket?)` — RTU 帧格式（`rtu` 和 `rtu_over_tcp`）时 `serial_bus` 为真。在串行总线上，广播（单元 `0`）从不应答：若单元 `0` 被接受且功能为写
    （5、6、15、16），则执行并丢弃响应，其余一律丢弃；未被接受的单元 ID 静默丢弃。在 TCP 上单元
    `0` 是普通单元，未被接受的单元 ID 得到 `0x0B`。否则由 `serve()` 调用 `dispatch()`，按
-   `func_code` 分支到对应的 `handle_*` 方法，由其调用 `vector` 并构造响应 PDU。不支持的功能码 →
+   `func_code` 分支到对应的 `handle_*` 方法，由其调用 `handler` 并构造响应 PDU。不支持的功能码 →
    以其自身功能码（`fc | 0x80`）应答异常 `0x01`。
-   - 在调用任何 `vector` 之前，`check_request()`（`util.js`）按 Modbus 应用协议校验受支持的请求：数量超出
+   - 在调用任何 `handler` 之前，`check_request()`（`util.js`）按 Modbus 应用协议校验受支持的请求：数量超出
      `1..MAX_QUANTITY[fc]`、字节数与数量不符（FC 15/16），或 FC 5 的值不是 `0xFF00` / `0x0000` 时
      为 `0x03`；然后区间结束于地址 65535 之后时为 `0x02`。校验失败的请求以该异常应答，不调用
-     `vector`。字节数与数量相符却超限的 FC 15/16 请求不会出现：它放不进 253 字节的 PDU。不支持的
+     `handler`。字节数与数量相符却超限的 FC 15/16 请求不会出现：它放不进 253 字节的 PDU。不支持的
      功能码通过检查，由 `dispatch()` 以 `0x01` 应答。
    - 异常应答和写应答由模块函数 `exception_response` 和 `write_response` 构造。
    - `handle_read_registers` 在打包之前用 `check_register_values` 检查读到的值：被
-     `is_register_value` 拒绝的值作为包装 `TypeError` 的 `Vector_Error` 抛出，因此走下面的
-     `vector_error` / `0x04` 路径，而不是以 `RangeError` 从 `Buffer.writeUInt16BE` 逃出或被转换。
+     `is_register_value` 拒绝的值作为包装 `TypeError` 的 `Handler_Error` 抛出，因此走下面的
+     `handler_error` / `0x04` 路径，而不是以 `RangeError` 从 `Buffer.writeUInt16BE` 逃出或被转换。
    - 成批方法：`read_points` 和 `write_points` 接受成批方法名和单点方法名。若
-     `typeof vector[batch_name]` 为 `'function'`，调用一次，否则每个点调用一次。每个请求都重新
-     检查，因此替换 `server.vector` 立即生效。
+     `typeof handler[batch_name]` 为 `'function'`，调用一次，否则每个点调用一次。每个请求都重新
+     检查，因此替换 `server.handler` 立即生效。
      - `handle_write_multiple_coils` / `handle_write_multiple_registers` 把请求数据解码为新的值
        `Array`，交给 `write_points`。
      - `handle_read_bits` / `handle_read_registers` 从 `read_points` 取得值并打包。`read_points`
        检查成批结果的形态（`Array` 或类型化数组、长度为 `quantity`），不符时抛出包装 `TypeError`
-       的 `Vector_Error`；两条路径的寄存器值随后都经过 `check_register_values`。
-   - 每次 `vector` 调用都经过 `call_vector`，它把抛出的异常包装为私有的 `Vector_Error`。
-     `serve()` 只捕获 `Vector_Error`：以原始错误和请求发出 `vector_error`，并应答异常 `0x04`。
-     没有监听者的 `vector_error` 会被忽略。其他异常属于程序缺陷，会向外传播。
+       的 `Handler_Error`；两条路径的寄存器值随后都经过 `check_register_values`。
+   - 每次 `handler` 调用都经过 `call_handler`，它把抛出的异常包装为私有的 `Handler_Error`。
+     `serve()` 只捕获 `Handler_Error`：以原始错误和请求发出 `handler_error`，并应答异常 `0x04`。
+     没有监听者的 `handler_error` 会被忽略。其他异常属于程序缺陷，会向外传播。
 3. `send_response(pdu, socket?, tid)` — `tcp`：`encode_tcp_frame`，其协议 ID 为 0，与所服务的每个
    请求相同（`mbap_frame_length` 不会界定协议 ID 不为 0 的帧）。`rtu` 和 `rtu_over_tcp`：
    `encode_rtu_frame`。发出 `send`，然后写入 `socket`；没有 `socket` 时写入串口。

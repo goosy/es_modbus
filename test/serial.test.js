@@ -13,7 +13,7 @@ import { createServer, connect } from 'node:net';
 import { SerialPort } from 'serialport-rs';
 import { Modbus_Client } from '../src/ModbusClient.js';
 import { Modbus_Server } from '../src/ModbusServer.js';
-import { sleep, hex, rtu_frame, collect, create_memory_vector } from './helpers.js';
+import { sleep, hex, rtu_frame, collect, create_memory_handler } from './helpers.js';
 
 // The default settings of every suite: 9600 8N1, the usual Modbus default
 const DEFAULT_BAUD_RATE = 9600;
@@ -111,8 +111,8 @@ async function exchange(stream, request, length, ms = 500) {
 }
 
 /** Starts a Modbus_Server on a serial port. */
-async function start_serial_server(vector, path, options = {}) {
-	const server = new Modbus_Server(vector, { port: path, baud_rate: suite_baud_rate, ...options });
+async function start_serial_server(handler, path, options = {}) {
+	const server = new Modbus_Server(handler, { port: path, baud_rate: suite_baud_rate, ...options });
 	server.on('error', () => { });
 	await server.start();
 	return server;
@@ -134,13 +134,13 @@ async function check_link(link) {
 async function run_sweep(link) {
 	const results = [];
 	for (const baud_rate of SWEEP_BAUD_RATES) {
-		const memory = create_memory_vector();
+		const memory = create_memory_handler();
 		memory.unit(1).holding[0] = baud_rate & 0xffff;
 		let server;
 		let peer;
 		let error = null;
 		try {
-			server = await start_serial_server(memory.vector, link.first.serial, { baud_rate });
+			server = await start_serial_server(memory.handler, link.first.serial, { baud_rate });
 			peer = await open_end(link.second, baud_rate);
 			const response = await exchange(peer, '010300000001', 7);
 			const expected = rtu_frame(Buffer.from([1, 3, 2, (baud_rate >> 8) & 0xff, baud_rate & 0xff]));
@@ -202,8 +202,8 @@ describe(`Modbus RTU server on ${first_name}, raw peer on ${second_name}`, { ski
 	let server;
 	let peer;
 	before(async () => {
-		memory = create_memory_vector();
-		server = await start_serial_server(memory.vector, link.first.serial, { unit_id: [1, 2, 0x11] });
+		memory = create_memory_handler();
+		server = await start_serial_server(memory.handler, link.first.serial, { unit_id: [1, 2, 0x11] });
 		peer = await open_end(link.second);
 	});
 	after(async () => {
@@ -400,19 +400,19 @@ describe(`Modbus RTU client on ${client_name}, raw slave on ${slave_name}`, { sk
  * take the TCP end, the server when the tests connect to the converter (an RTU-over-TCP client
  * connects), the client when the converter connects to the tests (an RTU-over-TCP server listens).
  */
-async function start_pair(vector) {
+async function start_pair(handler) {
 	const client_options = { timeout: 1000, reconnect_time: 0 };
 	if (link.second.serial) {
-		const server = await start_serial_server(vector, link.first.serial);
+		const server = await start_serial_server(handler, link.first.serial);
 		const client = new Modbus_Client(null, { port: link.second.serial, baud_rate: suite_baud_rate, ...client_options });
 		return { server, client };
 	}
 	if (link.second.host) {
-		const server = await start_serial_server(vector, link.first.serial);
+		const server = await start_serial_server(handler, link.first.serial);
 		const client = new Modbus_Client(link.second.host, { port: link.second.port, rtu: true, ...client_options });
 		return { server, client };
 	}
-	const server = new Modbus_Server(vector, { port: link.second.listen, rtu: true });
+	const server = new Modbus_Server(handler, { port: link.second.listen, rtu: true });
 	server.on('error', () => { });
 	server.on('socket_error', () => { });
 	const converter = once(server, 'socket_connect');
@@ -433,8 +433,8 @@ describe(pair_title(), { skip }, () => {
 	let server;
 	let client;
 	before(async () => {
-		memory = create_memory_vector();
-		({ server, client } = await start_pair(memory.vector));
+		memory = create_memory_handler();
+		({ server, client } = await start_pair(memory.handler));
 		client.on('error', () => { });
 		await client.connect();
 	});

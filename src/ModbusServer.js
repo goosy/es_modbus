@@ -24,25 +24,25 @@ function write_response(unit_id, func_code, address, value) {
 	return buffer;
 }
 
-// Wraps an exception thrown by a `vector` function
-class Vector_Error extends Error {
+// Wraps an exception thrown by a `handler` function
+class Handler_Error extends Error {
 	constructor(cause) {
-		super('vector function failed', { cause });
+		super('handler function failed', { cause });
 	}
 }
 
 // Whether `value` can be served as a register: an integer in 0..65535
 const is_register_value = (value) => Number.isInteger(value) && value >= 0 && value <= 0xFFFF;
 
-// Throws a Vector_Error unless every value read from the `vector` can be served as a register
+// Throws a Handler_Error unless every value read from the `handler` can be served as a register
 function check_register_values(values) {
 	if (!Array.prototype.every.call(values, is_register_value)) {
-		throw new Vector_Error(new TypeError('a register value must be an integer in 0..65535'));
+		throw new Handler_Error(new TypeError('a register value must be an integer in 0..65535'));
 	}
 }
 
 /**
- * @typedef {Object} ModbusVector
+ * @typedef {Object} Modbus_Handler
  * @property {(addr: number, unit_id: number) => number} get_input_register  Read input register
  * @property {(addr: number, unit_id: number) => number} get_holding_register  Read holding register
  * @property {(addr: number, value: number, unit_id: number) => void} set_holding_register  Write holding register
@@ -71,7 +71,7 @@ export class Modbus_Server extends EventEmitter {
 
 	/**
      * Constructor for a Modbus server.
-     * @param {ModbusVector} vector - Modbus request handler functions.
+     * @param {Modbus_Handler} handler - Modbus request handler functions.
      * @param {Object} [options] - Options for the server:
      * @param {string} [options.host='0.0.0.0'] - The host to listen on (default: '0.0.0.0')
      * @param {number|string} [options.port=502] - The TCP port to listen on (default: 502) or a serial port path (for RTU mode).
@@ -86,9 +86,9 @@ export class Modbus_Server extends EventEmitter {
      * @param {number|number[]|'all'|'*'} [options.unit_id] - The Modbus unit ID(s) to accept and respond to;
      *   every ID when omitted (see `set_unit_ids()` for details)
      */
-	constructor(vector, options = {}) {
+	constructor(handler, options = {}) {
 		super();
-		this.vector = vector;
+		this.handler = handler;
 		this.set_unit_ids(options.unit_id);
 		this.host = options.host ?? '0.0.0.0';
 		this.name = options.name ?? 'Modbus_Server';
@@ -380,23 +380,23 @@ export class Modbus_Server extends EventEmitter {
 	}
 
 	/**
-     * Serves a request and returns the response PDU; a throwing `vector` yields exception 0x04.
+     * Serves a request and returns the response PDU; a throwing `handler` yields exception 0x04.
      */
 	serve(request) {
 		try {
 			return this.dispatch(request);
 		} catch (error) {
-			if (!(error instanceof Vector_Error)) throw error;
+			if (!(error instanceof Handler_Error)) throw error;
 			// 0x04: Server Device Failure
-			this.emit('vector_error', error.cause, request);
+			this.emit('handler_error', error.cause, request);
 			return exception_response(request.unit_id, request.func_code, 0x04);
 		}
 	}
 
 	/**
-     * Serves a request through the `vector` and returns the response PDU. A request that fails
-     * check_request() is answered with its exception code without calling the `vector`.
-     * A throwing `vector` function surfaces as a Vector_Error.
+     * Serves a request through the `handler` and returns the response PDU. A request that fails
+     * check_request() is answered with its exception code without calling the `handler`.
+     * A throwing `handler` function surfaces as a Handler_Error.
      */
 	dispatch(request) {
 		const { unit_id, func_code, start_address, quantity, data } = request;
@@ -431,11 +431,11 @@ export class Modbus_Server extends EventEmitter {
 		return response;
 	}
 
-	call_vector(name, ...args) {
+	call_handler(name, ...args) {
 		try {
-			return this.vector[name](...args);
+			return this.handler[name](...args);
 		} catch (error) {
-			throw new Vector_Error(error);
+			throw new Handler_Error(error);
 		}
 	}
 
@@ -488,8 +488,8 @@ export class Modbus_Server extends EventEmitter {
 
 	handle_read_bits(function_code, start_address, quantity, unit_id) {
 		const has_discrete_inputs = function_code === 2 && (
-			typeof this.vector.get_discrete_inputs === 'function'
-			|| typeof this.vector.get_discrete_input === 'function'
+			typeof this.handler.get_discrete_inputs === 'function'
+			|| typeof this.handler.get_discrete_input === 'function'
 		);
 		const [batch_name, single_name] = has_discrete_inputs
 			? ['get_discrete_inputs', 'get_discrete_input']
@@ -535,12 +535,12 @@ export class Modbus_Server extends EventEmitter {
 	}
 
 	handle_write_single_coil(address, value, unit_id) {
-		this.call_vector('set_coil', address, value === 0xFF00, unit_id);
+		this.call_handler('set_coil', address, value === 0xFF00, unit_id);
 		return write_response(unit_id, 5, address, value);
 	}
 
 	handle_write_single_register(address, value, unit_id) {
-		this.call_vector('set_holding_register', address, value, unit_id);
+		this.call_handler('set_holding_register', address, value, unit_id);
 		return write_response(unit_id, 6, address, value);
 	}
 
@@ -565,33 +565,33 @@ export class Modbus_Server extends EventEmitter {
 	}
 
 	/**
-	 * Reads `quantity` points through the batch method when the `vector` has one, else point by
-	 * point. A batch result that is not an array of `quantity` values surfaces as a Vector_Error.
+	 * Reads `quantity` points through the batch method when the `handler` has one, else point by
+	 * point. A batch result that is not an array of `quantity` values surfaces as a Handler_Error.
 	 */
 	read_points(batch_name, single_name, start_address, quantity, unit_id) {
-		if (typeof this.vector[batch_name] !== 'function') {
+		if (typeof this.handler[batch_name] !== 'function') {
 			const values = [];
 			for (let i = 0; i < quantity; i++) {
-				values.push(this.call_vector(single_name, start_address + i, unit_id));
+				values.push(this.call_handler(single_name, start_address + i, unit_id));
 			}
 			return values;
 		}
-		const values = this.call_vector(batch_name, start_address, quantity, unit_id);
+		const values = this.call_handler(batch_name, start_address, quantity, unit_id);
 		const is_array = Array.isArray(values) || ArrayBuffer.isView(values);
 		if (!is_array || values.length !== quantity) {
-			throw new Vector_Error(new TypeError(`${batch_name} must return ${quantity} values`));
+			throw new Handler_Error(new TypeError(`${batch_name} must return ${quantity} values`));
 		}
 		return values;
 	}
 
-	// Writes `values` through the batch method when the `vector` has one, else point by point
+	// Writes `values` through the batch method when the `handler` has one, else point by point
 	write_points(batch_name, single_name, start_address, values, unit_id) {
-		if (typeof this.vector[batch_name] === 'function') {
-			this.call_vector(batch_name, start_address, values, unit_id);
+		if (typeof this.handler[batch_name] === 'function') {
+			this.call_handler(batch_name, start_address, values, unit_id);
 			return;
 		}
 		for (let i = 0; i < values.length; i++) {
-			this.call_vector(single_name, start_address + i, values[i], unit_id);
+			this.call_handler(single_name, start_address + i, values[i], unit_id);
 		}
 	}
 }

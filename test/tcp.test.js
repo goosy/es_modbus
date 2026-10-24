@@ -2,7 +2,7 @@
 import { describe, test, before, after, beforeEach } from 'node:test';
 import assert from 'node:assert/strict';
 import {
-	hex, create_memory_vector,
+	hex, create_memory_handler,
 	start_tcp_server, stop_tcp_server, connect_client, close_client,
 } from './helpers.js';
 
@@ -11,9 +11,9 @@ describe('TCP client <-> server', () => {
 	let server;
 	let client;
 	before(async () => {
-		memory = create_memory_vector();
+		memory = create_memory_handler();
 		let port;
-		({ server, port } = await start_tcp_server(memory.vector, { unit_id: [1, 2, 18] }));
+		({ server, port } = await start_tcp_server(memory.handler, { unit_id: [1, 2, 18] }));
 		client = await connect_client(port, { timeout: 2000 });
 	});
 	after(async () => {
@@ -143,9 +143,9 @@ describe('TCP client <-> server', () => {
 
 describe('TCP client <-> server lifecycle', () => {
 	test('the client reconnects after the server restarts', async () => {
-		const memory = create_memory_vector();
+		const memory = create_memory_handler();
 		memory.unit(1).holding[0] = 77;
-		const { server, port } = await start_tcp_server(memory.vector);
+		const { server, port } = await start_tcp_server(memory.handler);
 		const client = await connect_client(port, { reconnect_time: 100, timeout: 2000 });
 		try {
 			const disconnected = new Promise((resolve) => client.once('disconnect', resolve));

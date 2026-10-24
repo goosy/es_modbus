@@ -9,7 +9,7 @@
 ```js
 import { Modbus_Server } from 'es-modbus';
 
-const server = new Modbus_Server(vector, options);
+const server = new Modbus_Server(handler, options);
 await server.start();
 ```
 
@@ -42,7 +42,7 @@ await server.start();
 | `string`                      | 忽略    | RTU            | 打开串口，作为 Modbus RTU 从站应答。                             |
 
 RTU 服务端就是串行线路上的 Modbus 从站：它没有连接，并以 CRC-16 封装响应。三种传输方式的请求
-处理（单元 ID 路由、`vector`、异常响应）完全相同；只有帧格式和生命周期事件不同。
+处理（单元 ID 路由、`handler`、异常响应）完全相同；只有帧格式和生命周期事件不同。
 
 ### `set_unit_ids(unit_id)`
 
@@ -53,17 +53,17 @@ RTU 服务端就是串行线路上的 Modbus 从站：它没有连接，并以 C
 
 单元 ID 的行为取决于传输方式（见 `spec-protocol.zh-cn.md` 的“单元 ID”）：
 
-- **TCP。** 每个单元 ID（包括 `0`）都是普通单元。发往被接受单元的请求经 `vector` 处理；发往未被
+- **TCP。** 每个单元 ID（包括 `0`）都是普通单元。发往被接受单元的请求经 `handler` 处理；发往未被
   接受单元的请求得到代码为 `0x0B` 的异常响应。
 - **串行总线（RTU、RTU-over-TCP）。** 服务端是共享线路上的一个从站，因此发往未被接受单元 ID 的
   请求完全不应答。发往单元 `0` 的请求是广播：如果单元 `0` 被接受（显式接受，或因为接受所有 ID），
   写请求会被执行，读请求会被忽略。无论单元 `0` 是否被接受，广播都不会得到应答。
 
-## `vector` 接口
+## `handler` 接口
 
 服务端本身不持有数据。每个请求都通过调用下列由调用者提供的函数之一来处理（名称为
 `snake_case`）。传入的地址是 **PDU 地址**：线路上的**原始（0 起始）**值，类型为 `number`，绝不是
-Modicon 表示法（服务端只使用 PDU 地址）。始终会提供 `unit_id`，因此同一个 `vector` 可以支撑多个
+Modicon 表示法（服务端只使用 PDU 地址）。始终会提供 `unit_id`，因此同一个 `handler` 可以支撑多个
 单元。
 
 | 方法                                              | 用于                            | 返回值             |
@@ -87,64 +87,64 @@ Modbus 中只有线圈和保持寄存器可写，所以写方法不涉及其他�
 `set_holding_register` 的 `value` 是 `0..65535` 范围内的整数。`set_coils` 的 `values` 是
 `boolean` 的 `Array`；`set_holding_registers` 的 `values` 是 `0..65535` 范围内整数的 `Array`。
 `values[i]` 是地址 `addr + i` 的值，`values.length` 即请求的数量。每次调用都传入新数组，
-`vector` 可以保留它。
+`handler` 可以保留它。
 
 成批读方法返回恰好 `quantity` 个值的 `Array` 或类型化数组（例如 `Uint16Array`），`values[i]`
-是地址 `addr + i` 的值。服务端在再次调用该方法之前就读完它；`vector` 可以返回自身存储的视图。
+是地址 `addr + i` 的值。服务端在再次调用该方法之前就读完它；`handler` 可以返回自身存储的视图。
 
 **成批方法。** 六个成批方法（`get_coils`、`get_discrete_inputs`、`get_holding_registers`、
-`get_input_registers`、`set_coils`、`set_holding_registers`）是可选的。它们让 `vector` 把一个请求的各个点作为一个
+`get_input_registers`、`set_coils`、`set_holding_registers`）是可选的。它们让 `handler` 把一个请求的各个点作为一个
 整体处理：
 
 - **成批写，一致性**：一步更新一个占多个寄存器的值，而不是让它以写了一半的状态暴露出来。
 - **成批写，性能**：定位数据、检测变化、通知订阅者等工作每个请求只做一次，而不是每个点做一次。
 - **成批读**：每次读取都有副作用（诊断事件、访问计数、按需刷新）的数据源，每个请求只产生一次
   副作用，而不是每个点一次；一个请求也可以变成对数据源的一次范围读取。一致性不是这里的理由：
-  `vector` 是同步的，逐点读取看到的已经是同一个快照。
+  `handler` 是同步的，逐点读取看到的已经是同一个快照。
 
 规则如下：
 
-- 若 `vector` 有请求对应的成批方法，以请求的全部点调用一次；否则按地址升序对每个点各调用一次
+- 若 `handler` 有请求对应的成批方法，以请求的全部点调用一次；否则按地址升序对每个点各调用一次
   单点方法。FC 1 用 `get_coils` / `get_coil`，FC 2 用 `get_discrete_inputs` / `get_discrete_input`
   （见下文“离散输入”），FC 3 用 `get_holding_registers` /
   `get_holding_register`，FC 4 用 `get_input_registers` / `get_input_register`，FC 15 用
   `set_coils` / `set_coil`，FC 16 用 `set_holding_registers` / `set_holding_register`。
 - 按功能码而不是按数量选择：只涉及一个点的请求，有成批方法时仍调用成批方法。FC 5 和 FC 6
   始终调用 `set_coil` 和 `set_holding_register`。
-- 各成批方法相互独立：`vector` 可以提供其中任意几个。
+- 各成批方法相互独立：`handler` 可以提供其中任意几个。
 - 每个请求在被处理时各自选择。
-- 与其他 `vector` 函数一样，成批方法只对有效请求调用；它抛出异常时也同样处理（`vector_error`、
+- 与其他 `handler` 函数一样，成批方法只对有效请求调用；它抛出异常时也同样处理（`handler_error`、
   异常 `0x04`）。没有成批方法时，某次 `set_coil` / `set_holding_register` 抛出异常即终止该
   请求：它之前的点已写入，其余的点不再写入。
-- 成批读的结果不是 `Array` 或类型化数组，或长度不等于 `quantity` 时，按抛出异常的 `vector`
-  处理：以 `TypeError` 发出 `vector_error`，并应答异常 `0x04`。其中的寄存器值与单点访问器的
+- 成批读的结果不是 `Array` 或类型化数组，或长度不等于 `quantity` 时，按抛出异常的 `handler`
+  处理：以 `TypeError` 发出 `handler_error`，并应答异常 `0x04`。其中的寄存器值与单点访问器的
   返回值同样检查（见下文“无效的寄存器值”）。
 
-**`vector` 是同步的。** 它的函数直接返回值；不支持返回 Promise。被调用时，数据必须实时可达。
+**`handler` 是同步的。** 它的函数直接返回值；不支持返回 Promise。被调用时，数据必须实时可达。
 推荐把数据保存在内存中（例如一个 `Buffer`）。位于别处的数据（例如 PLC）由调用者负责读入内存并保持
 同步，例如由事件驱动；从慢速数据源读取不是 `Modbus_Server` 的使用场景。
 
-**离散输入。** `get_discrete_input` 和 `get_discrete_inputs` 让 `vector` 把离散输入（FC 2）与
+**离散输入。** `get_discrete_input` 和 `get_discrete_inputs` 让 `handler` 把离散输入（FC 2）与
 线圈（FC 1）分开；两者都是可选的。
 
-- `vector` 有其中任意一个时，FC 2 使用它们：有 `get_discrete_inputs` 时每个请求调用一次，否则
+- `handler` 有其中任意一个时，FC 2 使用它们：有 `get_discrete_inputs` 时每个请求调用一次，否则
   每个点调用一次 `get_discrete_input`。
 - 两者都没有时，FC 2 按 FC 1 处理，经 `get_coils` / `get_coil` 读取，因此不区分两张表的
-  `vector` 照常工作。
+  `handler` 照常工作。
 - FC 1 始终使用线圈的方法。
 
 服务端把读到的值打包/序列化进响应。
 
-**抛出异常的 `vector`。** 如果某个 `vector` 函数抛出异常，服务端以该错误发出 `vector_error`，并以
+**抛出异常的 `handler`。** 如果某个 `handler` 函数抛出异常，服务端以该错误发出 `handler_error`，并以
 异常 `0x04`（服务器设备故障）应答该请求，而不是返回数据响应。与 `error` 不同，没有监听者时
-`vector_error` 会被忽略，因此有缺陷的 `vector` 不会让服务端崩溃。
+`handler_error` 会被忽略，因此有缺陷的 `handler` 不会让服务端崩溃。
 
 **无效的寄存器值。** 寄存器读访问器返回的不是 `0..65535` 的整数时（`undefined`、`null`、小数、
-字符串、越界值），按抛出异常的 `vector` 处理：服务端以 `TypeError` 发出 `vector_error`，并应答
+字符串、越界值），按抛出异常的 `handler` 处理：服务端以 `TypeError` 发出 `handler_error`，并应答
 异常 `0x04`。服务端从不转换这个值。线圈读访问器返回真值或假值，任何值都有效。
 
-**无效请求。** 在调用 `vector` 之前，服务端会校验请求数据和地址区间（见 `spec-protocol.zh-cn.md`
-的“异常响应”）；无效请求以异常应答，且不调用 `vector`。
+**无效请求。** 在调用 `handler` 之前，服务端会校验请求数据和地址区间（见 `spec-protocol.zh-cn.md`
+的“异常响应”）；无效请求以异常应答，且不调用 `handler`。
 
 ## 方法
 
@@ -212,4 +212,4 @@ Modbus 中只有线圈和保持寄存器可写，所以写方法不涉及其他�
 | `socket_error`      | TCP 系列        | `Error`  | 单个连接的错误。                            |
 | `send`              | 全部            | `Buffer` | 一帧已写出。                                |
 | `receive`           | 全部            | `Buffer` | 收到一帧。                                  |
-| `vector_error`      | 全部            | `Error`、请求 | 某个 `vector` 函数抛出了异常；该请求已以 `0x04` 应答。 |
+| `handler_error`     | 全部            | `Error`、请求 | 某个 `handler` 函数抛出了异常；该请求已以 `0x04` 应答。 |

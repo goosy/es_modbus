@@ -8,7 +8,7 @@ Sub-documents:
 
 - [spec-protocol.md](./spec-protocol.md) — Modbus framing, range notation, function codes, CRC.
 - [spec-client.md](./spec-client.md) — `Modbus_Client` API, options, events, behavior contract.
-- [spec-server.md](./spec-server.md) — `Modbus_Server` API, the `vector` handler interface, events.
+- [spec-server.md](./spec-server.md) — `Modbus_Server` API, the `handler` interface, events.
 - [design.md](./design.md) — how it is built: internal mechanics, implementation status, known
   gaps and TODOs.
 - [design-test.md](./design-test.md) — how it is tested: what is tested where, commands, the
@@ -22,7 +22,7 @@ Modbus conversation from one package:
 - `Modbus_Client` — a master/client that issues read and write requests and resolves them as
   Promises.
 - `Modbus_Server` — a slave/server that accepts requests and answers them through user-supplied
-  data-access callbacks (the `vector`).
+  data-access callbacks (the `handler`).
 
 The client reads and writes a *range*: a start address and a length. A range is given in Modicon
 notation, 5- or 6-digit (e.g. `"40001,73"`, `"400001,73"`), as a `string`, or as a structured PDU
@@ -48,7 +48,7 @@ mix. The server works in PDU addresses only.
 - Function codes outside the list above (diagnostics `0x08`, file record access, FIFO,
   encapsulated transport, etc.). Parsers reject them.
 - ASCII transport.
-- Any persistent data model on the server — storage is entirely the caller's `vector`.
+- Any persistent data model on the server — storage is entirely the caller's `handler`.
 - TypeScript types (the code documents shapes with JSDoc typedefs).
 
 ## Tools and dependencies

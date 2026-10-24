@@ -190,7 +190,7 @@ registers starting at PDU address 256, which is `"40257,2"` in 1-based Modicon n
   default) or `point` (0-based numbering); the PDU address of a structured PDU range is sent
   unchanged.
 - **Server.** The server works in PDU addresses only. It performs no conversion and Modicon
-  notation never appears on the server side: the `vector` receives the raw on-wire (0-based) PDU
+  notation never appears on the server side: the `handler` receives the raw on-wire (0-based) PDU
   address as a `number`.
 
 ## Function codes and PDU shapes
@@ -248,9 +248,9 @@ message is `` `response error: ${exception_code}` ``. Exception codes the server
 | `0x01` | Illegal Function                          | Function code not in the supported set.     |
 | `0x02` | Illegal Data Address                      | The requested range ends past address 65535. |
 | `0x03` | Illegal Data Value                        | A quantity outside the limits above (`>= 1` and at most the maximum), a byte count that does not match the quantity (FC 15/16), or an FC 5 value other than `0xFF00` / `0x0000`. |
-| `0x04` | Server Device Failure                     | A `vector` function threw while serving the request. |
+| `0x04` | Server Device Failure                     | A `handler` function threw while serving the request. |
 | `0x0B` | Gateway Target Device Failed To Respond   | TCP only: request addressed to a unit ID the server is not configured to accept. On a serial bus such a request is not answered. |
 
 For a supported function code the server checks the request in this order, as the Modbus
 application protocol does: the data values (`0x03`), then the address range (`0x02`), and only
-then calls the `vector` (`0x04` if it throws). A request that fails a check is not executed.
+then calls the `handler` (`0x04` if it throws). A request that fails a check is not executed.

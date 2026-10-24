@@ -6,7 +6,7 @@ import { Modbus_Server } from '../src/ModbusServer.js';
 import { set_serial_port_factory } from '../src/serial.js';
 import {
 	HOST, sleep, hex, rtu_frame, tcp_frame, collect,
-	create_memory_vector, fake_socket, Fake_Serial_Port,
+	create_memory_handler, fake_socket, Fake_Serial_Port,
 	start_tcp_server, stop_tcp_server, raw_connect,
 } from './helpers.js';
 
@@ -226,8 +226,8 @@ describe('Modbus_Server request handling (TCP framing)', () => {
 	let memory;
 	let server;
 	beforeEach(() => {
-		memory = create_memory_vector();
-		server = new Modbus_Server(memory.vector, { port: 0 });
+		memory = create_memory_handler();
+		server = new Modbus_Server(memory.handler, { port: 0 });
 	});
 
 	test('FC 1 reads coils packed LSB-first', () => {
@@ -288,7 +288,7 @@ describe('Modbus_Server request handling (TCP framing)', () => {
 		assert.deepEqual(memory.calls, [['set_holding_register', 1, 0x000a, 1], ['set_holding_register', 2, 0x0102, 1]]);
 	});
 
-	test('vector arguments have the specified types', () => {
+	test('handler arguments have the specified types', () => {
 		tcp_exchange(server, tcp_frame(1, '010500000000'));
 		tcp_exchange(server, tcp_frame(1, '010600000005'));
 		for (const [name, addr, value, unit_id] of memory.calls) {
@@ -298,7 +298,7 @@ describe('Modbus_Server request handling (TCP framing)', () => {
 		}
 	});
 
-	/** Adds batch methods to the memory vector, recorded in `memory.calls`. */
+	/** Adds batch methods to the memory handler, recorded in `memory.calls`. */
 	function add_batch_methods(...names) {
 		const batch = {
 			get_coils(addr, quantity, unit_id) {
@@ -307,7 +307,7 @@ describe('Modbus_Server request handling (TCP framing)', () => {
 			},
 			get_holding_registers(addr, quantity, unit_id) {
 				memory.calls.push(['get_holding_registers', addr, quantity, unit_id]);
-				// A view of the vector's own storage
+				// A view of the handler's own storage
 				return memory.unit(unit_id).holding.subarray(addr, addr + quantity);
 			},
 			get_input_registers(addr, quantity, unit_id) {
@@ -321,11 +321,11 @@ describe('Modbus_Server request handling (TCP framing)', () => {
 				memory.calls.push(['set_holding_registers', addr, values, unit_id]);
 			},
 		};
-		server.vector = { ...memory.vector };
-		for (const name of names) server.vector[name] = batch[name];
+		server.handler = { ...memory.handler };
+		for (const name of names) server.handler[name] = batch[name];
 	}
 
-	test('FC 15 calls set_coils once when the vector has it', () => {
+	test('FC 15 calls set_coils once when the handler has it', () => {
 		add_batch_methods('set_coils');
 		const [response] = tcp_exchange(server, tcp_frame(1, '010f0013000a02cd01'));
 		assert.equal(response.toString('hex'), tcp_frame(1, '010f0013000a').toString('hex'));
@@ -333,7 +333,7 @@ describe('Modbus_Server request handling (TCP framing)', () => {
 		assert.deepEqual(memory.calls, [['set_coils', 0x13, bits.map((bit) => bit === 1), 1]]);
 	});
 
-	test('FC 16 calls set_holding_registers once when the vector has it', () => {
+	test('FC 16 calls set_holding_registers once when the handler has it', () => {
 		add_batch_methods('set_holding_registers');
 		const [response] = tcp_exchange(server, tcp_frame(1, '01100001000204000a0102'));
 		assert.equal(response.toString('hex'), tcp_frame(1, '011000010002').toString('hex'));
@@ -372,27 +372,27 @@ describe('Modbus_Server request handling (TCP framing)', () => {
 		assert.deepEqual(memory.calls, []);
 	});
 
-	test('a throwing batch method is reported through vector_error', () => {
+	test('a throwing batch method is reported through handler_error', () => {
 		const failure = new Error('device failure');
-		server.vector = {
-			...memory.vector,
+		server.handler = {
+			...memory.handler,
 			set_holding_registers() {
 				throw failure;
 			},
 		};
 		const reported = [];
-		server.on('vector_error', (error, request) => reported.push([error, request.func_code]));
+		server.on('handler_error', (error, request) => reported.push([error, request.func_code]));
 		const [response] = tcp_exchange(server, tcp_frame(1, '01100001000204000a0102'));
 		assert.equal(response.toString('hex'), tcp_frame(1, '019004').toString('hex'));
 		assert.deepEqual(reported, [[failure, 16]]);
 	});
 
 	test('without a batch method a throwing write stops the request', () => {
-		server.vector = {
-			...memory.vector,
+		server.handler = {
+			...memory.handler,
 			set_holding_register(addr, value, unit_id) {
 				if (addr === 2) throw new Error('device failure');
-				memory.vector.set_holding_register(addr, value, unit_id);
+				memory.handler.set_holding_register(addr, value, unit_id);
 			},
 		};
 		const [response] = tcp_exchange(server, tcp_frame(1, '01100001000306000a01020003'));
@@ -404,8 +404,8 @@ describe('Modbus_Server request handling (TCP framing)', () => {
 		const inputs = new Uint8Array(65536);
 		inputs[0x14] = 1;
 		memory.unit(1).coils[0x13] = 1;
-		server.vector = {
-			...memory.vector,
+		server.handler = {
+			...memory.handler,
 			get_discrete_input(addr, unit_id) {
 				memory.calls.push(['get_discrete_input', addr, unit_id]);
 				return inputs[addr] === 1;
@@ -425,11 +425,11 @@ describe('Modbus_Server request handling (TCP framing)', () => {
 		for (const with_single of [true, false]) {
 			memory.calls.length = 0;
 			add_batch_methods('get_coils');
-			server.vector.get_discrete_inputs = (addr, quantity, unit_id) => {
+			server.handler.get_discrete_inputs = (addr, quantity, unit_id) => {
 				memory.calls.push(['get_discrete_inputs', addr, quantity, unit_id]);
 				return [false, true, true];
 			};
-			if (with_single) server.vector.get_discrete_input = () => assert.fail('single method called');
+			if (with_single) server.handler.get_discrete_input = () => assert.fail('single method called');
 			const [response] = tcp_exchange(server, tcp_frame(1, '010200050003'));
 			assert.equal(response.toString('hex'), tcp_frame(1, '01020106').toString('hex'));
 			assert.deepEqual(memory.calls, [['get_discrete_inputs', 5, 3, 1]], String(with_single));
@@ -437,15 +437,15 @@ describe('Modbus_Server request handling (TCP framing)', () => {
 	});
 
 	test('an invalid get_discrete_inputs result is answered with 0x04', () => {
-		server.vector = { ...memory.vector, get_discrete_inputs: () => [true] };
+		server.handler = { ...memory.handler, get_discrete_inputs: () => [true] };
 		let reported;
-		server.on('vector_error', (error) => reported = error);
+		server.on('handler_error', (error) => reported = error);
 		const [response] = tcp_exchange(server, tcp_frame(1, '010200000002'));
 		assert.equal(response.toString('hex'), tcp_frame(1, '018204').toString('hex'));
 		assert.ok(reported instanceof TypeError);
 	});
 
-	test('FC 1 and FC 2 call get_coils once when the vector has it', () => {
+	test('FC 1 and FC 2 call get_coils once when the handler has it', () => {
 		add_batch_methods('get_coils');
 		const coils = memory.unit(1).coils;
 		for (const addr of [0x13, 0x15, 0x16, 0x19, 0x1a, 0x1c]) coils[addr] = 1;
@@ -464,7 +464,7 @@ describe('Modbus_Server request handling (TCP framing)', () => {
 		assert.deepEqual(memory.calls, [['get_holding_registers', 100, 2, 1]]);
 	});
 
-	test('FC 4 calls get_input_registers once when the vector has it', () => {
+	test('FC 4 calls get_input_registers once when the handler has it', () => {
 		add_batch_methods('get_input_registers');
 		memory.unit(3).input[0xffff] = 7;
 		const [response] = tcp_exchange(server, tcp_frame(1, '0304ffff0001'));
@@ -496,10 +496,10 @@ describe('Modbus_Server request handling (TCP framing)', () => {
 			[2, [true]],
 		];
 		const reported = [];
-		server.on('vector_error', (error) => reported.push(error));
+		server.on('handler_error', (error) => reported.push(error));
 		for (const [kind, result] of results) {
-			server.vector = {
-				...memory.vector,
+			server.handler = {
+				...memory.handler,
 				get_holding_registers: () => result,
 				get_coils: () => result,
 			};
@@ -513,21 +513,21 @@ describe('Modbus_Server request handling (TCP framing)', () => {
 	});
 
 	test('a batch coil result is read by truthiness', () => {
-		server.vector = { ...memory.vector, get_coils: () => [1, 0, 'x', null, {}, undefined, 2, 0] };
+		server.handler = { ...memory.handler, get_coils: () => [1, 0, 'x', null, {}, undefined, 2, 0] };
 		const [response] = tcp_exchange(server, tcp_frame(1, '010100000008'));
 		assert.equal(response.toString('hex'), tcp_frame(1, '01010155').toString('hex'));
 	});
 
-	test('a throwing batch read method is reported through vector_error', () => {
+	test('a throwing batch read method is reported through handler_error', () => {
 		const failure = new Error('device failure');
-		server.vector = {
-			...memory.vector,
+		server.handler = {
+			...memory.handler,
 			get_input_registers() {
 				throw failure;
 			},
 		};
 		const reported = [];
-		server.on('vector_error', (error, request) => reported.push([error, request.func_code]));
+		server.on('handler_error', (error, request) => reported.push([error, request.func_code]));
 		const [response] = tcp_exchange(server, tcp_frame(1, '010400000001'));
 		assert.equal(response.toString('hex'), tcp_frame(1, '018404').toString('hex'));
 		assert.deepEqual(reported, [[failure, 4]]);
@@ -556,7 +556,7 @@ describe('Modbus_Server request handling (TCP framing)', () => {
 		assert.deepEqual(memory.calls, []);
 	});
 
-	test('one vector backs several units', () => {
+	test('one handler backs several units', () => {
 		memory.unit(18).holding[0] = 8018;
 		memory.unit(19).holding[0] = 8019;
 		const [a] = tcp_exchange(server, tcp_frame(1, '120300000001'));
@@ -599,9 +599,9 @@ describe('Modbus_Server request handling (TCP framing)', () => {
 		assert.deepEqual(tcp_exchange(server, tcp_frame(1, '0110000000010200')), []);
 	});
 
-	test('a throwing vector is answered with exception 0x04', () => {
-		server.vector = {
-			...memory.vector,
+	test('a throwing handler is answered with exception 0x04', () => {
+		server.handler = {
+			...memory.handler,
 			get_holding_register() {
 				throw new Error('device failure');
 			},
@@ -614,9 +614,9 @@ describe('Modbus_Server request handling (TCP framing)', () => {
 	test('an invalid register value is answered with 0x04 and reported as a TypeError', () => {
 		const values = [70000, -1, 1.5, '7', undefined, null, Number.NaN, true];
 		const reported = [];
-		server.on('vector_error', (error) => reported.push(error));
+		server.on('handler_error', (error) => reported.push(error));
 		for (const value of values) {
-			server.vector = { ...memory.vector, get_holding_register: () => value, get_input_register: () => value };
+			server.handler = { ...memory.handler, get_holding_register: () => value, get_input_register: () => value };
 			const [fc3] = tcp_exchange(server, tcp_frame(1, '010300000001'));
 			assert.equal(fc3.toString('hex'), tcp_frame(1, '018304').toString('hex'), String(value));
 			const [fc4] = tcp_exchange(server, tcp_frame(1, '010400000001'));
@@ -627,12 +627,12 @@ describe('Modbus_Server request handling (TCP framing)', () => {
 	});
 
 	test('one invalid value among several fails the whole read', () => {
-		server.vector = { ...memory.vector, get_holding_register: (addr) => (addr === 1 ? 0x10000 : addr) };
+		server.handler = { ...memory.handler, get_holding_register: (addr) => (addr === 1 ? 0x10000 : addr) };
 		const [response] = tcp_exchange(server, tcp_frame(1, '010300000003'));
 		assert.equal(response.toString('hex'), tcp_frame(1, '018304').toString('hex'));
 	});
 
-	test('a request that fails check_request gets its exception, without a vector call', () => {
+	test('a request that fails check_request gets its exception, without a handler call', () => {
 		// The rules are tested on check_request() in util.test.js
 		const requests = [['010300000000', '018303'], ['0103ffff0002', '018302']];
 		for (const [request, response] of requests) {
@@ -642,24 +642,24 @@ describe('Modbus_Server request handling (TCP framing)', () => {
 		assert.deepEqual(memory.calls, []);
 	});
 
-	test('a throwing vector is reported through vector_error', () => {
+	test('a throwing handler is reported through handler_error', () => {
 		const failure = new Error('device failure');
-		server.vector = {
-			...memory.vector,
+		server.handler = {
+			...memory.handler,
 			set_coil() {
 				throw failure;
 			},
 		};
 		const reported = [];
-		server.on('vector_error', (error, request) => reported.push([error, request.func_code]));
+		server.on('handler_error', (error, request) => reported.push([error, request.func_code]));
 		const [response] = tcp_exchange(server, tcp_frame(1, '010f0000000a02cd01'));
 		assert.equal(response.toString('hex'), tcp_frame(1, '018f04').toString('hex'));
 		assert.deepEqual(reported, [[failure, 15]]);
 	});
 
-	test('a throwing vector without a vector_error listener does not throw', () => {
-		server.vector = {
-			...memory.vector,
+	test('a throwing handler without a handler_error listener does not throw', () => {
+		server.handler = {
+			...memory.handler,
 			get_coil() {
 				throw new Error('device failure');
 			},
@@ -705,9 +705,9 @@ describe('Modbus_Server request handling (RTU framing)', () => {
 	let port;
 	let server;
 	beforeEach(() => {
-		memory = create_memory_vector();
+		memory = create_memory_handler();
 		port = new Fake_Serial_Port();
-		server = new Modbus_Server(memory.vector, { port: 'COM9' });
+		server = new Modbus_Server(memory.handler, { port: 'COM9' });
 		server.serial_port = port;
 	});
 
@@ -794,15 +794,15 @@ describe('Modbus_Server request handling (RTU framing)', () => {
 		assert.deepEqual(rtu_exchange('000800000000'), []);
 	});
 
-	test('a throwing vector on a broadcast is reported but not answered', () => {
-		server.vector = {
-			...memory.vector,
+	test('a throwing handler on a broadcast is reported but not answered', () => {
+		server.handler = {
+			...memory.handler,
 			set_holding_register() {
 				throw new Error('device failure');
 			},
 		};
 		let reported = 0;
-		server.on('vector_error', () => reported++);
+		server.on('handler_error', () => reported++);
 		assert.deepEqual(rtu_exchange('000600010005'), []);
 		assert.equal(reported, 1);
 	});
@@ -825,7 +825,7 @@ describe('Modbus_Server request handling (RTU framing)', () => {
 
 	test('the silence option sets the silence on a serial port', (t) => {
 		t.mock.timers.enable({ apis: ['setTimeout'] });
-		server = new Modbus_Server(memory.vector, { port: 'COM9', silence: 200 });
+		server = new Modbus_Server(memory.handler, { port: 'COM9', silence: 200 });
 		server.serial_port = port;
 		server.set_rtu();
 		port.emit('data', rtu_frame('010800000000'));
@@ -838,7 +838,7 @@ describe('Modbus_Server request handling (RTU framing)', () => {
 	test('the silence is 3.5 character times when that is longer than 50 ms', (t) => {
 		t.mock.timers.enable({ apis: ['setTimeout'] });
 		// 300 baud, 8E1: 11 bits a character, 3.5 characters = 128.3 ms
-		server = new Modbus_Server(memory.vector, { port: 'COM9', baud_rate: 300, parity: 'even' });
+		server = new Modbus_Server(memory.handler, { port: 'COM9', baud_rate: 300, parity: 'even' });
 		server.serial_port = port;
 		server.set_rtu();
 		port.emit('data', rtu_frame('010800000000'));
@@ -860,8 +860,8 @@ describe('Modbus_Server TCP lifecycle', () => {
 	let server;
 	let port;
 	beforeEach(async () => {
-		memory = create_memory_vector();
-		({ server, port } = await start_tcp_server(memory.vector));
+		memory = create_memory_handler();
+		({ server, port } = await start_tcp_server(memory.handler));
 	});
 	afterEach(async () => {
 		await stop_tcp_server(server);
@@ -943,7 +943,7 @@ describe('Modbus_Server TCP lifecycle', () => {
 	});
 
 	test('error is emitted when the port is in use', async () => {
-		const other = new Modbus_Server(memory.vector, { host: HOST, port });
+		const other = new Modbus_Server(memory.handler, { host: HOST, port });
 		const error = once(other, 'error');
 		other.start();
 		const [reason] = await error;
@@ -977,19 +977,19 @@ describe('Modbus_Server RTU-over-TCP', () => {
 	};
 
 	test('responses carry a CRC and go to the socket', () => {
-		const memory = create_memory_vector();
+		const memory = create_memory_handler();
 		memory.unit(1).holding[0] = 5;
-		const server = new Modbus_Server(memory.vector, { port: 1502, rtu: true });
+		const server = new Modbus_Server(memory.handler, { port: 1502, rtu: true });
 		assert.deepEqual(rtu_socket_exchange(server, '010300000001'), [rtu_frame('0103020005').toString('hex')]);
 	});
 
 	test('an unsupported function code gets exception 0x01 at once', () => {
-		const server = new Modbus_Server(create_memory_vector().vector, { port: 1502, rtu: true });
+		const server = new Modbus_Server(create_memory_handler().handler, { port: 1502, rtu: true });
 		assert.deepEqual(rtu_socket_exchange(server, '010800000000'), [rtu_frame('018801').toString('hex')]);
 	});
 
 	test('frames are delimited by length: split and coalesced', () => {
-		const server = new Modbus_Server(create_memory_vector().vector, { port: 1502, rtu: true });
+		const server = new Modbus_Server(create_memory_handler().handler, { port: 1502, rtu: true });
 		const socket = fake_socket();
 		const frame = rtu_frame('010300000001');
 		server.on_data(Buffer.concat([frame, frame.subarray(0, 4)]), socket);
@@ -999,7 +999,7 @@ describe('Modbus_Server RTU-over-TCP', () => {
 
 	test('the silence option sets the silence on TCP', (t) => {
 		t.mock.timers.enable({ apis: ['setTimeout'] });
-		const server = new Modbus_Server(create_memory_vector().vector, { port: 1502, rtu: true, silence: 10 });
+		const server = new Modbus_Server(create_memory_handler().handler, { port: 1502, rtu: true, silence: 10 });
 		const socket = fake_socket();
 		server.on_data(Buffer.concat([hex('011000000078f0'), rtu_frame('010300000001')]), socket);
 		t.mock.timers.tick(9);
@@ -1016,24 +1016,24 @@ describe('Modbus_Server RTU-over-TCP', () => {
 	});
 
 	test('an MBAP frame is not served', () => {
-		const server = new Modbus_Server(create_memory_vector().vector, { port: 1502, rtu: true });
+		const server = new Modbus_Server(create_memory_handler().handler, { port: 1502, rtu: true });
 		const socket = fake_socket();
 		server.on_data(tcp_frame(1, '010300000001'), socket);
 		assert.deepEqual(socket.written, []);
 	});
 
 	test('serial bus semantics: a non-accepted unit and a broadcast are not answered', () => {
-		const memory = create_memory_vector();
-		const server = new Modbus_Server(memory.vector, { port: 1502, rtu: true, unit_id: [0, 1] });
+		const memory = create_memory_handler();
+		const server = new Modbus_Server(memory.handler, { port: 1502, rtu: true, unit_id: [0, 1] });
 		assert.deepEqual(rtu_socket_exchange(server, '020300000001'), []);
 		assert.deepEqual(rtu_socket_exchange(server, '000600010005'), []);
 		assert.equal(memory.unit(0).holding[1], 5);
 	});
 
 	test('rtu: true serves RTU frames on TCP sockets', async () => {
-		const memory = create_memory_vector();
+		const memory = create_memory_handler();
 		memory.unit(1).holding[0] = 5;
-		const { server, port } = await start_tcp_server(memory.vector, { rtu: true });
+		const { server, port } = await start_tcp_server(memory.handler, { rtu: true });
 		try {
 			const socket = await raw_connect(port);
 			socket.write(rtu_frame('010300000001'));

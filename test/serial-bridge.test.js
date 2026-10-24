@@ -7,7 +7,7 @@ import { Modbus_Client } from '../src/ModbusClient.js';
 import { Modbus_Server } from '../src/ModbusServer.js';
 import { set_serial_port_factory } from '../src/serial.js';
 import {
-	HOST, hex, rtu_frame, collect, create_memory_vector, start_tcp_server, stop_tcp_server, raw_connect,
+	HOST, hex, rtu_frame, collect, create_memory_handler, start_tcp_server, stop_tcp_server, raw_connect,
 } from './helpers.js';
 import { create_serial_bridge, serial_port_factory } from './serial-bridge.js';
 
@@ -26,8 +26,8 @@ describe('Modbus_Client on a serial line, RTU-over-TCP server on the other end',
 	let bridge;
 	let client;
 	beforeEach(async () => {
-		memory = create_memory_vector();
-		({ server, port: server_port } = await start_tcp_server(memory.vector, { rtu: true, unit_id: [1, 2] }));
+		memory = create_memory_handler();
+		({ server, port: server_port } = await start_tcp_server(memory.handler, { rtu: true, unit_id: [1, 2] }));
 	});
 	afterEach(async () => {
 		await client?.disconnect();
@@ -142,9 +142,9 @@ describe('Modbus_Server on a serial line, a peer over TCP on the other end', () 
 	});
 
 	async function setup(line, options = {}) {
-		memory = create_memory_vector();
+		memory = create_memory_handler();
 		bridge = await create_serial_bridge({ serial: 'COM_B' }, { listen: true }, line);
-		server = new Modbus_Server(memory.vector, { port: 'COM_B', baud_rate: 19200, unit_id: [0, 1, 2], ...options });
+		server = new Modbus_Server(memory.handler, { port: 'COM_B', baud_rate: 19200, unit_id: [0, 1, 2], ...options });
 		server.on('error', () => { });
 		const started = once(server, 'start');
 		server.start();
