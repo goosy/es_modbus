@@ -71,12 +71,14 @@ functions (names are `snake_case`). Addresses passed in are **PDU addresses**: t
 
 | Method                                            | Used for                        | Returns            |
 | ------------------------------------------------- | ------------------------------- | ------------------ |
-| `get_coil(addr, unit_id)`                         | FC 1 (coils) **and FC 2** (discrete inputs) | truthy = bit set |
+| `get_coil(addr, unit_id)`                         | FC 1 (coils); FC 2 as a fallback | truthy = bit set |
+| `get_discrete_input(addr, unit_id)`               | FC 2 (discrete inputs, optional) | truthy = bit set |
 | `get_holding_register(addr, unit_id)`             | FC 3                            | integer `0..65535` |
 | `get_input_register(addr, unit_id)`               | FC 4                            | integer `0..65535` |
 | `set_coil(addr, value, unit_id)`                  | FC 5, FC 15                     | ignored            |
 | `set_holding_register(addr, value, unit_id)`      | FC 6, FC 16                     | ignored            |
-| `get_coils(addr, quantity, unit_id)`              | FC 1, FC 2 (optional)           | `quantity` values, truthy = bit set |
+| `get_coils(addr, quantity, unit_id)`              | FC 1 (optional); FC 2 as a fallback | `quantity` values, truthy = bit set |
+| `get_discrete_inputs(addr, quantity, unit_id)`    | FC 2 (optional)                 | `quantity` values, truthy = bit set |
 | `get_holding_registers(addr, quantity, unit_id)`  | FC 3 (optional)                 | `quantity` integers `0..65535` |
 | `get_input_registers(addr, quantity, unit_id)`    | FC 4 (optional)                 | `quantity` integers `0..65535` |
 | `set_coils(addr, values, unit_id)`                | FC 15 (optional)                | ignored            |
@@ -95,8 +97,8 @@ A batch read method returns an `Array` or a typed array (for example a `Uint16Ar
 `quantity` values, `values[i]` being the value at address `addr + i`. The server reads it before
 the method is called again; the `vector` may return a view of its own storage.
 
-**Batch methods.** The five batch methods (`get_coils`, `get_holding_registers`,
-`get_input_registers`, `set_coils`, `set_holding_registers`) are optional. They let a `vector`
+**Batch methods.** The six batch methods (`get_coils`, `get_discrete_inputs`,
+`get_holding_registers`, `get_input_registers`, `set_coils`, `set_holding_registers`) are optional. They let a `vector`
 handle the points of one request as a whole:
 
 - **Batch writes, consistency**: update a multi-register value in one step instead of exposing
@@ -112,7 +114,8 @@ The rules:
 
 - A request calls its batch method once with every point of the request when the `vector` has
   that function; otherwise it calls the single-point method once per point, in ascending address
-  order. FC 1 and FC 2 use `get_coils` / `get_coil`, FC 3 `get_holding_registers` /
+  order. FC 1 uses `get_coils` / `get_coil`, FC 2 `get_discrete_inputs` / `get_discrete_input`
+  (see "Discrete inputs" below), FC 3 `get_holding_registers` /
   `get_holding_register`, FC 4 `get_input_registers` / `get_input_register`, FC 15
   `set_coils` / `set_coil`, FC 16 `set_holding_registers` / `set_holding_register`.
 - The choice is made by function code, not by quantity: a request for a single point still uses
@@ -135,8 +138,16 @@ data in memory (for example in a `Buffer`) is the recommended pattern. Data that
 such as a PLC, is the caller's responsibility to bring into memory and keep in sync, for example
 event-driven; reading from a slow source is not a use case of `Modbus_Server`.
 
-There is no separate discrete-input accessor — FC 2 reuses `get_coil` / `get_coils`. The server
-packs/serializes the values read into the response.
+**Discrete inputs.** `get_discrete_input` and `get_discrete_inputs` let a `vector` keep discrete
+inputs (FC 2) apart from coils (FC 1); both are optional.
+
+- When the `vector` has either of them, FC 2 uses them: `get_discrete_inputs` once per request
+  when present, otherwise `get_discrete_input` once per point.
+- When it has neither, FC 2 is served like FC 1, through `get_coils` / `get_coil`, so a `vector`
+  that does not tell the two tables apart keeps working.
+- FC 1 always uses the coil methods.
+
+The server packs/serializes the values read into the response.
 
 **A throwing `vector`.** If a `vector` function throws, the server emits `vector_error` with the
 error and answers the request with exception `0x04` (Server Device Failure) instead of a data

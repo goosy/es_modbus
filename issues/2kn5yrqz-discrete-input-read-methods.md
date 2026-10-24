@@ -1,9 +1,9 @@
 ---
 id: 2kn5yrqz
 opened: 2026-10-24T03:14:23.284Z
-closed:
+closed: 2026-10-24T04:28:45.678Z
 title: vector 增加离散输入的读方法（单点与成批）
-status: open        # open | accepted | fixed | rejected | wontfix
+status: fixed       # open | accepted | fixed | rejected | wontfix
 fixed_in: []        # commit IDs, backfilled at version commit time
 labels: []
 remote:
@@ -35,3 +35,5 @@ vector 增加可选的离散输入读方法，FC 2 使用：
 - 成批方法依赖 issue#yjaww5qx 的成批读机制，两者宜一起实现。
 
 ## 裁定
+
+fixed。按提案实现：FC 2 在 vector 提供 `get_discrete_inputs` 或 `get_discrete_input` 时使用它们（成批优先），两者都没有时按 FC 1 经线圈的方法读取；FC 1 不受影响。线圈与离散输入因此可以使用不同的数据，不区分两张表的 vector 照常工作。

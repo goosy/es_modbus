@@ -371,8 +371,11 @@ the move into `CONNECTING`; a caller that arrives while `CONNECTING` is added to
 - Framing follows `this.protocol`: `on_data` chooses the frame length, `#on_frame` the parser,
   `send_response` the framing, and `_on_data` the serial-bus semantics from it. The `socket` argument only says where the
   response is written: a socket for both TCP-family transports, the serial port when absent.
-- `handle_read_bits` serves FC 1 and FC 2; `handle_read_registers` serves FC 3 (holding) and
-  FC 4 (input), branching on `function_code === 3`.
+- `handle_read_bits` serves FC 1 and FC 2. For FC 2 it uses the discrete-input methods when the
+  `vector` has `get_discrete_inputs` or `get_discrete_input`, else the coil methods;
+  `read_points` then picks the batch or single-point one as for any request.
+  `handle_read_registers` serves FC 3 (holding) and FC 4 (input), branching on
+  `function_code === 3`.
 
 ### Request flow
 

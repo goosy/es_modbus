@@ -239,7 +239,7 @@ describe('Modbus_Server request handling (TCP framing)', () => {
 		assert.deepEqual(memory.calls.map((c) => c[1]), [...Array(10).keys()].map((i) => 0x13 + i));
 	});
 
-	test('FC 2 reads discrete inputs through get_coil', () => {
+	test('FC 2 reads discrete inputs through get_coil without discrete-input methods', () => {
 		memory.unit(2).coils[0] = 1;
 		const [response] = tcp_exchange(server, tcp_frame(9, '020200000001'));
 		assert.equal(response.toString('hex'), tcp_frame(9, '02020101').toString('hex'));
@@ -398,6 +398,51 @@ describe('Modbus_Server request handling (TCP framing)', () => {
 		const [response] = tcp_exchange(server, tcp_frame(1, '01100001000306000a01020003'));
 		assert.equal(response.toString('hex'), tcp_frame(1, '019004').toString('hex'));
 		assert.deepEqual(memory.calls, [['set_holding_register', 1, 0x000a, 1]]);
+	});
+
+	test('FC 2 calls get_discrete_input per point, apart from the coils', () => {
+		const inputs = new Uint8Array(65536);
+		inputs[0x14] = 1;
+		memory.unit(1).coils[0x13] = 1;
+		server.vector = {
+			...memory.vector,
+			get_discrete_input(addr, unit_id) {
+				memory.calls.push(['get_discrete_input', addr, unit_id]);
+				return inputs[addr] === 1;
+			},
+		};
+		const [fc2] = tcp_exchange(server, tcp_frame(1, '010200130002'));
+		assert.equal(fc2.toString('hex'), tcp_frame(1, '01020102').toString('hex'));
+		const [fc1] = tcp_exchange(server, tcp_frame(2, '010100130002'));
+		assert.equal(fc1.toString('hex'), tcp_frame(2, '01010101').toString('hex'));
+		assert.deepEqual(memory.calls, [
+			['get_discrete_input', 0x13, 1], ['get_discrete_input', 0x14, 1],
+			['get_coil', 0x13, 1], ['get_coil', 0x14, 1],
+		]);
+	});
+
+	test('FC 2 prefers get_discrete_inputs, even without get_discrete_input', () => {
+		for (const with_single of [true, false]) {
+			memory.calls.length = 0;
+			add_batch_methods('get_coils');
+			server.vector.get_discrete_inputs = (addr, quantity, unit_id) => {
+				memory.calls.push(['get_discrete_inputs', addr, quantity, unit_id]);
+				return [false, true, true];
+			};
+			if (with_single) server.vector.get_discrete_input = () => assert.fail('single method called');
+			const [response] = tcp_exchange(server, tcp_frame(1, '010200050003'));
+			assert.equal(response.toString('hex'), tcp_frame(1, '01020106').toString('hex'));
+			assert.deepEqual(memory.calls, [['get_discrete_inputs', 5, 3, 1]], String(with_single));
+		}
+	});
+
+	test('an invalid get_discrete_inputs result is answered with 0x04', () => {
+		server.vector = { ...memory.vector, get_discrete_inputs: () => [true] };
+		let reported;
+		server.on('vector_error', (error) => reported = error);
+		const [response] = tcp_exchange(server, tcp_frame(1, '010200000002'));
+		assert.equal(response.toString('hex'), tcp_frame(1, '018204').toString('hex'));
+		assert.ok(reported instanceof TypeError);
 	});
 
 	test('FC 1 and FC 2 call get_coils once when the vector has it', () => {

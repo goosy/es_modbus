@@ -47,12 +47,14 @@ function check_register_values(values) {
  * @property {(addr: number, unit_id: number) => number} get_holding_register  Read holding register
  * @property {(addr: number, value: number, unit_id: number) => void} set_holding_register  Write holding register
  * @property {(addr: number, unit_id: number) => boolean} get_coil  Read coil
+ * @property {(addr: number, unit_id: number) => boolean} [get_discrete_input]  Read discrete input
  * @property {(addr: number, value: boolean, unit_id: number) => void} set_coil  Write coil
  * @property {(addr: number, values: number[], unit_id: number) => void} [set_holding_registers]  Write registers of one FC 16 request
  * @property {(addr: number, values: boolean[], unit_id: number) => void} [set_coils]  Write coils of one FC 15 request
  * @property {(addr: number, quantity: number, unit_id: number) => ArrayLike<number>} [get_input_registers]  Read input registers of one FC 4 request
  * @property {(addr: number, quantity: number, unit_id: number) => ArrayLike<number>} [get_holding_registers]  Read holding registers of one FC 3 request
- * @property {(addr: number, quantity: number, unit_id: number) => ArrayLike<boolean>} [get_coils]  Read coils of one FC 1 / FC 2 request
+ * @property {(addr: number, quantity: number, unit_id: number) => ArrayLike<boolean>} [get_coils]  Read coils of one FC 1 request
+ * @property {(addr: number, quantity: number, unit_id: number) => ArrayLike<boolean>} [get_discrete_inputs]  Read discrete inputs of one FC 2 request
  */
 
 export class Modbus_Server extends EventEmitter {
@@ -485,7 +487,14 @@ export class Modbus_Server extends EventEmitter {
 	}
 
 	handle_read_bits(function_code, start_address, quantity, unit_id) {
-		const values = this.read_points('get_coils', 'get_coil', start_address, quantity, unit_id);
+		const has_discrete_inputs = function_code === 2 && (
+			typeof this.vector.get_discrete_inputs === 'function'
+			|| typeof this.vector.get_discrete_input === 'function'
+		);
+		const [batch_name, single_name] = has_discrete_inputs
+			? ['get_discrete_inputs', 'get_discrete_input']
+			: ['get_coils', 'get_coil'];
+		const values = this.read_points(batch_name, single_name, start_address, quantity, unit_id);
 
 		const byte_count = Math.ceil(quantity / 8);
 		const buffer = Buffer.alloc(3 + byte_count);

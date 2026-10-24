@@ -317,7 +317,9 @@
 - 帧格式取决于 `this.protocol`：`on_data` 据此选择帧长函数，`#on_frame` 据此选择解析器，`send_response` 据此组帧，`_on_data`
   据此确定串行总线语义。`socket` 参数只表示响应写到哪里：两种 TCP 系列传输写入套接字，没有
   `socket` 时写入串口。
-- `handle_read_bits` 服务 FC 1 和 FC 2；`handle_read_registers` 服务 FC 3（保持）和 FC 4（输入），
+- `handle_read_bits` 服务 FC 1 和 FC 2。对 FC 2，`vector` 有 `get_discrete_inputs` 或
+  `get_discrete_input` 时使用离散输入的方法，否则使用线圈的方法；随后与其他请求一样由
+  `read_points` 选择成批方法或单点方法。`handle_read_registers` 服务 FC 3（保持）和 FC 4（输入），
   通过 `function_code === 3` 分支。
 
 ### 请求流程

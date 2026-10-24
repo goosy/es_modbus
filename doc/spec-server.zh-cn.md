@@ -68,12 +68,14 @@ Modicon 表示法（服务端只使用 PDU 地址）。始终会提供 `unit_id`
 
 | 方法                                              | 用于                            | 返回值             |
 | ------------------------------------------------- | ------------------------------- | ------------------ |
-| `get_coil(addr, unit_id)`                         | FC 1（线圈）**以及 FC 2**（离散输入） | 真值 = 位已置位 |
+| `get_coil(addr, unit_id)`                         | FC 1（线圈）；FC 2 的回退       | 真值 = 位已置位 |
+| `get_discrete_input(addr, unit_id)`               | FC 2（离散输入，可选）          | 真值 = 位已置位 |
 | `get_holding_register(addr, unit_id)`             | FC 3                            | `0..65535` 的整数  |
 | `get_input_register(addr, unit_id)`               | FC 4                            | `0..65535` 的整数  |
 | `set_coil(addr, value, unit_id)`                  | FC 5、FC 15                     | 忽略               |
 | `set_holding_register(addr, value, unit_id)`      | FC 6、FC 16                     | 忽略               |
-| `get_coils(addr, quantity, unit_id)`              | FC 1、FC 2（可选）              | `quantity` 个值，真值 = 位已置位 |
+| `get_coils(addr, quantity, unit_id)`              | FC 1（可选）；FC 2 的回退       | `quantity` 个值，真值 = 位已置位 |
+| `get_discrete_inputs(addr, quantity, unit_id)`    | FC 2（可选）                    | `quantity` 个值，真值 = 位已置位 |
 | `get_holding_registers(addr, quantity, unit_id)`  | FC 3（可选）                    | `quantity` 个 `0..65535` 的整数 |
 | `get_input_registers(addr, quantity, unit_id)`    | FC 4（可选）                    | `quantity` 个 `0..65535` 的整数 |
 | `set_coils(addr, values, unit_id)`                | FC 15（可选）                   | 忽略               |
@@ -90,8 +92,8 @@ Modbus 中只有线圈和保持寄存器可写，所以写方法不涉及其他�
 成批读方法返回恰好 `quantity` 个值的 `Array` 或类型化数组（例如 `Uint16Array`），`values[i]`
 是地址 `addr + i` 的值。服务端在再次调用该方法之前就读完它；`vector` 可以返回自身存储的视图。
 
-**成批方法。** 五个成批方法（`get_coils`、`get_holding_registers`、`get_input_registers`、
-`set_coils`、`set_holding_registers`）是可选的。它们让 `vector` 把一个请求的各个点作为一个
+**成批方法。** 六个成批方法（`get_coils`、`get_discrete_inputs`、`get_holding_registers`、
+`get_input_registers`、`set_coils`、`set_holding_registers`）是可选的。它们让 `vector` 把一个请求的各个点作为一个
 整体处理：
 
 - **成批写，一致性**：一步更新一个占多个寄存器的值，而不是让它以写了一半的状态暴露出来。
@@ -103,7 +105,8 @@ Modbus 中只有线圈和保持寄存器可写，所以写方法不涉及其他�
 规则如下：
 
 - 若 `vector` 有请求对应的成批方法，以请求的全部点调用一次；否则按地址升序对每个点各调用一次
-  单点方法。FC 1 和 FC 2 用 `get_coils` / `get_coil`，FC 3 用 `get_holding_registers` /
+  单点方法。FC 1 用 `get_coils` / `get_coil`，FC 2 用 `get_discrete_inputs` / `get_discrete_input`
+  （见下文“离散输入”），FC 3 用 `get_holding_registers` /
   `get_holding_register`，FC 4 用 `get_input_registers` / `get_input_register`，FC 15 用
   `set_coils` / `set_coil`，FC 16 用 `set_holding_registers` / `set_holding_register`。
 - 按功能码而不是按数量选择：只涉及一个点的请求，有成批方法时仍调用成批方法。FC 5 和 FC 6
@@ -121,8 +124,16 @@ Modbus 中只有线圈和保持寄存器可写，所以写方法不涉及其他�
 推荐把数据保存在内存中（例如一个 `Buffer`）。位于别处的数据（例如 PLC）由调用者负责读入内存并保持
 同步，例如由事件驱动；从慢速数据源读取不是 `Modbus_Server` 的使用场景。
 
-没有单独的离散输入访问器 — FC 2 复用 `get_coil` / `get_coils`。服务端把读到的值打包/序列化
-进响应。
+**离散输入。** `get_discrete_input` 和 `get_discrete_inputs` 让 `vector` 把离散输入（FC 2）与
+线圈（FC 1）分开；两者都是可选的。
+
+- `vector` 有其中任意一个时，FC 2 使用它们：有 `get_discrete_inputs` 时每个请求调用一次，否则
+  每个点调用一次 `get_discrete_input`。
+- 两者都没有时，FC 2 按 FC 1 处理，经 `get_coils` / `get_coil` 读取，因此不区分两张表的
+  `vector` 照常工作。
+- FC 1 始终使用线圈的方法。
+
+服务端把读到的值打包/序列化进响应。
 
 **抛出异常的 `vector`。** 如果某个 `vector` 函数抛出异常，服务端以该错误发出 `vector_error`，并以
 异常 `0x04`（服务器设备故障）应答该请求，而不是返回数据响应。与 `error` 不同，没有监听者时
