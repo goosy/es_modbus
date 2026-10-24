@@ -344,6 +344,14 @@
    - `handle_read_registers` 在打包之前用 `check_register_values` 检查读到的值：被
      `is_register_value` 拒绝的值作为包装 `TypeError` 的 `Vector_Error` 抛出，因此走下面的
      `vector_error` / `0x04` 路径，而不是以 `RangeError` 从 `Buffer.writeUInt16BE` 逃出或被转换。
+   - 成批方法：`read_points` 和 `write_points` 接受成批方法名和单点方法名。若
+     `typeof vector[batch_name]` 为 `'function'`，调用一次，否则每个点调用一次。每个请求都重新
+     检查，因此替换 `server.vector` 立即生效。
+     - `handle_write_multiple_coils` / `handle_write_multiple_registers` 把请求数据解码为新的值
+       `Array`，交给 `write_points`。
+     - `handle_read_bits` / `handle_read_registers` 从 `read_points` 取得值并打包。`read_points`
+       检查成批结果的形态（`Array` 或类型化数组、长度为 `quantity`），不符时抛出包装 `TypeError`
+       的 `Vector_Error`；两条路径的寄存器值随后都经过 `check_register_values`。
    - 每次 `vector` 调用都经过 `call_vector`，它把抛出的异常包装为私有的 `Vector_Error`。
      `serve()` 只捕获 `Vector_Error`：以原始错误和请求发出 `vector_error`，并应答异常 `0x04`。
      没有监听者的 `vector_error` 会被忽略。其他异常属于程序缺陷，会向外传播。

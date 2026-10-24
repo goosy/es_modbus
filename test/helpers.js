@@ -66,8 +66,8 @@ export function create_memory_vector() {
 			calls.push(['get_input_register', addr, unit_id]);
 			return unit(unit_id).input[addr];
 		},
-		set_register(addr, value, unit_id) {
-			calls.push(['set_register', addr, value, unit_id]);
+		set_holding_register(addr, value, unit_id) {
+			calls.push(['set_holding_register', addr, value, unit_id]);
 			unit(unit_id).holding[addr] = value;
 		},
 	};

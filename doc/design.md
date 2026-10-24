@@ -406,6 +406,16 @@ the move into `CONNECTING`; a caller that arrives while `CONNECTING` is added to
      them: a value that `is_register_value` rejects is thrown as a `Vector_Error` wrapping a
      `TypeError`, so it takes the `vector_error` / `0x04` path below instead of escaping from
      `Buffer.writeUInt16BE` as a `RangeError` or being coerced.
+   - Batch methods: `read_points` and `write_points` take the batch and single-point method
+     names. If `typeof vector[batch_name]` is `'function'` they make one call, otherwise one call
+     per point. The check is made on every request, so a `vector` swapped on `server.vector`
+     takes effect at once.
+     - `handle_write_multiple_coils` / `handle_write_multiple_registers` decode the request data
+       into a new `Array` of values and pass it to `write_points`.
+     - `handle_read_bits` / `handle_read_registers` get the values from `read_points` and pack
+       them. `read_points` checks a batch result's shape (`Array` or typed array, length
+       `quantity`) and throws a `Vector_Error` wrapping a `TypeError` otherwise; the register
+       values of both paths then go through `check_register_values`.
    - Every `vector` call goes through `call_vector`, which wraps a thrown exception in a private
      `Vector_Error`. `serve()` catches only `Vector_Error`: it emits `vector_error` with the
      original error and the request, and answers exception `0x04`. A `vector_error` with no

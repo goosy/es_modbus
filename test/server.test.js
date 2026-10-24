@@ -271,7 +271,7 @@ describe('Modbus_Server request handling (TCP framing)', () => {
 	test('FC 6 writes a single register and echoes the request', () => {
 		const [response] = tcp_exchange(server, tcp_frame(1, '01060001ffff'));
 		assert.equal(response.toString('hex'), tcp_frame(1, '01060001ffff').toString('hex'));
-		assert.deepEqual(memory.calls, [['set_register', 1, 0xffff, 1]]);
+		assert.deepEqual(memory.calls, [['set_holding_register', 1, 0xffff, 1]]);
 	});
 
 	test('FC 15 writes multiple coils', () => {
@@ -285,7 +285,7 @@ describe('Modbus_Server request handling (TCP framing)', () => {
 	test('FC 16 writes multiple registers', () => {
 		const [response] = tcp_exchange(server, tcp_frame(1, '01100001000204000a0102'));
 		assert.equal(response.toString('hex'), tcp_frame(1, '011000010002').toString('hex'));
-		assert.deepEqual(memory.calls, [['set_register', 1, 0x000a, 1], ['set_register', 2, 0x0102, 1]]);
+		assert.deepEqual(memory.calls, [['set_holding_register', 1, 0x000a, 1], ['set_holding_register', 2, 0x0102, 1]]);
 	});
 
 	test('vector arguments have the specified types', () => {
@@ -296,6 +296,196 @@ describe('Modbus_Server request handling (TCP framing)', () => {
 			assert.equal(typeof unit_id, 'number', name);
 			assert.equal(typeof value, name === 'set_coil' ? 'boolean' : 'number', name);
 		}
+	});
+
+	/** Adds batch methods to the memory vector, recorded in `memory.calls`. */
+	function add_batch_methods(...names) {
+		const batch = {
+			get_coils(addr, quantity, unit_id) {
+				memory.calls.push(['get_coils', addr, quantity, unit_id]);
+				return Array.from(memory.unit(unit_id).coils.subarray(addr, addr + quantity), (bit) => bit === 1);
+			},
+			get_holding_registers(addr, quantity, unit_id) {
+				memory.calls.push(['get_holding_registers', addr, quantity, unit_id]);
+				// A view of the vector's own storage
+				return memory.unit(unit_id).holding.subarray(addr, addr + quantity);
+			},
+			get_input_registers(addr, quantity, unit_id) {
+				memory.calls.push(['get_input_registers', addr, quantity, unit_id]);
+				return Array.from(memory.unit(unit_id).input.subarray(addr, addr + quantity));
+			},
+			set_coils(addr, values, unit_id) {
+				memory.calls.push(['set_coils', addr, values, unit_id]);
+			},
+			set_holding_registers(addr, values, unit_id) {
+				memory.calls.push(['set_holding_registers', addr, values, unit_id]);
+			},
+		};
+		server.vector = { ...memory.vector };
+		for (const name of names) server.vector[name] = batch[name];
+	}
+
+	test('FC 15 calls set_coils once when the vector has it', () => {
+		add_batch_methods('set_coils');
+		const [response] = tcp_exchange(server, tcp_frame(1, '010f0013000a02cd01'));
+		assert.equal(response.toString('hex'), tcp_frame(1, '010f0013000a').toString('hex'));
+		const bits = [1, 0, 1, 1, 0, 0, 1, 1, 1, 0];
+		assert.deepEqual(memory.calls, [['set_coils', 0x13, bits.map((bit) => bit === 1), 1]]);
+	});
+
+	test('FC 16 calls set_holding_registers once when the vector has it', () => {
+		add_batch_methods('set_holding_registers');
+		const [response] = tcp_exchange(server, tcp_frame(1, '01100001000204000a0102'));
+		assert.equal(response.toString('hex'), tcp_frame(1, '011000010002').toString('hex'));
+		assert.deepEqual(memory.calls, [['set_holding_registers', 1, [0x000a, 0x0102], 1]]);
+	});
+
+	test('a batch method is used for a single point and its values are an Array', () => {
+		add_batch_methods('set_coils', 'set_holding_registers');
+		tcp_exchange(server, tcp_frame(1, '010f0005000101 01'));
+		tcp_exchange(server, tcp_frame(1, '01100007000102 ffff'));
+		assert.deepEqual(memory.calls, [['set_coils', 5, [true], 1], ['set_holding_registers', 7, [0xffff], 1]]);
+		for (const [, , values] of memory.calls) assert.ok(Array.isArray(values));
+	});
+
+	test('FC 5 and FC 6 call the single methods even with batch methods', () => {
+		add_batch_methods('set_coils', 'set_holding_registers');
+		tcp_exchange(server, tcp_frame(1, '010500acff00'));
+		tcp_exchange(server, tcp_frame(1, '010600010005'));
+		assert.deepEqual(memory.calls, [['set_coil', 0xac, true, 1], ['set_holding_register', 1, 5, 1]]);
+	});
+
+	test('the batch methods are independent', () => {
+		add_batch_methods('set_holding_registers');
+		tcp_exchange(server, tcp_frame(1, '010f0010000201 03'));
+		tcp_exchange(server, tcp_frame(1, '01100020000102 0102'));
+		assert.deepEqual(memory.calls, [
+			['set_coil', 0x10, true, 1], ['set_coil', 0x11, true, 1],
+			['set_holding_registers', 0x20, [0x0102], 1],
+		]);
+	});
+
+	test('a batch method is not called for an invalid request', () => {
+		add_batch_methods('set_coils', 'set_holding_registers');
+		const [written] = tcp_exchange(server, tcp_frame(1, '0110ffff000204 00010002'));
+		assert.equal(written.toString('hex'), tcp_frame(1, '019002').toString('hex'));
+		assert.deepEqual(memory.calls, []);
+	});
+
+	test('a throwing batch method is reported through vector_error', () => {
+		const failure = new Error('device failure');
+		server.vector = {
+			...memory.vector,
+			set_holding_registers() {
+				throw failure;
+			},
+		};
+		const reported = [];
+		server.on('vector_error', (error, request) => reported.push([error, request.func_code]));
+		const [response] = tcp_exchange(server, tcp_frame(1, '01100001000204000a0102'));
+		assert.equal(response.toString('hex'), tcp_frame(1, '019004').toString('hex'));
+		assert.deepEqual(reported, [[failure, 16]]);
+	});
+
+	test('without a batch method a throwing write stops the request', () => {
+		server.vector = {
+			...memory.vector,
+			set_holding_register(addr, value, unit_id) {
+				if (addr === 2) throw new Error('device failure');
+				memory.vector.set_holding_register(addr, value, unit_id);
+			},
+		};
+		const [response] = tcp_exchange(server, tcp_frame(1, '01100001000306000a01020003'));
+		assert.equal(response.toString('hex'), tcp_frame(1, '019004').toString('hex'));
+		assert.deepEqual(memory.calls, [['set_holding_register', 1, 0x000a, 1]]);
+	});
+
+	test('FC 1 and FC 2 call get_coils once when the vector has it', () => {
+		add_batch_methods('get_coils');
+		const coils = memory.unit(1).coils;
+		for (const addr of [0x13, 0x15, 0x16, 0x19, 0x1a, 0x1c]) coils[addr] = 1;
+		const [fc1] = tcp_exchange(server, tcp_frame(1, '01010013000a'));
+		assert.equal(fc1.toString('hex'), tcp_frame(1, '010102cd02').toString('hex'));
+		const [fc2] = tcp_exchange(server, tcp_frame(2, '01020013000a'));
+		assert.equal(fc2.toString('hex'), tcp_frame(2, '010202cd02').toString('hex'));
+		assert.deepEqual(memory.calls, [['get_coils', 0x13, 10, 1], ['get_coils', 0x13, 10, 1]]);
+	});
+
+	test('FC 3 calls get_holding_registers once and accepts a typed array', () => {
+		add_batch_methods('get_holding_registers');
+		memory.unit(1).holding.set([0x1234, 0xabcd], 100);
+		const [response] = tcp_exchange(server, tcp_frame(1, '010300640002'));
+		assert.equal(response.toString('hex'), tcp_frame(1, '0103041234abcd').toString('hex'));
+		assert.deepEqual(memory.calls, [['get_holding_registers', 100, 2, 1]]);
+	});
+
+	test('FC 4 calls get_input_registers once when the vector has it', () => {
+		add_batch_methods('get_input_registers');
+		memory.unit(3).input[0xffff] = 7;
+		const [response] = tcp_exchange(server, tcp_frame(1, '0304ffff0001'));
+		assert.equal(response.toString('hex'), tcp_frame(1, '0304020007').toString('hex'));
+		assert.deepEqual(memory.calls, [['get_input_registers', 0xffff, 1, 3]]);
+	});
+
+	test('the batch read methods are independent', () => {
+		add_batch_methods('get_input_registers');
+		tcp_exchange(server, tcp_frame(1, '010300000002'));
+		tcp_exchange(server, tcp_frame(1, '010400000002'));
+		assert.deepEqual(memory.calls, [
+			['get_holding_register', 0, 1], ['get_holding_register', 1, 1],
+			['get_input_registers', 0, 2, 1],
+		]);
+	});
+
+	test('an invalid batch read result is answered with 0x04 and reported as a TypeError', () => {
+		const results = [
+			[1, null],
+			[1, 7],
+			[1, ''],
+			[1, [1]],
+			[1, [1, 2, 3]],
+			[1, [1, 65536]],
+			[1, [1, -1]],
+			[1, [1, 1.5]],
+			[1, [1, '2']],
+			[2, [true]],
+		];
+		const reported = [];
+		server.on('vector_error', (error) => reported.push(error));
+		for (const [kind, result] of results) {
+			server.vector = {
+				...memory.vector,
+				get_holding_registers: () => result,
+				get_coils: () => result,
+			};
+			const request = kind === 1 ? '010300000002' : '010100000002';
+			const [response] = tcp_exchange(server, tcp_frame(1, request));
+			const expected = kind === 1 ? '018304' : '018104';
+			assert.equal(response.toString('hex'), tcp_frame(1, expected).toString('hex'), String(result));
+		}
+		assert.equal(reported.length, results.length);
+		for (const error of reported) assert.ok(error instanceof TypeError);
+	});
+
+	test('a batch coil result is read by truthiness', () => {
+		server.vector = { ...memory.vector, get_coils: () => [1, 0, 'x', null, {}, undefined, 2, 0] };
+		const [response] = tcp_exchange(server, tcp_frame(1, '010100000008'));
+		assert.equal(response.toString('hex'), tcp_frame(1, '01010155').toString('hex'));
+	});
+
+	test('a throwing batch read method is reported through vector_error', () => {
+		const failure = new Error('device failure');
+		server.vector = {
+			...memory.vector,
+			get_input_registers() {
+				throw failure;
+			},
+		};
+		const reported = [];
+		server.on('vector_error', (error, request) => reported.push([error, request.func_code]));
+		const [response] = tcp_exchange(server, tcp_frame(1, '010400000001'));
+		assert.equal(response.toString('hex'), tcp_frame(1, '018404').toString('hex'));
+		assert.deepEqual(reported, [[failure, 4]]);
 	});
 
 	test('the transaction and protocol IDs are echoed', () => {
@@ -449,7 +639,7 @@ describe('Modbus_Server request handling (TCP framing)', () => {
 		assert.equal(read.toString('hex'), tcp_frame(1, '0003020009').toString('hex'));
 		const [write] = tcp_exchange(server, tcp_frame(2, '000600010005'));
 		assert.equal(write.toString('hex'), tcp_frame(2, '000600010005').toString('hex'));
-		assert.deepEqual(memory.calls, [['get_holding_register', 1, 0], ['set_register', 1, 5, 0]]);
+		assert.deepEqual(memory.calls, [['get_holding_register', 1, 0], ['set_holding_register', 1, 5, 0]]);
 	});
 
 	test('unit ID 0 that is not accepted gets exception 0x0B on TCP', () => {
@@ -518,7 +708,7 @@ describe('Modbus_Server request handling (RTU framing)', () => {
 
 	test('a broadcast write is executed and not answered', () => {
 		assert.deepEqual(rtu_exchange('000600010005'), []);
-		assert.deepEqual(memory.calls, [['set_register', 1, 5, 0]]);
+		assert.deepEqual(memory.calls, [['set_holding_register', 1, 5, 0]]);
 	});
 
 	test('a broadcast read is ignored', () => {
@@ -539,14 +729,14 @@ describe('Modbus_Server request handling (RTU framing)', () => {
 		assert.deepEqual(memory.calls, [
 			['set_coil', 3, true, 0],
 			['set_coil', 0x10, true, 0], ['set_coil', 0x11, true, 0],
-			['set_register', 0x20, 0x0102, 0],
+			['set_holding_register', 0x20, 0x0102, 0],
 		]);
 	});
 
 	test('a broadcast is executed when unit 0 is the only accepted ID', () => {
 		server.set_unit_ids(0);
 		assert.deepEqual(rtu_exchange('000600010005'), []);
-		assert.deepEqual(memory.calls, [['set_register', 1, 5, 0]]);
+		assert.deepEqual(memory.calls, [['set_holding_register', 1, 5, 0]]);
 	});
 
 	test('an invalid broadcast write is neither executed nor answered', () => {
@@ -562,7 +752,7 @@ describe('Modbus_Server request handling (RTU framing)', () => {
 	test('a throwing vector on a broadcast is reported but not answered', () => {
 		server.vector = {
 			...memory.vector,
-			set_register() {
+			set_holding_register() {
 				throw new Error('device failure');
 			},
 		};

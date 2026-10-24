@@ -45,9 +45,14 @@ function check_register_values(values) {
  * @typedef {Object} ModbusVector
  * @property {(addr: number, unit_id: number) => number} get_input_register  Read input register
  * @property {(addr: number, unit_id: number) => number} get_holding_register  Read holding register
- * @property {(addr: number, value: number, unit_id: number) => void} set_register  Write register
+ * @property {(addr: number, value: number, unit_id: number) => void} set_holding_register  Write holding register
  * @property {(addr: number, unit_id: number) => boolean} get_coil  Read coil
  * @property {(addr: number, value: boolean, unit_id: number) => void} set_coil  Write coil
+ * @property {(addr: number, values: number[], unit_id: number) => void} [set_holding_registers]  Write registers of one FC 16 request
+ * @property {(addr: number, values: boolean[], unit_id: number) => void} [set_coils]  Write coils of one FC 15 request
+ * @property {(addr: number, quantity: number, unit_id: number) => ArrayLike<number>} [get_input_registers]  Read input registers of one FC 4 request
+ * @property {(addr: number, quantity: number, unit_id: number) => ArrayLike<number>} [get_holding_registers]  Read holding registers of one FC 3 request
+ * @property {(addr: number, quantity: number, unit_id: number) => ArrayLike<boolean>} [get_coils]  Read coils of one FC 1 / FC 2 request
  */
 
 export class Modbus_Server extends EventEmitter {
@@ -480,12 +485,7 @@ export class Modbus_Server extends EventEmitter {
 	}
 
 	handle_read_bits(function_code, start_address, quantity, unit_id) {
-		const values = [];
-		for (let i = 0; i < quantity; i++) {
-			const addr = start_address + i;
-			const value = this.call_vector('get_coil', addr, unit_id);
-			values.push(value ? 1 : 0);
-		}
+		const values = this.read_points('get_coils', 'get_coil', start_address, quantity, unit_id);
 
 		const byte_count = Math.ceil(quantity / 8);
 		const buffer = Buffer.alloc(3 + byte_count);
@@ -497,7 +497,7 @@ export class Modbus_Server extends EventEmitter {
 			let byte = 0;
 			for (let j = 0; j < 8; j++) {
 				if (i * 8 + j < quantity) {
-					byte |= values[i * 8 + j] << j;
+					byte |= (values[i * 8 + j] ? 1 : 0) << j;
 				}
 			}
 			buffer.writeUInt8(byte, 3 + i);
@@ -507,14 +507,10 @@ export class Modbus_Server extends EventEmitter {
 	}
 
 	handle_read_registers(function_code, start_address, quantity, unit_id) {
-		const values = [];
-		for (let i = 0; i < quantity; i++) {
-			const addr = start_address + i;
-			const value = function_code === 3
-				? this.call_vector('get_holding_register', addr, unit_id)
-				: this.call_vector('get_input_register', addr, unit_id);
-			values.push(value);
-		}
+		const [batch_name, single_name] = function_code === 3
+			? ['get_holding_registers', 'get_holding_register']
+			: ['get_input_registers', 'get_input_register'];
+		const values = this.read_points(batch_name, single_name, start_address, quantity, unit_id);
 		check_register_values(values);
 
 		const buffer = Buffer.alloc(3 + quantity * 2);
@@ -535,25 +531,58 @@ export class Modbus_Server extends EventEmitter {
 	}
 
 	handle_write_single_register(address, value, unit_id) {
-		this.call_vector('set_register', address, value, unit_id);
+		this.call_vector('set_holding_register', address, value, unit_id);
 		return write_response(unit_id, 6, address, value);
 	}
 
 	handle_write_multiple_coils(start_address, quantity, data, unit_id) {
+		const values = [];
 		for (let i = 0; i < quantity; i++) {
 			const byteIndex = Math.floor(i / 8);
 			const bitIndex = i % 8;
-			const value = (data[byteIndex] & (1 << bitIndex)) !== 0;
-			this.call_vector('set_coil', start_address + i, value, unit_id);
+			values.push((data[byteIndex] & (1 << bitIndex)) !== 0);
 		}
+		this.write_points('set_coils', 'set_coil', start_address, values, unit_id);
 		return write_response(unit_id, 15, start_address, quantity);
 	}
 
 	handle_write_multiple_registers(start_address, quantity, data, unit_id) {
+		const values = [];
 		for (let i = 0; i < quantity; i++) {
-			const value = data.readUInt16BE(i * 2);
-			this.call_vector('set_register', start_address + i, value, unit_id);
+			values.push(data.readUInt16BE(i * 2));
 		}
+		this.write_points('set_holding_registers', 'set_holding_register', start_address, values, unit_id);
 		return write_response(unit_id, 16, start_address, quantity);
+	}
+
+	/**
+	 * Reads `quantity` points through the batch method when the `vector` has one, else point by
+	 * point. A batch result that is not an array of `quantity` values surfaces as a Vector_Error.
+	 */
+	read_points(batch_name, single_name, start_address, quantity, unit_id) {
+		if (typeof this.vector[batch_name] !== 'function') {
+			const values = [];
+			for (let i = 0; i < quantity; i++) {
+				values.push(this.call_vector(single_name, start_address + i, unit_id));
+			}
+			return values;
+		}
+		const values = this.call_vector(batch_name, start_address, quantity, unit_id);
+		const is_array = Array.isArray(values) || ArrayBuffer.isView(values);
+		if (!is_array || values.length !== quantity) {
+			throw new Vector_Error(new TypeError(`${batch_name} must return ${quantity} values`));
+		}
+		return values;
+	}
+
+	// Writes `values` through the batch method when the `vector` has one, else point by point
+	write_points(batch_name, single_name, start_address, values, unit_id) {
+		if (typeof this.vector[batch_name] === 'function') {
+			this.call_vector(batch_name, start_address, values, unit_id);
+			return;
+		}
+		for (let i = 0; i < values.length; i++) {
+			this.call_vector(single_name, start_address + i, values[i], unit_id);
+		}
 	}
 }

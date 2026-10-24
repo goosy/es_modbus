@@ -66,23 +66,63 @@ RTU 服务端就是串行线路上的 Modbus 从站：它没有连接，并以 C
 Modicon 表示法（服务端只使用 PDU 地址）。始终会提供 `unit_id`，因此同一个 `vector` 可以支撑多个
 单元。
 
-| 方法                                     | 用于                            | 返回值             |
-| ---------------------------------------- | ------------------------------- | ------------------ |
-| `get_coil(addr, unit_id)`               | FC 1（线圈）**以及 FC 2**（离散输入） | 真值 = 位已置位 |
-| `get_holding_register(addr, unit_id)`   | FC 3                            | `0..65535` 的整数  |
-| `get_input_register(addr, unit_id)`     | FC 4                            | `0..65535` 的整数  |
-| `set_coil(addr, value, unit_id)`        | FC 5、FC 15                     | 忽略               |
-| `set_register(addr, value, unit_id)`    | FC 6、FC 16                     | 忽略               |
+| 方法                                              | 用于                            | 返回值             |
+| ------------------------------------------------- | ------------------------------- | ------------------ |
+| `get_coil(addr, unit_id)`                         | FC 1（线圈）**以及 FC 2**（离散输入） | 真值 = 位已置位 |
+| `get_holding_register(addr, unit_id)`             | FC 3                            | `0..65535` 的整数  |
+| `get_input_register(addr, unit_id)`               | FC 4                            | `0..65535` 的整数  |
+| `set_coil(addr, value, unit_id)`                  | FC 5、FC 15                     | 忽略               |
+| `set_holding_register(addr, value, unit_id)`      | FC 6、FC 16                     | 忽略               |
+| `get_coils(addr, quantity, unit_id)`              | FC 1、FC 2（可选）              | `quantity` 个值，真值 = 位已置位 |
+| `get_holding_registers(addr, quantity, unit_id)`  | FC 3（可选）                    | `quantity` 个 `0..65535` 的整数 |
+| `get_input_registers(addr, quantity, unit_id)`    | FC 4（可选）                    | `quantity` 个 `0..65535` 的整数 |
+| `set_coils(addr, values, unit_id)`                | FC 15（可选）                   | 忽略               |
+| `set_holding_registers(addr, values, unit_id)`    | FC 16（可选）                   | 忽略               |
 
-参数类型：`addr` 和 `unit_id` 是 `number`；`set_coil` 的 `value` 是 `boolean`；`set_register` 的
-`value` 是 `0..65535` 范围内的整数。
+Modbus 中只有线圈和保持寄存器可写，所以写方法不涉及其他表。
+
+参数类型：`addr`、`quantity` 和 `unit_id` 是 `number`；`set_coil` 的 `value` 是 `boolean`；
+`set_holding_register` 的 `value` 是 `0..65535` 范围内的整数。`set_coils` 的 `values` 是
+`boolean` 的 `Array`；`set_holding_registers` 的 `values` 是 `0..65535` 范围内整数的 `Array`。
+`values[i]` 是地址 `addr + i` 的值，`values.length` 即请求的数量。每次调用都传入新数组，
+`vector` 可以保留它。
+
+成批读方法返回恰好 `quantity` 个值的 `Array` 或类型化数组（例如 `Uint16Array`），`values[i]`
+是地址 `addr + i` 的值。服务端在再次调用该方法之前就读完它；`vector` 可以返回自身存储的视图。
+
+**成批方法。** 五个成批方法（`get_coils`、`get_holding_registers`、`get_input_registers`、
+`set_coils`、`set_holding_registers`）是可选的。它们让 `vector` 把一个请求的各个点作为一个
+整体处理：
+
+- **成批写，一致性**：一步更新一个占多个寄存器的值，而不是让它以写了一半的状态暴露出来。
+- **成批写，性能**：定位数据、检测变化、通知订阅者等工作每个请求只做一次，而不是每个点做一次。
+- **成批读**：每次读取都有副作用（诊断事件、访问计数、按需刷新）的数据源，每个请求只产生一次
+  副作用，而不是每个点一次；一个请求也可以变成对数据源的一次范围读取。一致性不是这里的理由：
+  `vector` 是同步的，逐点读取看到的已经是同一个快照。
+
+规则如下：
+
+- 若 `vector` 有请求对应的成批方法，以请求的全部点调用一次；否则按地址升序对每个点各调用一次
+  单点方法。FC 1 和 FC 2 用 `get_coils` / `get_coil`，FC 3 用 `get_holding_registers` /
+  `get_holding_register`，FC 4 用 `get_input_registers` / `get_input_register`，FC 15 用
+  `set_coils` / `set_coil`，FC 16 用 `set_holding_registers` / `set_holding_register`。
+- 按功能码而不是按数量选择：只涉及一个点的请求，有成批方法时仍调用成批方法。FC 5 和 FC 6
+  始终调用 `set_coil` 和 `set_holding_register`。
+- 各成批方法相互独立：`vector` 可以提供其中任意几个。
+- 每个请求在被处理时各自选择。
+- 与其他 `vector` 函数一样，成批方法只对有效请求调用；它抛出异常时也同样处理（`vector_error`、
+  异常 `0x04`）。没有成批方法时，某次 `set_coil` / `set_holding_register` 抛出异常即终止该
+  请求：它之前的点已写入，其余的点不再写入。
+- 成批读的结果不是 `Array` 或类型化数组，或长度不等于 `quantity` 时，按抛出异常的 `vector`
+  处理：以 `TypeError` 发出 `vector_error`，并应答异常 `0x04`。其中的寄存器值与单点访问器的
+  返回值同样检查（见下文“无效的寄存器值”）。
 
 **`vector` 是同步的。** 它的函数直接返回值；不支持返回 Promise。被调用时，数据必须实时可达。
 推荐把数据保存在内存中（例如一个 `Buffer`）。位于别处的数据（例如 PLC）由调用者负责读入内存并保持
 同步，例如由事件驱动；从慢速数据源读取不是 `Modbus_Server` 的使用场景。
 
-没有单独的离散输入访问器 — FC 2 复用 `get_coil`。读访问器会对所请求范围内的每个点各调用一次；
-服务端把结果打包/序列化进响应。
+没有单独的离散输入访问器 — FC 2 复用 `get_coil` / `get_coils`。服务端把读到的值打包/序列化
+进响应。
 
 **抛出异常的 `vector`。** 如果某个 `vector` 函数抛出异常，服务端以该错误发出 `vector_error`，并以
 异常 `0x04`（服务器设备故障）应答该请求，而不是返回数据响应。与 `error` 不同，没有监听者时

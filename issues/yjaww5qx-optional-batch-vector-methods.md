@@ -1,9 +1,9 @@
 ---
 id: yjaww5qx
 opened: 2026-10-24T02:34:21.148Z
-closed:
+closed: 2026-10-24T04:12:05.578Z
 title: vector 增加可选的成批读写方法
-status: open        # open | accepted | fixed | rejected | wontfix
+status: fixed       # open | accepted | fixed | rejected | wontfix
 fixed_in: []        # commit IDs, backfilled at version commit time
 labels: []
 remote:
@@ -33,16 +33,16 @@ vector 增加可选的成批方法：可选、按功能码选择、没有时回�
 | --- | --- | --- |
 | `set_coils(addr, values, unit_id)` | FC 15 | 参数 `values`：布尔数组 |
 | `set_holding_registers(addr, values, unit_id)` | FC 16 | 参数 `values`：0..65535 的整数数组 |
-| `get_coils(addr, quantity, unit_id)` | FC 1；FC 2 在 vector 没有离散输入方法时也用它（见 issue#2kn5yrqz） | 返回长度为 `quantity` 的数组，元素按真值取位 |
-| `get_holding_registers(addr, quantity, unit_id)` | FC 3 | 返回长度为 `quantity` 的数组，元素为 0..65535 的整数 |
+| `get_coils(addr, quantity, unit_id)` | FC 1；FC 2 在 vector 没有离散输入方法时也用它（见 issue#2kn5yrqz） | 返回长度为 `quantity` 的 `Array` 或类型化数组，元素按真值取位 |
+| `get_holding_registers(addr, quantity, unit_id)` | FC 3 | 返回长度为 `quantity` 的 `Array` 或类型化数组，元素为 0..65535 的整数 |
 | `get_input_registers(addr, quantity, unit_id)` | FC 4 | 同上 |
 
 - 单点写方法 `set_register` 同时改名为 `set_holding_register`，与 `get_holding_register` 和成批的 `set_holding_registers` 对称。协议上只有保持寄存器可写（FC 6 / FC 16），旧名没有歧义，改名只为命名对称。这是破坏性变更，0.3.0 是事实上的首个正式版本，可以接受。
 - 有对应的成批方法时，一次请求只调用一次；没有时逐点调用。各方法相互独立。按功能码选择，与数量无关，一个点也用成批方法。每次请求时判断，替换 `server.vector` 立即生效。FC 5 / FC 6 仍调用单点的 `set_coil` / `set_holding_register`。
 - `values[i]` 对应地址 `addr + i`；每次调用传入新数组，vector 可以保留。
 - 只对通过 `check_request` 的请求调用。抛出异常的处理与其他 vector 函数相同（`vector_error`，异常 0x04）。没有成批写方法时，逐点写入中途抛出即终止该请求，之前的点已写入。
-- 成批读的返回值长度不等于 `quantity`、或寄存器值不是 0..65535 的整数时，按 vector 错误处理，答 0x04，由本仓库决定。
-- 返回数组与成批写的参数类型对称。也可以考虑寄存器返回大端 `Buffer`，由本仓库决定。
+- 成批读的返回值不是 `Array` 或类型化数组、长度不等于 `quantity`、或寄存器值不是 0..65535 的整数时，按 vector 错误处理：以 `TypeError` 发出 `vector_error`，答 0x04。
+- 成批读返回 `Array` 或类型化数组（如 `Uint16Array`），与成批写的参数类型对称；vector 可以直接返回自身存储的视图（如 `subarray`）。寄存器返回大端 `Buffer`：不采纳，类型化数组已能直接返回存储，且元素即寄存器值，不必再按字节解码。
 - 使用方 modbus_emulator 随后改用这些方法，在一次范围读写中完成一个请求，属于该仓库的工作。
 
 成批写的意义：
@@ -61,3 +61,5 @@ vector 增加可选的成批方法：可选、按功能码选择、没有时回�
 - 一致性不是成批读的理由：vector 是同步的，逐点读取之间数据不会被其他代码修改，逐点读取得到的已经是一致的快照。
 
 ## 裁定
+
+fixed。按提案实现：五个可选成批方法与 `set_register` 改名为 `set_holding_register`，契约写入 `spec-server`。成批读写让 vector 能以请求为单位处理，解决写一半可见与读副作用重复的问题，且对不提供成批方法的 vector 回退为逐点调用。modbus_emulator 改用这些方法属于该仓库的工作。
