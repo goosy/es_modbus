@@ -1,5 +1,84 @@
 # Changelog
 
+## v0.3.0-beta.4
+
+### Breaking changes
+
+- The `vector` of `Modbus_Server` is renamed `handler`: the `vector` property is
+  now `handler`, and the `vector_error` event is now `handler_error`. The
+  constructor still takes it as the first argument.
+- The `handler` method `set_register` is renamed `set_holding_register`, matching
+  `get_holding_register`; only holding registers are writable in Modbus.
+- A register value read from the `handler` must be an integer in `0..65535`. Any
+  other value is handled like a throwing `handler`: exception 0x04, and
+  `handler_error` with a `TypeError`. Previously an out-of-range value crashed
+  the server, and `undefined` was answered as 0.
+
+### Server
+
+- A `handler` may provide the optional batch methods `get_coils`,
+  `get_discrete_inputs`, `get_holding_registers`, `get_input_registers`,
+  `set_coils` and `set_holding_registers`. FC 1 to 4, 15 and 16 then serve every
+  point of a request in one call, so the `handler` can process it as a whole (no
+  half-written multi-register values) and do its per-request work once. Without
+  them, the single-point methods are called point by point as before.
+- A batch read may return an `Array` or a typed array, such as a view of the
+  `handler`'s own storage. A result of the wrong type or length is answered with
+  exception 0x04 and reported through `handler_error` as a `TypeError`.
+- The optional `get_discrete_input` and `get_discrete_inputs` let a `handler`
+  keep discrete inputs (FC 2) apart from coils. A `handler` with neither is
+  served through the coil methods as before.
+
+### Both
+
+- The new `name` option of `Modbus_Client` and `Modbus_Server`, kept in the
+  `name` property, tells instances apart, e.g. in logs.
+- Serial lines use `serialport-rs` instead of `serialport`, which fixes the
+  stalled serial reads and writes on Windows with Node.js v26.4.0 and later.
+  The native addons now ship in `native/`.
+
+### Known issue
+
+- On Windows, a serial read completes about one system timer tick (typically 12
+  to 16 ms) after its last byte, so each serial transaction takes that much
+  longer; framing is unaffected.
+
+## v0.3.0-beta.4 (中文)
+
+### 破坏性变更
+
+- `Modbus_Server` 的 `vector` 改名为 `handler`：`vector` 属性改为 `handler`，`vector_error` 事件改为
+  `handler_error`。构造函数仍以它作为第一个参数。
+- `handler` 方法 `set_register` 更名为 `set_holding_register`，与 `get_holding_register`
+  对应；Modbus 中只有保持寄存器可写。
+- 从 `handler` 读出的寄存器值必须是 `0..65535` 内的整数。其他值按 `handler` 抛出异常处理：
+  返回异常 0x04，并以 `TypeError` 触发 `handler_error`。以前越界值会使服务端崩溃，
+  `undefined` 被当作 0 应答。
+
+### 服务端
+
+- `handler` 可以提供可选的成批方法 `get_coils`、`get_discrete_inputs`、
+  `get_holding_registers`、`get_input_registers`、`set_coils` 和 `set_holding_registers`。
+  此时 FC 1 至 4、15 和 16 把请求的全部点一次处理，`handler` 可以把它作为整体处理
+  （不会出现写了一半的多寄存器值），每个请求的工作也只做一次。没有这些方法时，
+  仍像以前一样逐点调用单点方法。
+- 成批读可以返回 `Array` 或类型化数组，例如 `handler` 自身存储的视图。类型或长度不对的结果
+  以异常 0x04 应答，并以 `TypeError` 通过 `handler_error` 报告。
+- 可选的 `get_discrete_input` 和 `get_discrete_inputs` 让 `handler` 把离散输入（FC 2）
+  与线圈分开。两者都没有的 `handler` 仍像以前一样通过线圈方法服务。
+
+### 通用
+
+- `Modbus_Client` 和 `Modbus_Server` 新增 `name` 选项，保存在 `name` 属性中，用于区分实例，
+  例如在日志中。
+- 串口改用 `serialport-rs` 替代 `serialport`，修复了在 Windows 上使用 Node.js v26.4.0
+  及以后版本时串口读写停滞的问题。原生插件现在位于 `native/`。
+
+### 已知问题
+
+- 在 Windows 上，串口读取在最后一个字节到达后约一个系统定时器周期（通常 12 到 16 ms）
+  才完成，因此每次串口事务都相应变长；帧分隔不受影响。
+
 ## v0.3.0-beta.2
 
 The client and server now follow the contract in `doc/spec*.md`, RTU and

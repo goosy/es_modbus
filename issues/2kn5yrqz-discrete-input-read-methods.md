@@ -4,7 +4,7 @@ opened: 2026-10-24T03:14:23.284Z
 closed: 2026-10-24T04:28:45.678Z
 title: vector 增加离散输入的读方法（单点与成批）
 status: fixed       # open | accepted | fixed | rejected | wontfix
-fixed_in: []        # commit IDs, backfilled at version commit time
+fixed_in: [066d076] # commit IDs, backfilled at version commit time
 labels: []
 remote:
 problem_title: 问题描述

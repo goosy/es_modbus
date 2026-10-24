@@ -4,7 +4,7 @@ opened: 2026-10-24T04:06:31.416Z
 closed: 2026-10-24T04:22:58.090Z
 title: 单点读寄存器的返回值未经检查，越界值可使服务端崩溃
 status: fixed       # open | accepted | fixed | rejected | wontfix
-fixed_in: []        # commit IDs, backfilled at version commit time
+fixed_in: [3404e7d] # commit IDs, backfilled at version commit time
 labels: []
 remote:
 problem_title: 问题描述

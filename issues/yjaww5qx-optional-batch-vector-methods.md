@@ -4,7 +4,7 @@ opened: 2026-10-24T02:34:21.148Z
 closed: 2026-10-24T04:12:05.578Z
 title: vector 增加可选的成批读写方法
 status: fixed       # open | accepted | fixed | rejected | wontfix
-fixed_in: []        # commit IDs, backfilled at version commit time
+fixed_in: [68a16aa] # commit IDs, backfilled at version commit time
 labels: []
 remote:
 problem_title: 问题描述
