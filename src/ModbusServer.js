@@ -47,6 +47,7 @@ export class Modbus_Server extends EventEmitter {
 	port = null;
 	serial_settings = null; // serial port settings, for a serial device path `port`
 	serial_port = null; // the serial port, created by the first start()
+	name; // the name of the server, for logging
 	protocol = 'tcp'; // the framing: 'tcp', 'rtu_over_tcp' or 'rtu'
 	unit_ids = null;
 	accept_all_units = true;
@@ -73,6 +74,7 @@ export class Modbus_Server extends EventEmitter {
 		this.vector = vector;
 		this.set_unit_ids(options.unit_id);
 		this.host = options.host ?? '0.0.0.0';
+		this.name = options.name ?? 'Modbus_Server';
 		const port = options.port ?? 502;
 		const silence = silence_option(options.silence);
 		if (typeof port === 'string') {

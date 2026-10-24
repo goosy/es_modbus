@@ -130,6 +130,7 @@ export class Modbus_Client extends EventEmitter {
 	keep_alive; // TCP family: idle time before the first keep-alive probe, 0 = off
 	delay; // minimum gap before the next frame write
 	turnaround; // RTU family: minimum wait after a broadcast
+	name; // the name of the client, for logging
 
 	#packets = [];
 	get_packet(tid) {
@@ -178,6 +179,7 @@ export class Modbus_Client extends EventEmitter {
 			reconnect_time = 10000,
 			baud_rate, parity, data_bits, stop_bits,
 		} = options;
+		this.name = options.name ?? 'Modbus_Client';
 		this.reconnect_time = reconnect_time;
 		this.reconnect_max = number_option('reconnect_max', options.reconnect_max, 60000, is_positive);
 		this.max_timeouts = number_option('max_timeouts', options.max_timeouts, 3, is_count);

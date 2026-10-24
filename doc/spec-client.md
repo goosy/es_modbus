@@ -24,6 +24,7 @@ const client = new Modbus_Client(null, { port: 'COM3', baud_rate: 19200, parity:
 
 | Option           | Default | Meaning                                                                 |
 | ---------------- | ------- | --------------------------------------------------------------------- |
+| `name`           | `'Modbus_Client'` | A name for telling instances apart, e.g. in logs; kept in the `name` property. The library does not use it itself. |
 | `port`           | `502`   | TCP port. For a serial client, the serial device path (a non-empty `string`; anything else throws `Invalid serial port`). |
 | `rtu`            | `false` | With a string address, use RTU framing over the TCP socket.           |
 | `timeout`        | `1000`  | Per-transaction response timeout, ms, counted from when the request's frame is written. On expiry the request rejects and `timeout` is emitted. |

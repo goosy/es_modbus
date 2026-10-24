@@ -15,6 +15,7 @@ await server.start();
 
 | Option    | Default     | Meaning                                                                       |
 | --------- | ----------- | -------------------------------------------------------------------------- |
+| `name`    | `'Modbus_Server'` | A name for telling instances apart, e.g. in logs; kept in the `name` property. The library does not use it itself. |
 | `host`    | `'0.0.0.0'` | Bind address (TCP only).                                                    |
 | `port`    | `502`       | `number` → listen on that TCP port. `string` → open as a serial device path. Anything else throws `Invalid port`; a port instance is not accepted. |
 | `rtu`     | `false`     | With a `number` port, use RTU framing on the accepted TCP sockets (RTU-over-TCP). Ignored for serial ports. |
