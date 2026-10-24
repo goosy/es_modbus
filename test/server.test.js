@@ -376,6 +376,27 @@ describe('Modbus_Server request handling (TCP framing)', () => {
 		assert.equal(response.toString('hex'), tcp_frame(1, '018304').toString('hex'));
 	});
 
+	test('an invalid register value is answered with 0x04 and reported as a TypeError', () => {
+		const values = [70000, -1, 1.5, '7', undefined, null, Number.NaN, true];
+		const reported = [];
+		server.on('vector_error', (error) => reported.push(error));
+		for (const value of values) {
+			server.vector = { ...memory.vector, get_holding_register: () => value, get_input_register: () => value };
+			const [fc3] = tcp_exchange(server, tcp_frame(1, '010300000001'));
+			assert.equal(fc3.toString('hex'), tcp_frame(1, '018304').toString('hex'), String(value));
+			const [fc4] = tcp_exchange(server, tcp_frame(1, '010400000001'));
+			assert.equal(fc4.toString('hex'), tcp_frame(1, '018404').toString('hex'), String(value));
+		}
+		assert.equal(reported.length, values.length * 2);
+		for (const error of reported) assert.ok(error instanceof TypeError);
+	});
+
+	test('one invalid value among several fails the whole read', () => {
+		server.vector = { ...memory.vector, get_holding_register: (addr) => (addr === 1 ? 0x10000 : addr) };
+		const [response] = tcp_exchange(server, tcp_frame(1, '010300000003'));
+		assert.equal(response.toString('hex'), tcp_frame(1, '018304').toString('hex'));
+	});
+
 	test('a request that fails check_request gets its exception, without a vector call', () => {
 		// The rules are tested on check_request() in util.test.js
 		const requests = [['010300000000', '018303'], ['0103ffff0002', '018302']];

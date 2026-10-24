@@ -95,6 +95,12 @@ error and answers the request with exception `0x04` (Server Device Failure) inst
 response. Unlike `error`, `vector_error` is ignored when nobody listens, so a faulty `vector`
 never brings the server down.
 
+**An invalid register value.** A register read accessor that returns anything other than an
+integer in `0..65535` (`undefined`, `null`, a fraction, a string, a value out of range) is handled
+as a throwing `vector`: the server emits `vector_error` with a `TypeError` and answers exception
+`0x04`. The value is never coerced. Coil read accessors return truthy or falsy, so any value is
+valid.
+
 **Invalid requests.** Before calling the `vector`, the server validates the request data and the
 address range (see "Exception responses" in `spec-protocol.md`); an invalid request is answered
 with an exception and the `vector` is not called.

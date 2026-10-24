@@ -31,6 +31,16 @@ class Vector_Error extends Error {
 	}
 }
 
+// Whether `value` can be served as a register: an integer in 0..65535
+const is_register_value = (value) => Number.isInteger(value) && value >= 0 && value <= 0xFFFF;
+
+// Throws a Vector_Error unless every value read from the `vector` can be served as a register
+function check_register_values(values) {
+	if (!Array.prototype.every.call(values, is_register_value)) {
+		throw new Vector_Error(new TypeError('a register value must be an integer in 0..65535'));
+	}
+}
+
 /**
  * @typedef {Object} ModbusVector
  * @property {(addr: number, unit_id: number) => number} get_input_register  Read input register
@@ -505,6 +515,7 @@ export class Modbus_Server extends EventEmitter {
 				: this.call_vector('get_input_register', addr, unit_id);
 			values.push(value);
 		}
+		check_register_values(values);
 
 		const buffer = Buffer.alloc(3 + quantity * 2);
 		buffer.writeUInt8(unit_id, 0);

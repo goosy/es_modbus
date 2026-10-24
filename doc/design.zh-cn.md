@@ -341,6 +341,9 @@
      `vector`。字节数与数量相符却超限的 FC 15/16 请求不会出现：它放不进 253 字节的 PDU。不支持的
      功能码通过检查，由 `dispatch()` 以 `0x01` 应答。
    - 异常应答和写应答由模块函数 `exception_response` 和 `write_response` 构造。
+   - `handle_read_registers` 在打包之前用 `check_register_values` 检查读到的值：被
+     `is_register_value` 拒绝的值作为包装 `TypeError` 的 `Vector_Error` 抛出，因此走下面的
+     `vector_error` / `0x04` 路径，而不是以 `RangeError` 从 `Buffer.writeUInt16BE` 逃出或被转换。
    - 每次 `vector` 调用都经过 `call_vector`，它把抛出的异常包装为私有的 `Vector_Error`。
      `serve()` 只捕获 `Vector_Error`：以原始错误和请求发出 `vector_error`，并应答异常 `0x04`。
      没有监听者的 `vector_error` 会被忽略。其他异常属于程序缺陷，会向外传播。

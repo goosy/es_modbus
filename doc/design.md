@@ -402,6 +402,10 @@ the move into `CONNECTING`; a caller that arrives while `CONNECTING` is added to
      code passes the check, and `dispatch()` answers it with `0x01`.
    - Exception and write responses are built by the module functions `exception_response` and
      `write_response`.
+   - `handle_read_registers` checks the values read with `check_register_values` before packing
+     them: a value that `is_register_value` rejects is thrown as a `Vector_Error` wrapping a
+     `TypeError`, so it takes the `vector_error` / `0x04` path below instead of escaping from
+     `Buffer.writeUInt16BE` as a `RangeError` or being coerced.
    - Every `vector` call goes through `call_vector`, which wraps a thrown exception in a private
      `Vector_Error`. `serve()` catches only `Vector_Error`: it emits `vector_error` with the
      original error and the request, and answers exception `0x04`. A `vector_error` with no
