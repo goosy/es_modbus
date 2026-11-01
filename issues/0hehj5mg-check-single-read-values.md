@@ -2,43 +2,43 @@
 id: 0hehj5mg
 opened: 2026-10-24T04:06:31.416Z
 closed: 2026-10-24T04:22:58.090Z
-title: 单点读寄存器的返回值未经检查，越界值可使服务端崩溃
+title: Single-point register reads are not checked; an out-of-range value can crash the server
 status: fixed       # open | accepted | fixed | rejected | wontfix
 fixed_in: [3404e7d] # commit IDs, backfilled at version commit time
 labels: []
 remote:
-problem_title: 问题描述
-proposal_title: 解决提案
-decision_title: 裁定
+problem_title:
+proposal_title:
+decision_title:
 ---
 
-## 问题描述
+## Problem
 
-spec 约定 `get_holding_register` / `get_input_register` 返回 `0..65535` 的整数，服务端却不检查返回值，直接交给 `buffer.writeUInt16BE` 写入响应（`handle_read_registers`）。实测 FC 3 单点读：
+The spec requires `get_holding_register` / `get_input_register` to return an integer in `0..65535`, but the server does not check the returned value and passes it straight to `buffer.writeUInt16BE` when writing the response (`handle_read_registers`). Observed with an FC 3 single-point read:
 
-| 返回值 | 结果 |
+| Returned value | Result |
 | --- | --- |
-| `70000`、`-1` | 抛出 `RangeError`（`ERR_OUT_OF_RANGE`） |
-| `1.5` | 截断为 1 |
-| `'7'` | 转换为 7 |
-| `undefined`、`null`、`NaN` | 变成 0 |
+| `70000`, `-1` | throws `RangeError` (`ERR_OUT_OF_RANGE`) |
+| `1.5` | truncated to 1 |
+| `'7'` | converted to 7 |
+| `undefined`, `null`, `NaN` | become 0 |
 
-影响：
+Impact:
 
-- 越界值使服务端崩溃。`RangeError` 不是 `Vector_Error`，`serve()` 不捕获，它从 `on_data` 传出到 socket / 串口的 `data` 事件监听器，成为未捕获异常，进程退出。这违背 spec 中"有缺陷的 `vector` 不会让服务端崩溃"的承诺。
-- 不合契约的值被悄悄转换，主站收到看似正常的数据，vector 的缺陷被掩盖。
+- An out-of-range value crashes the server. `RangeError` is not a `Vector_Error`, so `serve()` does not catch it; it propagates out of `on_data` into the `data` event listener of the socket / serial port, becomes an uncaught exception, and the process exits. This breaks the spec's promise that "a faulty `vector` does not crash the server".
+- Values that violate the contract are silently converted; the master receives data that looks normal, and the defect in the vector is hidden.
 
-线圈不受影响：`get_coil` 的返回值按真值取位，任何值都有意义。
+Coils are not affected: the return value of `get_coil` is taken as a bit by truthiness, so any value is meaningful.
 
-issue#yjaww5qx 的成批读方法也要检查返回值，单点读应与之采用同一条规则。
+The batch read methods of issue#yjaww5qx must also check their return values; single-point reads should follow the same rule.
 
-## 解决提案
+## Proposal
 
-单点读寄存器与成批读使用同一条检查规则：返回值不是 `0..65535` 的整数时，按抛出异常的 `vector` 处理，以 `TypeError` 发出 `vector_error`，应答异常 `0x04`。实现上合用 `is_register_value`。
+Single-point register reads use the same check as batch reads: when the returned value is not an integer in `0..65535`, it is treated as a `vector` that threw, emitting `vector_error` with a `TypeError` and responding with exception `0x04`. The implementation shares `is_register_value`.
 
-- `undefined` 也算错误。依赖"未映射的地址返回 `undefined`、读出 0"的 vector 会改为得到 `0x04`，这是行为变化；0.3.0 是事实上的首个正式版本，可以接受，CHANGELOG 中注明。
-- 只把越界值改为 `0x04`、其余仍悄悄转换：不采纳，规则不一致，且仍掩盖 vector 的缺陷。
+- `undefined` also counts as an error. A vector relying on "an unmapped address returns `undefined` and reads as 0" will now get `0x04` instead. This is a behavior change; 0.3.0 is the de facto first release, so it is acceptable, and the CHANGELOG notes it.
+- Changing only out-of-range values to `0x04` and still silently converting the rest: not adopted, because the rule would be inconsistent and would still hide defects in the vector.
 
-## 裁定
+## Decision
 
-fixed。按提案实现：寄存器读访问器的返回值不是 `0..65535` 的整数时，以 `TypeError` 发出 `vector_error` 并应答 `0x04`，`undefined` 也在内。越界值不再使服务端崩溃，不合契约的值不再被悄悄转换。
+fixed. Implemented as proposed: when a register read accessor returns a value that is not an integer in `0..65535`, `vector_error` is emitted with a `TypeError` and the response is `0x04`, `undefined` included. Out-of-range values no longer crash the server, and values that violate the contract are no longer silently converted.

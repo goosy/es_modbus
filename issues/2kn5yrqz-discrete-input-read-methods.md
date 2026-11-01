@@ -2,38 +2,38 @@
 id: 2kn5yrqz
 opened: 2026-10-24T03:14:23.284Z
 closed: 2026-10-24T04:28:45.678Z
-title: vector 增加离散输入的读方法（单点与成批）
+title: Add discrete input read methods to the vector (single-point and batch)
 status: fixed       # open | accepted | fixed | rejected | wontfix
 fixed_in: [066d076] # commit IDs, backfilled at version commit time
 labels: []
 remote:
-problem_title: 问题描述
-proposal_title: 解决提案
-decision_title: 裁定
+problem_title:
+proposal_title:
+decision_title:
 ---
 
-## 问题描述
+## Problem
 
-vector 接口没有离散输入（1xxxx）的访问器：FC 1（读线圈）和 FC 2（读离散输入）都调用 `get_coil`，vector 收不到功能码，分不清这次读的是哪张表。
+The vector interface has no accessor for discrete inputs (1xxxx): both FC 1 (read coils) and FC 2 (read discrete inputs) call `get_coil`. The vector does not receive the function code, so it cannot tell which table is being read.
 
-寄存器一侧有 `get_holding_register`（FC 3）和 `get_input_register`（FC 4）两个读方法，位一侧只有一个，读接口不对称。
+On the register side there are two read methods, `get_holding_register` (FC 3) and `get_input_register` (FC 4); on the bit side there is only one, so the read interface is asymmetric.
 
-影响：线圈和离散输入不能使用不同的数据。例如一个从站有可写的线圈表和只读的输入表，同一个地址在两张表里应是两个点，现在 FC 1 和 FC 2 读到的必然是同一个值。
+Impact: coils and discrete inputs cannot use different data. For example, a slave with a writable coil table and a read-only input table should have two distinct points at the same address, one in each table; today FC 1 and FC 2 necessarily read the same value.
 
-## 解决提案
+## Proposal
 
-vector 增加可选的离散输入读方法，FC 2 使用：
+Add optional discrete input read methods to the vector, used by FC 2:
 
-| 方法 | 用于 | 返回 |
+| Method | Used for | Returns |
 | --- | --- | --- |
-| `get_discrete_input(addr, unit_id)` | FC 2 | 真值 = 位已置位 |
-| `get_discrete_inputs(addr, quantity, unit_id)` | FC 2 | 长度为 `quantity` 的数组，元素按真值取位 |
+| `get_discrete_input(addr, unit_id)` | FC 2 | truthy = bit set |
+| `get_discrete_inputs(addr, quantity, unit_id)` | FC 2 | an array of length `quantity`, each element taken as a bit by truthiness |
 
-- FC 2 的选择顺序：vector 提供了离散输入方法时，有 `get_discrete_inputs` 则一次请求调用一次，否则逐点调用 `get_discrete_input`；两个都没有时，FC 2 按 FC 1 处理（`get_coils`，否则逐点 `get_coil`）。不区分两张表的 vector 因此照常工作。
-- FC 1 只用线圈的方法，不受离散输入方法影响。
-- 成批方法的规则与 issue#yjaww5qx 相同：按功能码选择，与数量无关；每次请求时判断；只对通过 `check_request` 的请求调用；抛出异常时答 0x04 并发出 `vector_error`；返回值长度不等于 `quantity` 时按 vector 错误处理。
-- 成批方法依赖 issue#yjaww5qx 的成批读机制，两者宜一起实现。
+- Selection order for FC 2: when the vector provides discrete input methods, `get_discrete_inputs` is called once per request if present, otherwise `get_discrete_input` is called per point; when neither is present, FC 2 is handled like FC 1 (`get_coils`, otherwise `get_coil` per point). Vectors that do not distinguish the two tables therefore keep working.
+- FC 1 uses only the coil methods and is not affected by the discrete input methods.
+- The batch method follows the same rules as issue#yjaww5qx: selected by function code, regardless of quantity; decided on each request; called only for requests that pass `check_request`; a thrown exception answers 0x04 and emits `vector_error`; a return value whose length is not `quantity` is treated as a vector error.
+- The batch method depends on the batch read mechanism of issue#yjaww5qx; the two are best implemented together.
 
-## 裁定
+## Decision
 
-fixed。按提案实现：FC 2 在 vector 提供 `get_discrete_inputs` 或 `get_discrete_input` 时使用它们（成批优先），两者都没有时按 FC 1 经线圈的方法读取；FC 1 不受影响。线圈与离散输入因此可以使用不同的数据，不区分两张表的 vector 照常工作。
+fixed. Implemented as proposed: FC 2 uses `get_discrete_inputs` or `get_discrete_input` when the vector provides them (batch first), and reads through the coil methods as FC 1 does when neither is present; FC 1 is not affected. Coils and discrete inputs can therefore use different data, and vectors that do not distinguish the two tables keep working.
