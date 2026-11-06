@@ -113,9 +113,10 @@ Modbus 中只有线圈和保持寄存器可写，所以写方法不涉及其他�
   始终调用 `set_coil` 和 `set_holding_register`。
 - 各成批方法相互独立：`handler` 可以提供其中任意几个。
 - 每个请求在被处理时各自选择。
-- 与其他 `handler` 函数一样，成批方法只对有效请求调用；它抛出异常时也同样处理（`handler_error`、
-  异常 `0x04`）。没有成批方法时，某次 `set_coil` / `set_holding_register` 抛出异常即终止该
-  请求：它之前的点已写入，其余的点不再写入。
+- 与其他 `handler` 函数一样，成批方法只对有效请求调用；它抛出异常时也同样处理（见下文“抛出异常的
+  `handler`”）。没有成批方法时，某次 `set_coil` / `set_holding_register` 抛出异常即终止该
+  请求：它之前的点已写入，其余的点不再写入。拒绝也是如此，因此需要整体拒绝一个请求的 `handler`
+  应提供成批写方法，在写入前检查。
 - 成批读的结果不是 `Array` 或类型化数组，或长度不等于 `quantity` 时，按抛出异常的 `handler`
   处理：以 `TypeError` 发出 `handler_error`，并应答异常 `0x04`。其中的寄存器值与单点访问器的
   返回值同样检查（见下文“无效的寄存器值”）。
@@ -135,9 +136,29 @@ Modbus 中只有线圈和保持寄存器可写，所以写方法不涉及其他�
 
 服务端把读到的值打包/序列化进响应。
 
-**抛出异常的 `handler`。** 如果某个 `handler` 函数抛出异常，服务端以该错误发出 `handler_error`，并以
-异常 `0x04`（服务器设备故障）应答该请求，而不是返回数据响应。与 `error` 不同，没有监听者时
-`handler_error` 会被忽略，因此有缺陷的 `handler` 不会让服务端崩溃。
+**抛出异常的 `handler`。** 如果某个 `handler` 函数抛出异常，服务端以异常响应应答该请求，而不是返回
+数据响应。抛出的值决定如何应答：
+
+- **拒绝。** 抛出的值的 `exception_code` 属性是下表中的某个码时，它是 `handler` 有意给出的应答：
+  以该码应答请求，不发出任何事件。
+- **故障。** 其他任何抛出的值（没有 `exception_code`，或不在下表中）是故障：服务端以该值发出
+  `handler_error`，并应答异常 `0x04`（服务器设备故障）。与 `error` 不同，没有监听者时
+  `handler_error` 会被忽略，因此有缺陷的 `handler` 不会让服务端崩溃。
+
+| 代码   | 名称                  | `handler` 何时使用                                               |
+| ------ | --------------------- | ---------------------------------------------------------------- |
+| `0x01` | 非法功能              | 该单元不支持某类操作，如只读单元拒绝一切写入。                    |
+| `0x02` | 非法数据地址          | 地址不存在或不可写。                                              |
+| `0x03` | 非法数据值            | 值超出应用允许的范围。                                            |
+| `0x04` | 服务器设备故障        | `handler` 明确报告设备故障。                                      |
+| `0x06` | 服务器设备忙          | 数据源暂时不可用，客户端可以稍后重试。                            |
+
+服务端读取该属性，不检查 `instanceof`：`Object.assign(new Error('read-only'), { exception_code: 0x02 })`
+无需 import 本包即可以 `0x02` 拒绝，来自本包另一份副本的错误也同样有效。`Modbus_Exception`（见下文）
+是构造这种错误的便利类。以 `0x04` 拒绝仍是拒绝：不发出 `handler_error`。
+
+故障默认应答 `0x04`，因为 `0x01` 到 `0x03` 表示请求本身有错，这在调用 `handler` 之前已由服务端检查
+（见下文“无效请求”）；`handler` 中原因不明的错误只能表述为执行请求失败。
 
 **无效的寄存器值。** 寄存器读访问器返回的不是 `0..65535` 的整数时（`undefined`、`null`、小数、
 字符串、越界值），按抛出异常的 `handler` 处理：服务端以 `TypeError` 发出 `handler_error`，并应答
@@ -145,6 +166,23 @@ Modbus 中只有线圈和保持寄存器可写，所以写方法不涉及其他�
 
 **无效请求。** 在调用 `handler` 之前，服务端会校验请求数据和地址区间（见 `spec-protocol.zh-cn.md`
 的“异常响应”）；无效请求以异常应答，且不调用 `handler`。
+
+## `Modbus_Exception`
+
+```js
+import { Modbus_Exception } from 'es-modbus';
+
+throw new Modbus_Exception(0x02, 'read-only');
+```
+
+`new Modbus_Exception(exception_code, message?, options?)` 是一个 `Error`，其 `name` 为
+`'Modbus_Exception'`，`exception_code` 属性为 `exception_code`，供 `handler` 拒绝请求（见上文
+“抛出异常的 `handler`”）。
+
+- `exception_code` 必须是 `0x01`、`0x02`、`0x03`、`0x04`、`0x06` 之一；其他值抛出 `RangeError`，
+  因此写错码的问题在开发 `handler` 时就会暴露，而不是到运行时变成 `0x04`。
+- `message` 默认为码及其名称，如 `Modbus exception 0x02 (Illegal Data Address)`。
+- `options` 传给 `Error`，如 `{ cause }`。
 
 ## 方法
 
@@ -212,4 +250,4 @@ Modbus 中只有线圈和保持寄存器可写，所以写方法不涉及其他�
 | `socket_error`      | TCP 系列        | `Error`  | 单个连接的错误。                            |
 | `send`              | 全部            | `Buffer` | 一帧已写出。                                |
 | `receive`           | 全部            | `Buffer` | 收到一帧。                                  |
-| `handler_error`     | 全部            | `Error`、请求 | 某个 `handler` 函数抛出了异常；该请求已以 `0x04` 应答。 |
+| `handler_error`     | 全部            | 抛出的值、请求 | 某个 `handler` 函数故障（抛出的值不带允许的 `exception_code`，或返回了无效的值）；该请求已以 `0x04` 应答。拒绝时不发出。 |

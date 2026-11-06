@@ -1,9 +1,9 @@
 ---
 id: bm63kw0g
 opened: 2026-11-05T14:20:36.332Z
-closed:
+closed: 2026-11-06T18:58:28.903Z
 title: Let a handler specify the exception code
-status: accepted    # open | accepted | fixed | rejected | wontfix
+status: fixed       # open | accepted | fixed | rejected | wontfix
 fixed_in: []        # commit IDs, backfilled at version commit time
 labels: []
 remote:
@@ -60,4 +60,4 @@ When the handler has no batch write method and throws an error with an allowed c
 
 ## Decision
 
-accepted. Implement as proposed: when the error thrown by a handler carries an allowed `exception_code` (0x01, 0x02, 0x03, 0x04, 0x06), the server responds with that code and does not emit `handler_error`; otherwise it still responds with 0x04 and emits `handler_error`. `Modbus_Exception` is also exported. The default stays 0x04: by the protocol, 0x02 asserts that the request itself is wrong and belongs to the checking stage; the handler runs in the execution stage, and an error of unknown cause can only be stated truthfully as an execution failure. Switching modbus-emulator to reject writes with 0x02 is work for that repository.
+fixed. Implemented as proposed: when the error thrown by a handler carries an allowed `exception_code` (0x01, 0x02, 0x03, 0x04, 0x06), the server responds with that code and does not emit `handler_error`; otherwise it still responds with 0x04 and emits `handler_error`. `Modbus_Exception` is also exported. The default stays 0x04: by the protocol, 0x02 asserts that the request itself is wrong and belongs to the checking stage; the handler runs in the execution stage, and an error of unknown cause can only be stated truthfully as an execution failure. Switching modbus-emulator to reject writes with 0x02 is work for that repository.

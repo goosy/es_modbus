@@ -419,10 +419,19 @@ the move into `CONNECTING`; a caller that arrives while `CONNECTING` is added to
        them. `read_points` checks a batch result's shape (`Array` or typed array, length
        `quantity`) and throws a `Handler_Error` wrapping a `TypeError` otherwise; the register
        values of both paths then go through `check_register_values`.
-   - Every `handler` call goes through `call_handler`, which wraps a thrown exception in a private
-     `Handler_Error`. `serve()` catches only `Handler_Error`: it emits `handler_error` with the
-     original error and the request, and answers exception `0x04`. A `handler_error` with no
-     listener is ignored. Any other exception is a bug and propagates.
+   - Every `handler` call goes through `call_handler`, which wraps a thrown value in a private
+     `Handler_Error`, with the value's allowed exception code as the wrapper's `exception_code`
+     (undefined for a failure). `handler_exception_code` reads `thrown?.exception_code` inside
+     `try` (a throwing getter counts as no code) and keeps it only when the module map
+     `HANDLER_EXCEPTIONS` has it; numbers only, so `'2'` is no code. `serve()` catches only
+     `Handler_Error`: with an `exception_code` it answers that code and emits nothing; without
+     one it emits `handler_error` with the original value and the request, and answers exception
+     `0x04`. The `Handler_Error`s that the server raises itself (a register value or batch result
+     shape check) carry no code. A `handler_error` with no listener is ignored. Any other
+     exception is a bug and propagates.
+   - `Modbus_Exception` (exported from `ModbusServer.js` and `index.js`) looks its code up in
+     `HANDLER_EXCEPTIONS`, whose values are the names used in the default message; a missing code
+     throws `RangeError` before `super()`.
 3. `send_response(pdu, socket?, tid)` — `tcp`: `encode_tcp_frame`, whose protocol ID is 0 like
    that of every request served (`mbap_frame_length` never delimits another). `rtu` and
    `rtu_over_tcp`: `encode_rtu_frame`. Emit `send`, then write to `socket`, or to the serial port

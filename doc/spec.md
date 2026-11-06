@@ -82,7 +82,7 @@ mix. The server works in PDU addresses only.
 
 | Path                  | Role                                                             |
 | --------------------- | --------------------------------------------------------------- |
-| `src/index.js`        | Public surface: `export { Modbus_Client, Modbus_Server }`.      |
+| `src/index.js`        | Public surface: `export { Modbus_Client, Modbus_Server, Modbus_Exception }`. |
 | `src/ModbusClient.js` | Client class.                                                   |
 | `src/ModbusServer.js` | Server class.                                                   |
 | `src/util.js`         | Pure protocol codec (frame parsing, CRC, range parsing). No I/O. |

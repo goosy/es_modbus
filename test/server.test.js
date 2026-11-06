@@ -2,7 +2,7 @@ import { describe, test, before, after, beforeEach, afterEach } from 'node:test'
 import assert from 'node:assert/strict';
 import { once } from 'node:events';
 import { execFile } from 'node:child_process';
-import { Modbus_Server } from '../src/ModbusServer.js';
+import { Modbus_Server, Modbus_Exception } from '../src/ModbusServer.js';
 import { set_serial_port_factory } from '../src/serial.js';
 import {
 	HOST, sleep, hex, rtu_frame, tcp_frame, collect,
@@ -175,6 +175,33 @@ describe('Modbus_Server serial lifecycle', () => {
 			assert.equal(attempts, 2);
 		} finally {
 			set_serial_port_factory(recording_factory);
+		}
+	});
+});
+
+describe('Modbus_Exception', () => {
+	test('is an Error carrying its exception code, with a default message', () => {
+		const error = new Modbus_Exception(0x02);
+		assert.ok(error instanceof Error);
+		assert.equal(error.name, 'Modbus_Exception');
+		assert.equal(error.exception_code, 0x02);
+		assert.equal(error.message, 'Modbus exception 0x02 (Illegal Data Address)');
+	});
+
+	test('takes a message and Error options', () => {
+		const cause = new Error('cause');
+		const error = new Modbus_Exception(0x06, 'busy', { cause });
+		assert.equal(error.message, 'busy');
+		assert.equal(error.cause, cause);
+		assert.equal(error.exception_code, 0x06);
+	});
+
+	test('accepts exactly the codes 0x01, 0x02, 0x03, 0x04 and 0x06', () => {
+		for (const code of [0x01, 0x02, 0x03, 0x04, 0x06]) {
+			assert.equal(new Modbus_Exception(code).exception_code, code);
+		}
+		for (const code of [0x00, 0x05, 0x08, 0x0a, 0x0b, 0x102, 2.5, '2', null, undefined]) {
+			assert.throws(() => new Modbus_Exception(code), RangeError, String(code));
 		}
 	});
 });
@@ -668,6 +695,80 @@ describe('Modbus_Server request handling (TCP framing)', () => {
 		assert.equal(response.toString('hex'), tcp_frame(1, '018204').toString('hex'));
 	});
 
+	test('an error with an allowed exception_code is answered with that code, without handler_error', () => {
+		let reported = 0;
+		server.on('handler_error', () => reported++);
+		for (const code of [0x01, 0x02, 0x03, 0x04, 0x06]) {
+			const rejection = Object.assign(new Error('rejected'), { exception_code: code });
+			server.handler = {
+				...memory.handler,
+				get_holding_register() {
+					throw rejection;
+				},
+				set_holding_register() {
+					throw rejection;
+				},
+			};
+			const code_hex = code.toString(16).padStart(2, '0');
+			const [fc3] = tcp_exchange(server, tcp_frame(1, '010300000001'));
+			assert.equal(fc3.toString('hex'), tcp_frame(1, `0183${code_hex}`).toString('hex'), code_hex);
+			const [fc6] = tcp_exchange(server, tcp_frame(1, '010600010005'));
+			assert.equal(fc6.toString('hex'), tcp_frame(1, `0186${code_hex}`).toString('hex'), code_hex);
+		}
+		assert.equal(reported, 0);
+	});
+
+	test('a Modbus_Exception is answered with its code', () => {
+		server.handler = {
+			...memory.handler,
+			set_holding_registers() {
+				throw new Modbus_Exception(0x02, 'read-only');
+			},
+		};
+		const [response] = tcp_exchange(server, tcp_frame(1, '01100001000204000a0102'));
+		assert.equal(response.toString('hex'), tcp_frame(1, '019002').toString('hex'));
+	});
+
+	test('a value thrown without an allowed exception_code is a failure: 0x04 and handler_error', () => {
+		const getter = {};
+		Object.defineProperty(getter, 'exception_code', {
+			get() {
+				throw new Error('getter');
+			},
+		});
+		const thrown_values = [
+			...[0x00, 0x05, 0x08, 0x0b, 0x10, 2.5, '2', 0x102, null].map(
+				(code) => Object.assign(new Error('failure'), { exception_code: code })),
+			'a string', null, undefined, 2, getter,
+		];
+		const reported = [];
+		server.on('handler_error', (error) => reported.push(error));
+		for (const thrown of thrown_values) {
+			server.handler = {
+				...memory.handler,
+				get_coil() {
+					throw thrown;
+				},
+			};
+			const [response] = tcp_exchange(server, tcp_frame(1, '010100000001'));
+			assert.equal(response.toString('hex'), tcp_frame(1, '018104').toString('hex'), String(thrown));
+		}
+		assert.deepEqual(reported, thrown_values);
+	});
+
+	test('without a batch method a rejected write stops the request with its code', () => {
+		server.handler = {
+			...memory.handler,
+			set_holding_register(addr, value, unit_id) {
+				if (addr === 2) throw new Modbus_Exception(0x02);
+				memory.handler.set_holding_register(addr, value, unit_id);
+			},
+		};
+		const [response] = tcp_exchange(server, tcp_frame(1, '01100001000306000a01020003'));
+		assert.equal(response.toString('hex'), tcp_frame(1, '019002').toString('hex'));
+		assert.deepEqual(memory.calls, [['set_holding_register', 1, 0x000a, 1]]);
+	});
+
 	test('an unsupported function code to a unit that is not accepted gets 0x0B', () => {
 		server.set_unit_ids([1]);
 		const [response] = tcp_exchange(server, tcp_frame(1, '020800000000'));
@@ -805,6 +906,19 @@ describe('Modbus_Server request handling (RTU framing)', () => {
 		server.on('handler_error', () => reported++);
 		assert.deepEqual(rtu_exchange('000600010005'), []);
 		assert.equal(reported, 1);
+	});
+
+	test('a rejection on a broadcast is neither reported nor answered', () => {
+		server.handler = {
+			...memory.handler,
+			set_holding_register() {
+				throw new Modbus_Exception(0x02);
+			},
+		};
+		let reported = 0;
+		server.on('handler_error', () => reported++);
+		assert.deepEqual(rtu_exchange('000600010005'), []);
+		assert.equal(reported, 0);
 	});
 
 	test('a frame with a bad CRC is dropped', () => {

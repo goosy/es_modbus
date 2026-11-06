@@ -72,7 +72,7 @@
 
 | 路径                  | 作用                                                             |
 | --------------------- | --------------------------------------------------------------- |
-| `src/index.js`        | 公共接口：`export { Modbus_Client, Modbus_Server }`。            |
+| `src/index.js`        | 公共接口：`export { Modbus_Client, Modbus_Server, Modbus_Exception }`。 |
 | `src/ModbusClient.js` | 客户端类。                                                       |
 | `src/ModbusServer.js` | 服务端类。                                                       |
 | `src/util.js`         | 纯协议编解码（帧解析、CRC、区间解析）。无 I/O。                  |

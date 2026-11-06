@@ -124,9 +124,10 @@ The rules:
 - The batch methods are independent: a `handler` may provide any of them.
 - The choice is made for each request, when it is served.
 - A batch method is called only for a valid request, like any other `handler` function, and a
-  throwing one is handled the same way (`handler_error`, exception `0x04`). Without the batch
+  throwing one is handled the same way (see "A throwing `handler`" below). Without the batch
   method, a `set_coil` / `set_holding_register` that throws stops the request: the points before
-  it are written, the rest are not.
+  it are written, the rest are not. This holds for a rejection too, so a `handler` that must
+  reject a request as a whole provides the batch write method and checks before writing.
 - A batch read result that is not an `Array` or typed array, or whose length is not `quantity`,
   is handled as a throwing `handler`: `handler_error` with a `TypeError`, and exception `0x04`.
   Its register values are checked like those of the single-point accessors (see "An invalid
@@ -149,10 +150,34 @@ inputs (FC 2) apart from coils (FC 1); both are optional.
 
 The server packs/serializes the values read into the response.
 
-**A throwing `handler`.** If a `handler` function throws, the server emits `handler_error` with the
-error and answers the request with exception `0x04` (Server Device Failure) instead of a data
-response. Unlike `error`, `handler_error` is ignored when nobody listens, so a faulty `handler`
-never brings the server down.
+**A throwing `handler`.** If a `handler` function throws, the server answers the request with an
+exception response instead of a data response. What it throws decides which:
+
+- **A rejection.** A thrown value whose `exception_code` property is one of the codes below is a
+  response the `handler` gives on purpose: the request is answered with that code, and no event
+  is emitted.
+- **A failure.** Any other thrown value (no `exception_code`, or one outside the codes below) is a
+  failure: the server emits `handler_error` with it and answers exception `0x04` (Server Device
+  Failure). Unlike `error`, `handler_error` is ignored when nobody listens, so a faulty `handler`
+  never brings the server down.
+
+| Code   | Name                  | When a `handler` uses it                                         |
+| ------ | --------------------- | ---------------------------------------------------------------- |
+| `0x01` | Illegal Function      | The unit does not support a kind of operation, e.g. a read-only unit rejecting every write. |
+| `0x02` | Illegal Data Address  | The address does not exist or is not writable.                  |
+| `0x03` | Illegal Data Value    | The value is outside the range the application allows.          |
+| `0x04` | Server Device Failure | The `handler` reports a device failure explicitly.              |
+| `0x06` | Server Device Busy    | The data source is temporarily unavailable; the client may retry later. |
+
+The server reads the property, it does not check `instanceof`:
+`Object.assign(new Error('read-only'), { exception_code: 0x02 })` rejects with `0x02` without
+importing this package, and an error from another copy of the package works the same.
+`Modbus_Exception` (below) is a convenience for building such an error. A rejection with `0x04`
+is still a rejection: no `handler_error`.
+
+The default for a failure is `0x04` because `0x01` to `0x03` state that the request itself is
+wrong, which the server checked before calling the `handler` (see "Invalid requests" below); an
+error of unknown cause in the `handler` can only be stated as a failure to execute the request.
 
 **An invalid register value.** A register read accessor that returns anything other than an
 integer in `0..65535` (`undefined`, `null`, a fraction, a string, a value out of range) is handled
@@ -163,6 +188,25 @@ valid.
 **Invalid requests.** Before calling the `handler`, the server validates the request data and the
 address range (see "Exception responses" in `spec-protocol.md`); an invalid request is answered
 with an exception and the `handler` is not called.
+
+## `Modbus_Exception`
+
+```js
+import { Modbus_Exception } from 'es-modbus';
+
+throw new Modbus_Exception(0x02, 'read-only');
+```
+
+`new Modbus_Exception(exception_code, message?, options?)` is an `Error` whose `name` is
+`'Modbus_Exception'` and whose `exception_code` property is `exception_code`, for a `handler` to
+reject a request with (see "A throwing `handler`" above).
+
+- `exception_code` must be one of `0x01`, `0x02`, `0x03`, `0x04`, `0x06`; anything else throws
+  a `RangeError`, so a wrong code shows while the `handler` is developed instead of turning into
+  `0x04` at run time.
+- `message` defaults to the code and its name, e.g. `Modbus exception 0x02 (Illegal Data
+  Address)`.
+- `options` is passed to `Error`, e.g. `{ cause }`.
 
 ## Methods
 
@@ -243,4 +287,4 @@ TCP-family transports (TCP and RTU-over-TCP).
 | `socket_error`      | TCP-family      | `Error`  | A per-connection error.                     |
 | `send`              | all             | `Buffer` | A frame was written.                        |
 | `receive`           | all             | `Buffer` | A frame was received.                       |
-| `handler_error`     | all             | `Error`, request | A `handler` function threw; the request was answered with `0x04`. |
+| `handler_error`     | all             | thrown value, request | A `handler` function failed (threw without an allowed `exception_code`, or returned an invalid value); the request was answered with `0x04`. Not emitted for a rejection. |

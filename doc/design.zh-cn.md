@@ -354,9 +354,15 @@
      - `handle_read_bits` / `handle_read_registers` 从 `read_points` 取得值并打包。`read_points`
        检查成批结果的形态（`Array` 或类型化数组、长度为 `quantity`），不符时抛出包装 `TypeError`
        的 `Handler_Error`；两条路径的寄存器值随后都经过 `check_register_values`。
-   - 每次 `handler` 调用都经过 `call_handler`，它把抛出的异常包装为私有的 `Handler_Error`。
-     `serve()` 只捕获 `Handler_Error`：以原始错误和请求发出 `handler_error`，并应答异常 `0x04`。
-     没有监听者的 `handler_error` 会被忽略。其他异常属于程序缺陷，会向外传播。
+   - 每次 `handler` 调用都经过 `call_handler`，它把抛出的值包装为私有的 `Handler_Error`，并把该值
+     带有的允许的异常码作为包装的 `exception_code`（故障时为 undefined）。`handler_exception_code`
+     在 `try` 中读取 `thrown?.exception_code`（抛出异常的 getter 视为没有码），只有模块映射
+     `HANDLER_EXCEPTIONS` 中有它时才保留；只接受数字，`'2'` 不算码。`serve()` 只捕获
+     `Handler_Error`：有 `exception_code` 时以该码应答，不发出事件；没有时以原始值和请求发出
+     `handler_error`，并应答异常 `0x04`。服务端自己产生的 `Handler_Error`（寄存器值或成批结果形态
+     检查）不带码。没有监听者的 `handler_error` 会被忽略。其他异常属于程序缺陷，会向外传播。
+   - `Modbus_Exception`（从 `ModbusServer.js` 和 `index.js` 导出）在 `HANDLER_EXCEPTIONS` 中查找它的
+     码，映射的值是默认消息中使用的名称；码不存在时在 `super()` 之前抛出 `RangeError`。
 3. `send_response(pdu, socket?, tid)` — `tcp`：`encode_tcp_frame`，其协议 ID 为 0，与所服务的每个
    请求相同（`mbap_frame_length` 不会界定协议 ID 不为 0 的帧）。`rtu` 和 `rtu_over_tcp`：
    `encode_rtu_frame`。发出 `send`，然后写入 `socket`；没有 `socket` 时写入串口。

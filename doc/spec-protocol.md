@@ -245,12 +245,14 @@ message is `` `response error: ${exception_code}` ``. Exception codes the server
 
 | Code   | Meaning                                   | When the server sends it                    |
 | ------ | ----------------------------------------- | ------------------------------------------ |
-| `0x01` | Illegal Function                          | Function code not in the supported set.     |
-| `0x02` | Illegal Data Address                      | The requested range ends past address 65535. |
-| `0x03` | Illegal Data Value                        | A quantity outside the limits above (`>= 1` and at most the maximum), a byte count that does not match the quantity (FC 15/16), or an FC 5 value other than `0xFF00` / `0x0000`. |
-| `0x04` | Server Device Failure                     | A `handler` function threw while serving the request. |
+| `0x01` | Illegal Function                          | Function code not in the supported set; or a `handler` rejects the request with it. |
+| `0x02` | Illegal Data Address                      | The requested range ends past address 65535; or a `handler` rejects the request with it. |
+| `0x03` | Illegal Data Value                        | A quantity outside the limits above (`>= 1` and at most the maximum), a byte count that does not match the quantity (FC 15/16), or an FC 5 value other than `0xFF00` / `0x0000`; or a `handler` rejects the request with it. |
+| `0x04` | Server Device Failure                     | A `handler` function failed while serving the request; or a `handler` rejects the request with it. |
+| `0x06` | Server Device Busy                        | Only when a `handler` rejects the request with it. |
 | `0x0B` | Gateway Target Device Failed To Respond   | TCP only: request addressed to a unit ID the server is not configured to accept. On a serial bus such a request is not answered. |
 
 For a supported function code the server checks the request in this order, as the Modbus
 application protocol does: the data values (`0x03`), then the address range (`0x02`), and only
-then calls the `handler` (`0x04` if it throws). A request that fails a check is not executed.
+then calls the `handler` (its code if it rejects the request, `0x04` if it fails; see "A throwing
+`handler`" in `spec-server.md`). A request that fails a check is not executed.

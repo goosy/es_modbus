@@ -38,9 +38,10 @@ describe('build output dist/modbus.js', { skip }, () => {
 		bundle = await import(bundle_url);
 	});
 
-	test('exports exactly Modbus_Client and Modbus_Server', () => {
-		assert.deepEqual(Object.keys(bundle).sort(), ['Modbus_Client', 'Modbus_Server']);
+	test('exports exactly Modbus_Client, Modbus_Exception and Modbus_Server', () => {
+		assert.deepEqual(Object.keys(bundle).sort(), ['Modbus_Client', 'Modbus_Exception', 'Modbus_Server']);
 		assert.equal(typeof bundle.Modbus_Client, 'function');
+		assert.equal(typeof bundle.Modbus_Exception, 'function');
 		assert.equal(typeof bundle.Modbus_Server, 'function');
 	});
 

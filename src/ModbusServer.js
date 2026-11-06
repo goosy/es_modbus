@@ -24,10 +24,57 @@ function write_response(unit_id, func_code, address, value) {
 	return buffer;
 }
 
-// Wraps an exception thrown by a `handler` function
+// The exception codes a `handler` may reject a request with, and their names
+const HANDLER_EXCEPTIONS = new Map([
+	[0x01, 'Illegal Function'],
+	[0x02, 'Illegal Data Address'],
+	[0x03, 'Illegal Data Value'],
+	[0x04, 'Server Device Failure'],
+	[0x06, 'Server Device Busy'],
+]);
+
+const hex_code = (code) => `0x${code.toString(16).padStart(2, '0')}`;
+
+/**
+ * An `Error` a `handler` throws to reject a request with an exception code. The server decides by
+ * the `exception_code` property alone, so any error carrying an allowed code works the same.
+ */
+export class Modbus_Exception extends Error {
+	/**
+	 * @param {number} exception_code - One of 0x01, 0x02, 0x03, 0x04, 0x06
+	 * @param {string} [message] - Defaults to the code and its name
+	 * @param {ErrorOptions} [options] - Passed to `Error`, e.g. `{ cause }`
+	 * @throws {RangeError} If `exception_code` is not an allowed code
+	 */
+	constructor(exception_code, message, options) {
+		const name = HANDLER_EXCEPTIONS.get(exception_code);
+		if (name === undefined) throw new RangeError(`Invalid exception code: ${exception_code}`);
+		super(message ?? `Modbus exception ${hex_code(exception_code)} (${name})`, options);
+		this.name = 'Modbus_Exception';
+		this.exception_code = exception_code;
+	}
+}
+
+// The allowed exception code carried by a value a `handler` threw, or undefined
+function handler_exception_code(thrown) {
+	let code;
+	try {
+		code = thrown?.exception_code;
+	} catch {
+		// A throwing getter: no code
+		return undefined;
+	}
+	return HANDLER_EXCEPTIONS.has(code) ? code : undefined;
+}
+
+/**
+ * Wraps a value thrown by a `handler` function. `exception_code` is set for a rejection (the value
+ * carries an allowed code) and undefined for a failure.
+ */
 class Handler_Error extends Error {
-	constructor(cause) {
+	constructor(cause, exception_code) {
 		super('handler function failed', { cause });
+		this.exception_code = exception_code;
 	}
 }
 
@@ -380,16 +427,21 @@ export class Modbus_Server extends EventEmitter {
 	}
 
 	/**
-     * Serves a request and returns the response PDU; a throwing `handler` yields exception 0x04.
+     * Serves a request and returns the response PDU. A `handler` rejection is answered with its
+     * exception code; a `handler` failure emits `handler_error` and yields exception 0x04.
      */
 	serve(request) {
 		try {
 			return this.dispatch(request);
 		} catch (error) {
 			if (!(error instanceof Handler_Error)) throw error;
+			const { unit_id, func_code } = request;
+			if (error.exception_code !== undefined) {
+				return exception_response(unit_id, func_code, error.exception_code);
+			}
 			// 0x04: Server Device Failure
 			this.emit('handler_error', error.cause, request);
-			return exception_response(request.unit_id, request.func_code, 0x04);
+			return exception_response(unit_id, func_code, 0x04);
 		}
 	}
 
@@ -435,7 +487,7 @@ export class Modbus_Server extends EventEmitter {
 		try {
 			return this.handler[name](...args);
 		} catch (error) {
-			throw new Handler_Error(error);
+			throw new Handler_Error(error, handler_exception_code(error));
 		}
 	}
 
