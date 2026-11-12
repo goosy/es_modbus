@@ -1,7 +1,7 @@
 {
   "name": "es-modbus",
   "version": "0.3.0-beta.4",
-  "description": "",
+  "description": "Modbus TCP, RTU and RTU-over-TCP client and server for Node.js",
   "type": "module",
   "exports": {
     ".": "./dist/modbus.js"
