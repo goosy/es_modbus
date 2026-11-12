@@ -22,6 +22,12 @@ const SWEEP_BAUD_RATES = [1200, 2400, 4800, 9600, 19200, 38400, 57600, 115200];
 let suite_baud_rate = DEFAULT_BAUD_RATE;
 // How long to wait for a TCP end: a connection to the converter, or the converter connecting
 const TCP_WAIT_MS = 10000;
+// A serial port just closed may refuse to re-open for a few tens of ms (seen with a CH340
+// driver), so opening a serial port is retried at this interval up to this limit
+const OPEN_RETRY_INTERVAL_MS = 20;
+const OPEN_RETRY_LIMIT_MS = 500;
+// The pause between stop() and start() in the restart test, for the same driver timing
+const RESTART_PAUSE_MS = 100;
 
 /**
  * Parses MODBUS_SERIAL_PORTS into `{ first, second }`. The first end is `{ serial: path }`; the
@@ -52,9 +58,26 @@ const with_timeout = (promise, ms, message) => {
 	return Promise.race([promise, timeout]).finally(() => clearTimeout(timer));
 };
 
-const open_port = (port) => new Promise((resolve, reject) => {
+/**
+ * Opens a serial port by calling `open` until it resolves. A failure is retried every
+ * OPEN_RETRY_INTERVAL_MS; once OPEN_RETRY_LIMIT_MS have passed, the last error is thrown, so a
+ * port that is really in use still fails.
+ */
+async function retry_open(open) {
+	const deadline = Date.now() + OPEN_RETRY_LIMIT_MS;
+	for (;;) {
+		try {
+			return await open();
+		} catch (error) {
+			if (Date.now() >= deadline) throw error;
+			await sleep(OPEN_RETRY_INTERVAL_MS);
+		}
+	}
+}
+
+const open_port = (port) => retry_open(() => new Promise((resolve, reject) => {
 	port.open((error) => (error ? reject(error) : resolve()));
-});
+}));
 const close_port = (port) => new Promise((resolve) => {
 	if (!port?.isOpen) return resolve();
 	port.close(() => resolve());
@@ -114,7 +137,7 @@ async function exchange(stream, request, length, ms = 500) {
 async function start_serial_server(handler, path, options = {}) {
 	const server = new Modbus_Server(handler, { serial: path, baud_rate: suite_baud_rate, ...options });
 	server.on('error', () => { });
-	await server.start();
+	await retry_open(() => server.start());
 	return server;
 }
 
@@ -329,6 +352,8 @@ describe(`Modbus RTU server on ${first_name}, raw peer on ${second_name}`, { ski
 		server.stop();
 		await stopped;
 		assert.equal(server.serial_port.isOpen, false);
+		// The test is about stop() and start(), not about how soon a driver can re-open a port
+		await sleep(RESTART_PAUSE_MS);
 		const started = once(server, 'start');
 		server.start();
 		await started;
@@ -352,7 +377,7 @@ describe(`Modbus RTU client on ${client_name}, raw slave on ${slave_name}`, { sk
 		const path = (client_on_second ? link.second : link.first).serial;
 		client = new Modbus_Client({ serial: path, baud_rate: suite_baud_rate, timeout: 1000, reconnect_time: 0 });
 		client.on('error', () => { });
-		await client.connect();
+		await retry_open(() => client.connect());
 	});
 	after(async () => {
 		await client?.disconnect();
@@ -436,7 +461,9 @@ describe(pair_title(), { skip }, () => {
 		memory = create_memory_handler();
 		({ server, client } = await start_pair(memory.handler));
 		client.on('error', () => { });
-		await client.connect();
+		// Only a serial open is retried; a TCP end must work at once
+		if (client.protocol === 'rtu') await retry_open(() => client.connect());
+		else await client.connect();
 	});
 	after(async () => {
 		await client?.disconnect();

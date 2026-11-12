@@ -86,3 +86,10 @@ serial device path.
 - **Set means required.** Before the serial suites run, a pre-check opens every serial end and
   connects or waits for every TCP end. When `MODBUS_SERIAL_PORTS` is set and an end cannot be
   used, the serial suites fail with the reason; they are skipped only when the variable is unset.
+- **Re-opening a serial port.** A serial port just closed may refuse to re-open for a few tens of
+  milliseconds (seen with a CH340 driver: `Access is denied`). Whenever the tests open a serial
+  port, whether as a raw stream, through `Modbus_Server.start()` or through a serial
+  `Modbus_Client`, a failure is retried every 20 ms for up to 500 ms; only a failure that lasts
+  longer is reported, so a port that is really in use still fails. The restart test pauses 100 ms
+  between `stop()` and `start()`, since it checks the two calls, not the driver. The library itself
+  does not retry: an open failure is passed to the caller.

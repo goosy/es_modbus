@@ -1,9 +1,9 @@
 ---
 id: mhb62ep7
 opened: 2026-11-12T14:40:15.054Z
-closed:
+closed: 2026-11-12T19:33:28.537Z
 title: Re-opening a serial port right after closing it fails intermittently, making serial tests on physical hardware unstable
-status: accepted       # open | accepted | fixed | rejected | wontfix
+status: fixed          # open | accepted | fixed | rejected | wontfix
 fixed_in: []        # commit IDs, backfilled at version commit time
 labels: [test]
 remote:
