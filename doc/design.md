@@ -482,7 +482,7 @@ run)`, which returns the call's promise.
 
 ## Known issue: serial reads on Windows complete one timer tick late
 
-On Windows, `serialport-rs` 0.7.0 sets `COMMTIMEOUTS.ReadIntervalTimeout` to 1 ms. The serial
+On Windows, `serialport-rs` 0.7.1 sets `COMMTIMEOUTS.ReadIntervalTimeout` to 1 ms. The serial
 driver measures that interval with the system timer, so a read completes about one timer tick
 (typically 12 to 16 ms) after its last byte arrives. Frames are delimited by their length and the
 default `silence` is 50 ms, so framing is unaffected; each serial transaction takes that much
