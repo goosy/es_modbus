@@ -26,6 +26,7 @@
   "scripts": {
     "build": "node build.js",
     "test": "pnpm build && node --test \"test/**/*.test.js\"",
+    "test:serial": "node test/run-serial.js",
     "test:coverage": "pnpm build && node --test --experimental-test-coverage --test-coverage-include=\"src/**\" \"test/**/*.test.js\"",
     "prepare": "pnpm build",
     "lint": "eslint ."

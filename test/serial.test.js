@@ -3,7 +3,8 @@
 // MODBUS_SERIAL_PORTS="<first>,<second>" sets the two ends of the link; when it is unset the
 // suites are skipped. Both ends are serial ports linked like a null-modem cable, or the first is
 // a serial port and the second the TCP end of a transparent serial-to-TCP converter: "host:port"
-// connects to the converter, ":port" listens for it. With two serial ports a baud-rate sweep
+// connects to the converter, ":port" listens for it. Several "host:port" ends separated by "|"
+// form a remote pool: each connection takes the next one. With two serial ports a baud-rate sweep
 // runs first, and the suites run at 9600 baud, or at the first rate that worked when 9600 did
 // not. A link that is set but cannot be used fails the run.
 import { describe, test, before, after, beforeEach } from 'node:test';
@@ -31,8 +32,8 @@ const RESTART_PAUSE_MS = 100;
 
 /**
  * Parses MODBUS_SERIAL_PORTS into `{ first, second }`. The first end is `{ serial: path }`; the
- * second is `{ serial: path }`, `{ host, port }` (connect) or `{ listen: port }`. Throws on an
- * invalid value.
+ * second is `{ serial: path }`, `{ listen: port }` or a remote pool `{ remotes: [{ host, port }],
+ * next }` (connect, taking the remotes in turn). Throws on an invalid value.
  */
 function parse_link(spec) {
 	const ends = spec.split(',').map((end) => end.trim());
@@ -41,14 +42,28 @@ function parse_link(spec) {
 	const [first, second] = ends;
 	if (first.includes(':')) throw invalid('the first end must be a serial port');
 	if (!second.includes(':')) return { first: { serial: first }, second: { serial: second } };
-	const index = second.lastIndexOf(':');
-	const host = second.slice(0, index);
-	const port = Number(second.slice(index + 1));
-	if (!Number.isInteger(port) || port < 1 || port > 0xffff) throw invalid(`bad TCP port in "${second}"`);
-	return { first: { serial: first }, second: host === '' ? { listen: port } : { host, port } };
+	const tcp_ends = second.split('|').map((end) => end.trim()).map((end) => {
+		const index = end.lastIndexOf(':');
+		if (index < 0) throw invalid(`"${end}" is not a TCP end`);
+		const host = end.slice(0, index);
+		const port = Number(end.slice(index + 1));
+		if (!Number.isInteger(port) || port < 1 || port > 0xffff) throw invalid(`bad TCP port in "${end}"`);
+		return host === '' ? { listen: port } : { host, port };
+	});
+	if (tcp_ends.length === 1 && tcp_ends[0].listen) return { first: { serial: first }, second: tcp_ends[0] };
+	if (tcp_ends.some((end) => end.listen)) throw invalid('a remote pool takes only "host:port" ends');
+	return { first: { serial: first }, second: { remotes: tcp_ends, next: 0 } };
 }
 
-const end_name = (end) => end.serial ?? (end.listen ? `:${end.listen}` : `${end.host}:${end.port}`);
+/** Takes the next remote of a remote pool, cycling through it. */
+function take_remote(end) {
+	const remote = end.remotes[end.next % end.remotes.length];
+	end.next += 1;
+	return remote;
+}
+
+const remote_name = ({ host, port }) => `${host}:${port}`;
+const end_name = (end) => end.serial ?? (end.listen ? `:${end.listen}` : end.remotes.map(remote_name).join('|'));
 
 const with_timeout = (promise, ms, message) => {
 	let timer;
@@ -91,10 +106,11 @@ async function open_end(end, baud_rate = suite_baud_rate) {
 		await open_port(port);
 		return port;
 	}
-	if (end.host) {
-		const socket = connect(end.port, end.host);
+	if (end.remotes) {
+		const remote = take_remote(end);
+		const socket = connect(remote.port, remote.host);
 		socket.on('error', () => { });
-		await with_timeout(once(socket, 'connect'), TCP_WAIT_MS, `no connection to ${end_name(end)}`);
+		await with_timeout(once(socket, 'connect'), TCP_WAIT_MS, `no connection to ${remote_name(remote)}`);
 		return socket;
 	}
 	// The converter connects to us; once it has, stop accepting so the port is free again
@@ -432,9 +448,9 @@ async function start_pair(handler) {
 		const client = new Modbus_Client({ serial: link.second.serial, baud_rate: suite_baud_rate, ...client_options });
 		return { server, client };
 	}
-	if (link.second.host) {
+	if (link.second.remotes) {
 		const server = await start_serial_server(handler, link.first.serial);
-		const client = new Modbus_Client({ rtu_over_tcp: `${link.second.host}:${link.second.port}`, ...client_options });
+		const client = new Modbus_Client({ rtu_over_tcp: remote_name(take_remote(link.second)), ...client_options });
 		return { server, client };
 	}
 	const server = new Modbus_Server(handler, { rtu_over_tcp: `:${link.second.listen}` });
@@ -449,7 +465,7 @@ async function start_pair(handler) {
 
 function pair_title() {
 	if (!link || link.second.serial) return `Modbus RTU client on ${second_name} <-> server on ${first_name}`;
-	if (link.second.host) return `Modbus RTU server on ${first_name} <-> RTU-over-TCP client to ${second_name}`;
+	if (link.second.remotes) return `Modbus RTU server on ${first_name} <-> RTU-over-TCP client to ${second_name}`;
 	return `Modbus RTU client on ${first_name} <-> RTU-over-TCP server on ${second_name}`;
 }
 
