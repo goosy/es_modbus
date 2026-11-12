@@ -57,34 +57,79 @@ const without_tid = (frame) => frame.subarray(2).toString('hex');
 describe('Modbus_Client construction', () => {
 	test('an invalid silence throws at construction', () => {
 		for (const silence of [0, -5, '50']) {
-			assert.throws(() => new Modbus_Client(HOST, { reconnect_time: 0, silence }), /Invalid silence/);
-			assert.throws(() => new Modbus_Client(null, { port: 'COM9', reconnect_time: 0, silence }), /Invalid silence/);
+			assert.throws(() => new Modbus_Client({ tcp: HOST, reconnect_time: 0, silence }), /Invalid silence/);
+			assert.throws(() => new Modbus_Client({ serial: 'COM9', reconnect_time: 0, silence }), /Invalid silence/);
 		}
 	});
 
-	test('a string address selects TCP; rtu: true selects RTU-over-TCP', () => {
-		const tcp = new Modbus_Client(HOST, { reconnect_time: 0 });
+	test('tcp selects TCP; rtu_over_tcp selects RTU-over-TCP', () => {
+		const tcp = new Modbus_Client({ tcp: HOST, reconnect_time: 0 });
 		assert.equal(tcp.protocol, 'tcp');
-		const rtu = new Modbus_Client(HOST, { reconnect_time: 0, rtu: true });
+		const rtu = new Modbus_Client({ rtu_over_tcp: HOST, reconnect_time: 0 });
 		assert.equal(rtu.protocol, 'rtu_over_tcp');
 	});
 
-	test('a non-string address selects serial RTU on the device path `port`', () => {
-		const client = new Modbus_Client(null, {
-			reconnect_time: 0, port: 'COM_NONEXISTENT', baud_rate: 19200, parity: 2, stop_bits: 2,
+	test('serial selects serial RTU on that device path', () => {
+		const client = new Modbus_Client({
+			serial: 'COM_NONEXISTENT', reconnect_time: 0, baud_rate: 19200, parity: 2, stop_bits: 2,
 		});
 		assert.equal(client.protocol, 'rtu');
 		// Created when first opened
 		assert.equal(client.stream, null);
 	});
 
+	test('exactly one transport option must be given', () => {
+		const message = /Exactly one of tcp, rtu_over_tcp, serial must be given/;
+		assert.throws(() => new Modbus_Client(), message);
+		assert.throws(() => new Modbus_Client(HOST), message);
+		assert.throws(() => new Modbus_Client({ reconnect_time: 0 }), message);
+		assert.throws(() => new Modbus_Client({ tcp: undefined, serial: null }), message);
+		assert.throws(() => new Modbus_Client({ tcp: HOST, serial: 'COM9', reconnect_time: 0 }), message);
+		assert.throws(() => new Modbus_Client({ tcp: HOST, rtu_over_tcp: HOST, reconnect_time: 0 }), message);
+		// A nullish transport option counts as not given
+		assert.equal(new Modbus_Client({ tcp: null, serial: 'COM9', reconnect_time: 0 }).protocol, 'rtu');
+	});
+
+	test('a host:port target with an empty host or an invalid port throws', () => {
+		for (const tcp of ['', ':502', `${HOST}:0`, `${HOST}:65536`, `${HOST}:x`, '[::1]x', 502]) {
+			assert.throws(() => new Modbus_Client({ tcp, reconnect_time: 0 }), /Invalid host/, String(tcp));
+		}
+	});
+
+	test('an option that does not apply to the transport throws', () => {
+		const cases = [
+			...['baud_rate', 'parity', 'data_bits', 'stop_bits'].flatMap((name) => [
+				['tcp', name], ['rtu_over_tcp', name],
+			]),
+			...['reconnect_max', 'max_timeouts', 'keep_alive'].map((name) => ['serial', name]),
+			['tcp', 'turnaround'],
+		];
+		for (const [transport, name] of cases) {
+			const target = transport === 'serial' ? 'COM9' : HOST;
+			assert.throws(
+				() => new Modbus_Client({ [transport]: target, reconnect_time: 0, [name]: 1 }),
+				new RegExp(`Option ${name} does not apply to ${transport}`),
+			);
+		}
+		// Applicable options, and nullish ones, are accepted
+		assert.doesNotThrow(() => new Modbus_Client({ rtu_over_tcp: HOST, reconnect_time: 0, turnaround: 50 }));
+		assert.doesNotThrow(() => new Modbus_Client({ serial: 'COM9', reconnect_time: 0, turnaround: 50 }));
+		assert.doesNotThrow(() => new Modbus_Client({ tcp: HOST, reconnect_time: 0, baud_rate: null }));
+	});
+
+	test('the transport is checked before whether an option applies, then the values', () => {
+		assert.throws(() => new Modbus_Client({ tcp: ':502', baud_rate: 'x' }), /Invalid host/);
+		assert.throws(() => new Modbus_Client({ tcp: HOST, baud_rate: 'x', silence: 0 }), /does not apply/);
+	});
+
 	test('a serial client with an invalid serial option throws at construction', () => {
-		assert.throws(() => new Modbus_Client(null, { reconnect_time: 0 }), /Invalid serial port/);
-		assert.throws(() => new Modbus_Client(null, { reconnect_time: 0, port: 'COM9', parity: 3 }), /Invalid parity/);
+		assert.throws(() => new Modbus_Client({ serial: '', reconnect_time: 0 }), /Invalid serial port/);
+		assert.throws(() => new Modbus_Client({ serial: 3, reconnect_time: 0 }), /Invalid serial port/);
+		assert.throws(() => new Modbus_Client({ serial: 'COM9', reconnect_time: 0, parity: 3 }), /Invalid parity/);
 	});
 
 	test('option defaults', () => {
-		const client = new Modbus_Client(HOST, { reconnect_time: 0 });
+		const client = new Modbus_Client({ tcp: HOST, reconnect_time: 0 });
 		assert.equal(client.timeout, 1000);
 		assert.equal(client.delay, 20);
 		assert.equal(client.is_connected, false);
@@ -93,7 +138,7 @@ describe('Modbus_Client construction', () => {
 	});
 
 	test('the Modicon numbering base cannot change after construction', () => {
-		const client = new Modbus_Client(HOST, { reconnect_time: 0, modicon_zero_based: true });
+		const client = new Modbus_Client({ tcp: HOST, reconnect_time: 0, modicon_zero_based: true });
 		assert.equal(client.modicon_zero_based, true);
 		assert.throws(() => {
 			client.modicon_zero_based = false;
@@ -103,7 +148,7 @@ describe('Modbus_Client construction', () => {
 
 	test('reconnect_time defaults to 10000 and connects at construction', async () => {
 		const fake = await start_fake_server();
-		const client = new Modbus_Client(HOST, { port: fake.port });
+		const client = new Modbus_Client({ tcp: `${HOST}:${fake.port}` });
 		client.on('error', () => { });
 		try {
 			assert.equal(client.reconnect_time, 10000);
@@ -129,7 +174,7 @@ describe('Modbus_Client construction', () => {
 describe('Modbus_Client argument validation', () => {
 	// The rules are tested on plan_read() / plan_write() in util.test.js
 	test('read() and write() throw synchronously on an invalid argument', () => {
-		const client = new Modbus_Client(HOST, { reconnect_time: 0 });
+		const client = new Modbus_Client({ tcp: HOST, reconnect_time: 0 });
 		assert.throws(() => client.read('20001'), /Invalid range format/);
 		assert.throws(() => client.read('40001', 256), /Invalid unit ID/);
 		assert.throws(() => client.read([5, 0, 1]), /is not a read function/);
@@ -644,7 +689,7 @@ describe('Modbus_Client serial port', () => {
 		created = [];
 	});
 
-	const serial_client = (options = {}) => new Modbus_Client(null, { port: 'COM9', ...options });
+	const serial_client = (options = {}) => new Modbus_Client({ serial: 'COM9', ...options });
 
 	test('reconnect_time > 0 creates and opens the port at construction', async () => {
 		const client = serial_client({ baud_rate: 19200, parity: 'even' });
@@ -759,7 +804,7 @@ describe('Modbus_Client RTU-over-TCP', () => {
 	beforeEach(async () => {
 		responder = () => undefined;
 		fake = await start_fake_server((frame) => responder(frame));
-		client = await connect_client(fake.port, { rtu: true });
+		client = await connect_client(fake.port, { rtu_over_tcp: true });
 	});
 	afterEach(async () => {
 		close_client(client);
@@ -799,7 +844,7 @@ describe('Modbus_Client RTU-over-TCP', () => {
 	});
 
 	test('the silence option sets the silence', async (t) => {
-		const silent = await connect_client(fake.port, { rtu: true, silence: 10 });
+		const silent = await connect_client(fake.port, { rtu_over_tcp: true, silence: 10 });
 		const sent = once(silent, 'send');
 		const pending = silent.read('40001,2');
 		await sent;
@@ -1139,7 +1184,7 @@ describe('Modbus_Client connection phases (serial)', () => {
 	});
 
 	const serial_client = (options = {}) => {
-		const client = new Modbus_Client(null, { port: 'COM9', reconnect_time: 0, ...options });
+		const client = new Modbus_Client({ serial: 'COM9', reconnect_time: 0, ...options });
 		client.on('error', () => { });
 		return client;
 	};
@@ -1291,7 +1336,7 @@ function assert_delays(delays, expected) {
 
 describe('Modbus_Client reconnect back-off', () => {
 	test('the options default, and an invalid one throws', () => {
-		const client = new Modbus_Client(HOST, { reconnect_time: 0 });
+		const client = new Modbus_Client({ tcp: HOST, reconnect_time: 0 });
 		assert.equal(client.reconnect_max, 60000);
 		assert.equal(client.max_timeouts, 3);
 		assert.equal(client.keep_alive, 10000);
@@ -1302,12 +1347,12 @@ describe('Modbus_Client reconnect back-off', () => {
 		];
 		for (const [options, error] of cases) {
 			assert.throws(
-				() => new Modbus_Client(HOST, { reconnect_time: 0, ...options }),
+				() => new Modbus_Client({ tcp: HOST, reconnect_time: 0, ...options }),
 				error,
 				JSON.stringify(options),
 			);
 		}
-		const zero = new Modbus_Client(HOST, { reconnect_time: 0, max_timeouts: 0, keep_alive: 0 });
+		const zero = new Modbus_Client({ tcp: HOST, reconnect_time: 0, max_timeouts: 0, keep_alive: 0 });
 		assert.equal(zero.max_timeouts, 0);
 		assert.equal(zero.keep_alive, 0);
 	});
@@ -1502,7 +1547,7 @@ describe('Modbus_Client dead-link detection', () => {
 
 	test('RTU-over-TCP counts timeouts too', async () => {
 		const fake = await start_fake_server();
-		const client = await connect_client(fake.port, { rtu: true, timeout: 30, max_timeouts: 2 });
+		const client = await connect_client(fake.port, { rtu_over_tcp: true, timeout: 30, max_timeouts: 2 });
 		try {
 			const disconnected = once(client, 'disconnect');
 			await assert.rejects(client.read('40001'), /timeout/);
@@ -1521,13 +1566,12 @@ describe('Modbus_Client dead-link detection', () => {
 			ports.push(port);
 			return port;
 		});
-		const client = new Modbus_Client(null, {
-			port: 'COM9', reconnect_time: 0, timeout: 20, delay: 0, max_timeouts: 1,
-		});
+		// `max_timeouts` does not apply to serial: more timeouts than its default in a row
+		const client = new Modbus_Client({ serial: 'COM9', reconnect_time: 0, timeout: 20, delay: 0 });
 		client.on('error', () => { });
 		try {
 			await client.connect();
-			for (let i = 0; i < 3; i++) await assert.rejects(client.read('40001'), /timeout/);
+			for (let i = 0; i < 4; i++) await assert.rejects(client.read('40001'), /timeout/);
 			assert.equal(client.is_connected, true);
 			assert.equal(ports[0].isOpen, true);
 		} finally {

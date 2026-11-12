@@ -6,6 +6,14 @@ import {
 	silence_option, mbap_frame_length, rtu_response_length, Frame_Receiver,
 } from './util.js';
 import { serial_settings, silence_time, create_serial_port } from './serial.js';
+import { SERIAL_OPTIONS, select_transport, check_applicable, parse_host_port } from './transport.js';
+
+// The options that do not apply to some transports, and those transports (see spec-client.md)
+const CLIENT_EXCLUSIONS = [
+	[SERIAL_OPTIONS, ['tcp', 'rtu_over_tcp']],
+	[['reconnect_max', 'max_timeouts', 'keep_alive'], ['serial']],
+	[['turnaround'], ['tcp']],
+];
 
 // Connection phases: the client is in exactly one at a time (see design.md, "Client connection state")
 const STATE = Object.freeze({
@@ -169,13 +177,22 @@ export class Modbus_Client extends EventEmitter {
 		}
 	}
 
-	constructor(address, options = {}) {
+	/**
+	 * @param {Object} options - exactly one of `tcp`, `rtu_over_tcp` (a `host:port` string) or
+	 *   `serial` (a device path) selects the transport; the other options are in spec-client.md.
+	 */
+	constructor(options) {
 		super();
 		this.packets_length = 256;
+		if (options === null || typeof options !== 'object') {
+			throw new Error('Exactly one of tcp, rtu_over_tcp, serial must be given');
+		}
+
+		const { transport, target } = select_transport(options);
+		const tcp_target = transport === 'serial' ? null : parse_host_port(target, false);
+		check_applicable(options, transport, CLIENT_EXCLUSIONS);
 
 		const {
-			port = 502,
-			rtu = false,
 			reconnect_time = 10000,
 			baud_rate, parity, data_bits, stop_bits,
 		} = options;
@@ -191,13 +208,12 @@ export class Modbus_Client extends EventEmitter {
 		this.turnaround = options.turnaround ?? 100;
 		let silence = silence_option(options.silence);
 
-		if (typeof address === 'string') {
-			this.set_tcp(address, port);
-			this.protocol = rtu ? 'rtu_over_tcp' : 'tcp';
+		if (tcp_target) {
+			this.set_tcp(tcp_target.host, tcp_target.port);
+			this.protocol = transport;
 		} else {
-			// The serial device path is `port`; the options are checked here, the port is
-			// created when first opened
-			const settings = serial_settings({ port, baud_rate, parity, data_bits, stop_bits });
+			// The options are checked here, the port is created when first opened
+			const settings = serial_settings({ path: target, baud_rate, parity, data_bits, stop_bits });
 			this.set_serial(settings);
 			this.protocol = 'rtu';
 			silence = silence_time(settings, silence);

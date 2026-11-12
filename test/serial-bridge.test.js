@@ -27,7 +27,7 @@ describe('Modbus_Client on a serial line, RTU-over-TCP server on the other end',
 	let client;
 	beforeEach(async () => {
 		memory = create_memory_handler();
-		({ server, port: server_port } = await start_tcp_server(memory.handler, { rtu: true, unit_id: [1, 2] }));
+		({ server, port: server_port } = await start_tcp_server(memory.handler, { rtu_over_tcp: true, unit_id: [1, 2] }));
 	});
 	afterEach(async () => {
 		await client?.disconnect();
@@ -38,8 +38,8 @@ describe('Modbus_Client on a serial line, RTU-over-TCP server on the other end',
 
 	async function setup(line, options = {}) {
 		bridge = await create_serial_bridge({ serial: 'COM_A' }, { connect: server_port }, line);
-		client = new Modbus_Client(null, {
-			port: 'COM_A', baud_rate: 19200, reconnect_time: 0, timeout: 300, ...options,
+		client = new Modbus_Client({
+			serial: 'COM_A', baud_rate: 19200, reconnect_time: 0, timeout: 300, ...options,
 		});
 		client.on('error', () => { });
 		await client.connect();
@@ -144,7 +144,7 @@ describe('Modbus_Server on a serial line, a peer over TCP on the other end', () 
 	async function setup(line, options = {}) {
 		memory = create_memory_handler();
 		bridge = await create_serial_bridge({ serial: 'COM_B' }, { listen: true }, line);
-		server = new Modbus_Server(memory.handler, { port: 'COM_B', baud_rate: 19200, unit_id: [0, 1, 2], ...options });
+		server = new Modbus_Server(memory.handler, { serial: 'COM_B', baud_rate: 19200, unit_id: [0, 1, 2], ...options });
 		server.on('error', () => { });
 		const started = once(server, 'start');
 		server.start();
@@ -199,7 +199,7 @@ describe('Modbus_Server on a serial line, a peer over TCP on the other end', () 
 
 	test('an RTU-over-TCP client reads and writes through the line', async () => {
 		await setup({ to_b: { chunk: 2 } });
-		const client = new Modbus_Client(HOST, { port: bridge.port, rtu: true, reconnect_time: 0, timeout: 300, delay: 0 });
+		const client = new Modbus_Client({ rtu_over_tcp: `${HOST}:${bridge.port}`, reconnect_time: 0, timeout: 300, delay: 0 });
 		client.on('error', () => { });
 		try {
 			await client.connect();

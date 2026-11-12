@@ -1,9 +1,9 @@
 ---
 id: ecat0ppn
 opened: 2026-11-12T08:35:45.067Z
-closed:
+closed: 2026-11-12T10:04:59.145Z
 title: Select the Modbus_Client and Modbus_Server transport by a tcp / rtu_over_tcp / serial option
-status: accepted      # open | accepted | fixed | rejected | wontfix
+status: fixed         # open | accepted | fixed | rejected | wontfix
 fixed_in: []        # commit IDs, backfilled at version commit time
 labels: []
 remote:

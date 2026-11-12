@@ -7,18 +7,35 @@ Slave/server. `extends EventEmitter`.
 ```js
 import { Modbus_Server } from 'es-modbus';
 
-const server = new Modbus_Server(handler, options);
+const server = new Modbus_Server(handler, { tcp: '0.0.0.0:502' });
 await server.start();
 ```
+
+Exactly one of the transport options `tcp`, `rtu_over_tcp` and `serial` selects the transport,
+and its string value is the target (see "Transport options" and "`host:port` target" in
+`spec-protocol.md`). There is no default transport.
+
+```js
+const tcp = new Modbus_Server(handler, { tcp: '0.0.0.0:502' });
+const gateway = new Modbus_Server(handler, { rtu_over_tcp: ':4001' });
+const serial = new Modbus_Server(handler, { serial: 'COM4', baud_rate: 19200 });
+```
+
+| Option         | Transport    | Behavior                                                        |
+| -------------- | ------------ | --------------------------------------------------------------- |
+| `tcp`          | TCP          | Listens on `host:port`; each connection speaks MBAP-framed Modbus TCP. An empty host binds `0.0.0.0`. |
+| `rtu_over_tcp` | RTU-over-TCP | Listens on `host:port`; each connection speaks RTU frames (unit ID + PDU + CRC16). An empty host binds `0.0.0.0`. |
+| `serial`       | RTU          | Opens the serial device path and answers as a Modbus RTU slave. A port instance is not accepted. |
+
+An RTU server is a Modbus slave on a serial line: it has no connections and frames its responses
+with CRC-16. Request handling (unit ID routing, the `handler`, exception responses) is identical
+across the three transports; only the framing and the lifecycle events differ.
 
 ### options
 
 | Option    | Default     | Meaning                                                                       |
 | --------- | ----------- | -------------------------------------------------------------------------- |
 | `name`    | `'Modbus_Server'` | A name for telling instances apart, e.g. in logs; kept in the `name` property. The library does not use it itself. |
-| `host`    | `'0.0.0.0'` | Bind address (TCP only).                                                    |
-| `port`    | `502`       | `number` → listen on that TCP port. `string` → open as a serial device path. Anything else throws `Invalid port`; a port instance is not accepted. |
-| `rtu`     | `false`     | With a `number` port, use RTU framing on the accepted TCP sockets (RTU-over-TCP). Ignored for serial ports. |
 | `silence` | `50`        | Silence in ms after which the bytes left of an incomplete frame are resolved (see "Frame delimiting" in `spec-protocol.md`). A finite positive number (else `Invalid silence`). On a serial port at least 3.5 character times (1.75 ms above 19200 baud). |
 | `unit_id` | all         | Which Modbus unit IDs to answer; every ID when omitted (see `set_unit_ids`). |
 | `baud_rate` | `9600`    | Serial baud rate, a positive integer (else `Invalid baud rate`). |
@@ -26,23 +43,16 @@ await server.start();
 | `data_bits` | `8`       | Serial data bits: `5`, `6`, `7` or `8` (else `Invalid data bits`). |
 | `stop_bits` | `1`       | Serial stop bits: `1`, `1.5` or `2` (else `Invalid stop bits`). |
 
-The serial options (`baud_rate`, `parity`, `data_bits`, `stop_bits`) apply only when `port` is a
-serial device path and are ignored for a TCP port. They are checked at construction, which throws
-on an invalid one; the serial port itself is created and opened by `start()`.
+An option that does not apply to the selected transport throws (see "Transport options" in
+`spec-protocol.md`):
 
-### Transport selection
+| Option | `tcp` | `rtu_over_tcp` | `serial` |
+| --- | --- | --- | --- |
+| `baud_rate`, `parity`, `data_bits`, `stop_bits` | throws | throws | applies |
+| `name`, `silence`, `unit_id` | applies | applies | applies |
 
-The server's transport is chosen at construction from `port` and `rtu`:
-
-| `port`                        | `rtu`   | Transport      | Behavior                                                        |
-| ----------------------------- | ------- | -------------- | --------------------------------------------------------------- |
-| `number`                      | `false` | TCP            | Listens on `host:port`; each connection speaks MBAP-framed Modbus TCP. |
-| `number`                      | `true`  | RTU-over-TCP   | Listens on `host:port`; each connection speaks RTU frames (unit ID + PDU + CRC16). |
-| `string`                      | ignored | RTU            | Opens the serial port and answers as a Modbus RTU slave.         |
-
-An RTU server is a Modbus slave on a serial line: it has no connections and frames its responses
-with CRC-16. Request handling (unit ID routing, the `handler`, exception responses) is identical
-across the three transports; only the framing and the lifecycle events differ.
+The serial options are checked at construction, which throws on an invalid one; the serial port
+itself is created and opened by `start()`.
 
 ### `set_unit_ids(unit_id)`
 

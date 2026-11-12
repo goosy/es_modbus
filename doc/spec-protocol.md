@@ -4,13 +4,43 @@ Covers the wire-level rules shared by client and server.
 
 ## Transports and framing
 
-| Transport      | Selected when                              | Framing                                             |
-| -------------- | ------------------------------------------ | -------------------------------------------------- |
-| TCP            | client address is a string, `rtu: false`  | MBAP header (7 bytes) + PDU.                        |
-| RTU-over-TCP   | client address is a string, `rtu: true`   | RTU framing (unit ID + PDU + CRC16) carried on a TCP socket. |
-| RTU            | client address is not a string            | RTU framing on a serial port.                       |
+| Transport      | Transport option | Target                  | Framing                                             |
+| -------------- | ---------------- | ----------------------- | -------------------------------------------------- |
+| TCP            | `tcp`            | `host:port`             | MBAP header (7 bytes) + PDU.                        |
+| RTU-over-TCP   | `rtu_over_tcp`   | `host:port`             | RTU framing (unit ID + PDU + CRC16) carried on a TCP socket. |
+| RTU            | `serial`         | serial device path      | RTU framing on a serial port.                       |
 
-The server's transport is selected by `options.port` and `options.rtu` (see `spec-server.md`).
+### Transport options
+
+The client and the server select their transport the same way (see `spec-client.md` and
+`spec-server.md`):
+
+- Exactly one of the options `tcp`, `rtu_over_tcp` and `serial` must be given; its string value is
+  the target. With none of them, or more than one, the constructor throws
+  `Error('Exactly one of tcp, rtu_over_tcp, serial must be given')`. An option whose value is
+  `undefined` or `null` counts as not given, for the transport options as well as the others.
+- The target of `serial` is the serial device path, such as `'COM3'` or `'/dev/ttyUSB0'`: a
+  non-empty `string`, else `Invalid serial port`.
+- An option that does not apply to the selected transport makes the constructor throw
+  `` Error(`Option <name> does not apply to <transport>`) ``, where `<transport>` is `tcp`,
+  `rtu_over_tcp` or `serial`, instead of being ignored. Each side lists the transports its options
+  apply to.
+- The constructor checks the transport options first, then whether each option applies, then the
+  option values.
+
+### `host:port` target
+
+The target of `tcp` and `rtu_over_tcp` is a `string`:
+
+- The port may be omitted and is then `502`: `'10.0.0.5'` is the same as `'10.0.0.5:502'`.
+- An IPv6 address with a port is enclosed in brackets: `'[::1]:502'`; `'[::1]'` is port `502`. A
+  target with more than one `:` and no brackets, such as `'::1'`, is a bare IPv6 address with
+  port `502`.
+- The port must be a decimal integer in `1..65535`; port `0` is not accepted.
+- The host: a client must name it; a server may leave it empty, which binds `0.0.0.0` (`':502'`
+  is the same as `'0.0.0.0:502'`).
+
+Any other value throws `` Error(`Invalid host: <value>`) ``.
 
 ### MBAP header (TCP)
 

@@ -112,7 +112,7 @@ async function exchange(stream, request, length, ms = 500) {
 
 /** Starts a Modbus_Server on a serial port. */
 async function start_serial_server(handler, path, options = {}) {
-	const server = new Modbus_Server(handler, { port: path, baud_rate: suite_baud_rate, ...options });
+	const server = new Modbus_Server(handler, { serial: path, baud_rate: suite_baud_rate, ...options });
 	server.on('error', () => { });
 	await server.start();
 	return server;
@@ -350,7 +350,7 @@ describe(`Modbus RTU client on ${client_name}, raw slave on ${slave_name}`, { sk
 	before(async () => {
 		slave = await open_end(client_on_second ? link.first : link.second);
 		const path = (client_on_second ? link.second : link.first).serial;
-		client = new Modbus_Client(null, { port: path, baud_rate: suite_baud_rate, timeout: 1000, reconnect_time: 0 });
+		client = new Modbus_Client({ serial: path, baud_rate: suite_baud_rate, timeout: 1000, reconnect_time: 0 });
 		client.on('error', () => { });
 		await client.connect();
 	});
@@ -404,21 +404,21 @@ async function start_pair(handler) {
 	const client_options = { timeout: 1000, reconnect_time: 0 };
 	if (link.second.serial) {
 		const server = await start_serial_server(handler, link.first.serial);
-		const client = new Modbus_Client(null, { port: link.second.serial, baud_rate: suite_baud_rate, ...client_options });
+		const client = new Modbus_Client({ serial: link.second.serial, baud_rate: suite_baud_rate, ...client_options });
 		return { server, client };
 	}
 	if (link.second.host) {
 		const server = await start_serial_server(handler, link.first.serial);
-		const client = new Modbus_Client(link.second.host, { port: link.second.port, rtu: true, ...client_options });
+		const client = new Modbus_Client({ rtu_over_tcp: `${link.second.host}:${link.second.port}`, ...client_options });
 		return { server, client };
 	}
-	const server = new Modbus_Server(handler, { port: link.second.listen, rtu: true });
+	const server = new Modbus_Server(handler, { rtu_over_tcp: `:${link.second.listen}` });
 	server.on('error', () => { });
 	server.on('socket_error', () => { });
 	const converter = once(server, 'socket_connect');
 	await server.start();
 	await with_timeout(converter, TCP_WAIT_MS, `the converter did not connect to :${link.second.listen}`);
-	const client = new Modbus_Client(null, { port: link.first.serial, baud_rate: suite_baud_rate, ...client_options });
+	const client = new Modbus_Client({ serial: link.first.serial, baud_rate: suite_baud_rate, ...client_options });
 	return { server, client };
 }
 

@@ -8,19 +8,26 @@
 
 ## 传输方式选择
 
-- **客户端。** 构造函数设置 `this.protocol`：`tcp`、`rtu_over_tcp`（字符串地址且 `rtu: true`）
-  或 `rtu`（非字符串地址）。对 `rtu`，先用 `serial_settings` 校验串口选项，再以结果调用
-  `set_serial`；串口在之后才创建。
+- **`src/transport.js`。** 两端的构造函数共用，按 spec 规定的顺序调用：`select_transport` 选出
+  唯一给出的传输选项（值为 nullish 视为未给出），连同其目标一起返回；对 `tcp` 和 `rtu_over_tcp`，
+  `parse_host_port(target, server)` 返回 `{ host, port }`：以 `[` 开头的目标必须形如 `[<host>]`，
+  后面可带 `:<port>`；不带方括号的目标只在恰好一个 `:` 处拆分（不止一个则为纯 IPv6 地址）；端口
+  必须全为数字且在 `1..65535` 内；主机为空时，`server` 为真则取 `0.0.0.0`，否则无效。随后
+  `check_applicable` 对第一个被该端排除表（`CLIENT_EXCLUSIONS`、`SERVER_EXCLUSIONS`）排除在所选
+  传输方式之外的已给出选项抛错。之后才校验各选项的值。
+- **客户端。** 构造函数按传输选项设置 `this.protocol`：`tcp`、`rtu_over_tcp`，`serial` 时为
+  `rtu`。TCP 系列调用 `set_tcp(host, port)`；对 `rtu`，先用 `serial_settings` 校验串口选项，再以
+  结果调用 `set_serial`；串口在之后才创建。
 - **解码。** 响应解码**仅**按 `protocol === 'tcp'` 分支，因此 `rtu_over_tcp` 使用 RTU 解析器
   （`parse_rtu_response`）解码。
-- **服务端。** 构造函数原样保存 `port`：`number`（TCP）或 `string` 设备路径；后者的选项由
-  `serial_settings` 校验后存入 `this.serial_settings`；其他值抛出异常。构造函数按与客户端相同的
-  取值设置 `this.protocol`：`tcp`、`rtu_over_tcp`（数字端口且 `rtu: true`）或 `rtu`（字符串端口，
-  忽略 `rtu`）。`is_tcp` 是一个 getter：`typeof this.port === 'number'`，对两种 TCP 系列传输都为真。串口是 `this.serial_port`，由首次 `start()` 创建
+- **服务端。** 构造函数按与客户端相同的取值设置 `this.protocol`。TCP 系列把解析出的目标存入
+  `this.host` 和 `this.port`，供 `start()` 监听；对 `rtu`，由 `serial_settings` 校验设备路径和串口
+  选项后存入 `this.serial_settings`，`host` 和 `port` 保持 `null`。`is_tcp` 是一个 getter：
+  `this.protocol !== 'rtu'`，对两种 TCP 系列传输都为真。串口是 `this.serial_port`，由首次 `start()` 创建
   （`#open_serial`：共用同一个待决的创建，失败时将其重置，使之后的 `start()` 重试）；
   `send_response` 和 `stop` 使用它。见“服务端生命周期”。
 - **`src/serial.js`。** `serial_settings` 校验 snake_case 选项，并转换为 `serialport-rs` 的参数，
-  它们与 `serialport` 的参数相同（`port` → `path`，`baud_rate` → `baudRate`，`parity` 中
+  它们与 `serialport` 的参数相同（`path` 原样保留，`baud_rate` → `baudRate`，`parity` 中
   `0`/`1`/`2` 映射为 `none`/`odd`/`even`，`data_bits` → `dataBits`，`stop_bits` → `stopBits`）。
   `create_serial_port` 以 `serialport-rs` 的 `RustBinding` 和 `autoOpen: false` 创建一个未打开的
   `SerialPortStream`。它通过动态 `import()` 引用 `serialport-rs/lib/stream.js` 和

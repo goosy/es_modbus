@@ -1,6 +1,7 @@
 import { createServer } from 'node:net';
 import { EventEmitter } from 'node:events';
 import { serial_settings, silence_time, create_serial_port } from './serial.js';
+import { SERIAL_OPTIONS, select_transport, check_applicable, parse_host_port } from './transport.js';
 import {
 	BROADCAST_ID, check_unit_id, check_request, silence_option,
 	parse_tcp_request, parse_rtu_request, encode_tcp_frame, encode_rtu_frame,
@@ -8,6 +9,11 @@ import {
 } from './util.js';
 
 const WRITE_FUNCTIONS = new Set([5, 6, 15, 16]);
+
+// The options that do not apply to some transports, and those transports (see spec-server.md)
+const SERVER_EXCLUSIONS = [
+	[SERIAL_OPTIONS, ['tcp', 'rtu_over_tcp']],
+];
 
 // An exception response: unit ID, function code with the exception bit, exception code
 function exception_response(unit_id, func_code, exception_code) {
@@ -107,9 +113,9 @@ function check_register_values(values) {
 export class Modbus_Server extends EventEmitter {
 	initialized = false;
 	sockets = null;
-	host = null;
-	port = null;
-	serial_settings = null; // serial port settings, for a serial device path `port`
+	host = null; // TCP family: the bind address
+	port = null; // TCP family: the TCP port
+	serial_settings = null; // serial: the serial port settings
 	serial_port = null; // the serial port, created by the first start()
 	name; // the name of the server, for logging
 	protocol = 'tcp'; // the framing: 'tcp', 'rtu_over_tcp' or 'rtu'
@@ -119,46 +125,51 @@ export class Modbus_Server extends EventEmitter {
 	/**
      * Constructor for a Modbus server.
      * @param {Modbus_Handler} handler - Modbus request handler functions.
-     * @param {Object} [options] - Options for the server:
-     * @param {string} [options.host='0.0.0.0'] - The host to listen on (default: '0.0.0.0')
-     * @param {number|string} [options.port=502] - The TCP port to listen on (default: 502) or a serial port path (for RTU mode).
-     * @param {boolean} [options.rtu=false] - With a TCP port, use RTU framing on the accepted sockets (RTU-over-TCP);
-     *   ignored for a serial port path.
-     * @param {number} [options.baud_rate=9600] - Serial baud rate, used with a serial port path.
-     * @param {'none'|'odd'|'even'|0|1|2} [options.parity='none'] - Serial parity, used with a serial port path.
-     * @param {number} [options.data_bits=8] - Serial data bits, used with a serial port path.
-     * @param {number} [options.stop_bits=1] - Serial stop bits, used with a serial port path.
+     * @param {Object} options - Options for the server; exactly one of `tcp`, `rtu_over_tcp`
+     *   or `serial` must be given:
+     * @param {string} [options.tcp] - Listen on this `host:port` for Modbus TCP; an empty host binds 0.0.0.0.
+     * @param {string} [options.rtu_over_tcp] - Listen on this `host:port` for RTU frames on the TCP sockets.
+     * @param {string} [options.serial] - Answer as an RTU slave on this serial device path.
+     * @param {number} [options.baud_rate=9600] - Serial baud rate, serial only.
+     * @param {'none'|'odd'|'even'|0|1|2} [options.parity='none'] - Serial parity, serial only.
+     * @param {number} [options.data_bits=8] - Serial data bits, serial only.
+     * @param {number} [options.stop_bits=1] - Serial stop bits, serial only.
      * @param {number} [options.silence=50] - The silence, in ms, after which the bytes left are resolved;
      *   on a serial port at least 3.5 character times.
      * @param {number|number[]|'all'|'*'} [options.unit_id] - The Modbus unit ID(s) to accept and respond to;
      *   every ID when omitted (see `set_unit_ids()` for details)
      */
-	constructor(handler, options = {}) {
+	constructor(handler, options) {
 		super();
+		if (options === null || typeof options !== 'object') {
+			throw new Error('Exactly one of tcp, rtu_over_tcp, serial must be given');
+		}
+		const { transport, target } = select_transport(options);
+		const tcp_target = transport === 'serial' ? null : parse_host_port(target, true);
+		check_applicable(options, transport, SERVER_EXCLUSIONS);
+
 		this.handler = handler;
 		this.set_unit_ids(options.unit_id);
-		this.host = options.host ?? '0.0.0.0';
 		this.name = options.name ?? 'Modbus_Server';
-		const port = options.port ?? 502;
 		const silence = silence_option(options.silence);
-		if (typeof port === 'string') {
-			// A serial device path; the options are checked here, the port is created by start()
+		if (tcp_target) {
+			this.protocol = transport;
+			this.host = tcp_target.host;
+			this.port = tcp_target.port;
+			this.#silence = silence;
+			this.sockets = new Set();
+		} else {
+			// The options are checked here, the port is created by start()
 			const { baud_rate, parity, data_bits, stop_bits } = options;
-			this.serial_settings = serial_settings({ port, baud_rate, parity, data_bits, stop_bits });
+			this.serial_settings = serial_settings({ path: target, baud_rate, parity, data_bits, stop_bits });
 			this.protocol = 'rtu';
 			this.#silence = silence_time(this.serial_settings, silence);
-		} else if (typeof port === 'number') {
-			this.protocol = options.rtu ? 'rtu_over_tcp' : 'tcp';
-			this.#silence = silence;
-		} else {
-			throw new Error(`Invalid port: ${port}`);
 		}
-		this.port = port;
-		if (this.is_tcp) this.sockets = new Set();
 	}
 
+	// TCP or RTU-over-TCP
 	get is_tcp() {
-		return typeof this.port === 'number';
+		return this.protocol !== 'rtu';
 	}
 
 	/**

@@ -9,32 +9,33 @@
 ```js
 import { Modbus_Client } from 'es-modbus';
 
-const client = new Modbus_Client(address, options);
+const client = new Modbus_Client(options);
 ```
 
-- `address`
-  - **字符串** → TCP 系列传输：TCP；当 `options.rtu` 为真时为 RTU-over-TCP。
-  - **非字符串**（例如 `null`）→ 在设备路径 `options.port` 上的串口 RTU 传输，使用下文的串口选项。
-    串口由客户端自行创建；不接受传入的串口实例。
+构造函数只接收一个 options 对象。传输选项 `tcp`、`rtu_over_tcp`、`serial` 中恰好一个选定传输方式，
+它的字符串值就是目标（见 `spec-protocol.zh-cn.md` 的“传输选项”和“`host:port` 目标”）：
 
 ```js
-const client = new Modbus_Client(null, { port: 'COM3', baud_rate: 19200, parity: 'even' });
+const tcp = new Modbus_Client({ tcp: '10.0.0.5:502', timeout: 500 });
+const gateway = new Modbus_Client({ rtu_over_tcp: 'gateway:4001' });
+const serial = new Modbus_Client({ serial: 'COM3', baud_rate: 19200, parity: 'even' });
 ```
+
+- `tcp`、`rtu_over_tcp` — 要连接的服务端，写作 `host:port`；必须写明主机。
+- `serial` — 串口设备路径。串口由客户端自行创建；不接受传入的串口实例。
 
 ### options
 
 | 选项             | 默认值  | 含义                                                                    |
 | ---------------- | ------- | ----------------------------------------------------------------------- |
 | `name`           | `'Modbus_Client'` | 用于区分实例的名称，例如在日志中；保存在 `name` 属性中。库本身不使用它。 |
-| `port`           | `502`   | TCP 端口。串口客户端中为串口设备路径（非空 `string`；否则抛出 `Invalid serial port`）。 |
-| `rtu`            | `false` | 地址为字符串时，在 TCP 套接字上使用 RTU 帧格式。                        |
 | `timeout`        | `1000`  | 单事务响应超时，毫秒，从该请求的帧写出时算起。到期时请求被拒绝，并发出 `timeout` 事件。 |
 | `delay`          | `20`    | 写出下一帧之前的最小间隔，毫秒（发送节流；见“顺序/节流”）。             |
-| `turnaround`     | `100`   | RTU 和 RTU-over-TCP：广播之后到写出下一帧的最小等待，毫秒（串行线路的“转向延迟”）。TCP 上忽略。 |
+| `turnaround`     | `100`   | RTU 和 RTU-over-TCP：广播之后到写出下一帧的最小等待，毫秒（串行线路的“转向延迟”）。 |
 | `reconnect_time` | `10000` | TCP 和 RTU-over-TCP 的初始重连延迟，毫秒；延迟从这里开始递增（见“重连”）。`> 0` 同时使构造函数立即连接（串口则打开端口）；`0` 禁用定时重连。二者都只在 `enable_reconnect` 为真时生效。 |
 | `reconnect_max`  | `60000` | TCP 和 RTU-over-TCP：递增的重连延迟的上限，毫秒。必须是有限的正数（否则抛出 `Invalid reconnect_max`）；小于 `reconnect_time` 时按 `reconnect_time` 处理。 |
-| `max_timeouts`   | `3`     | TCP 和 RTU-over-TCP：连续超时达到该次数后，连接被视为已死并关闭（见“死链检测”）。必须是非负整数（否则抛出 `Invalid max_timeouts`）；`0` 关闭检测。串口忽略此项。 |
-| `keep_alive`     | `10000` | TCP 和 RTU-over-TCP：套接字空闲多少毫秒后发出第一个 TCP keep-alive 探测；`0` 关闭 keep-alive。必须是有限的非负数（否则抛出 `Invalid keep_alive`）。串口忽略此项。 |
+| `max_timeouts`   | `3`     | TCP 和 RTU-over-TCP：连续超时达到该次数后，连接被视为已死并关闭（见“死链检测”）。必须是非负整数（否则抛出 `Invalid max_timeouts`）；`0` 关闭检测。 |
+| `keep_alive`     | `10000` | TCP 和 RTU-over-TCP：套接字空闲多少毫秒后发出第一个 TCP keep-alive 探测；`0` 关闭 keep-alive。必须是有限的非负数（否则抛出 `Invalid keep_alive`）。 |
 | `silence`        | `50`    | 静默时间（ms），超过之后处理不完整帧留下的残留字节（见 `spec-protocol.zh-cn.md` 的“帧的界定”）。必须是有限的正数（否则抛出 `Invalid silence`）。串口上至少为 3.5 个字符时间（19200 波特以上为 1.75 ms）。 |
 | `modicon_zero_based` | `false` | `true` 选择 0 起始的 Modicon 点号编号（见下文）。 |
 | `baud_rate`      | `9600`  | 串口波特率，正整数（否则抛出 `Invalid baud rate`）。 |
@@ -42,8 +43,17 @@ const client = new Modbus_Client(null, { port: 'COM3', baud_rate: 19200, parity:
 | `data_bits`      | `8`     | 串口数据位：`5`、`6`、`7` 或 `8`（否则抛出 `Invalid data bits`）。 |
 | `stop_bits`      | `1`     | 串口停止位：`1`、`1.5` 或 `2`（否则抛出 `Invalid stop bits`）。 |
 
-串口选项（`baud_rate`、`parity`、`data_bits`、`stop_bits`）只对串口客户端生效，对 TCP 系列客户端
-会被忽略。它们在构造时校验，无效时构造函数抛出异常；串口本身在首次打开时才创建（见“串口”）。
+不适用于所选传输方式的选项会抛错（见 `spec-protocol.zh-cn.md` 的“传输选项”）：
+
+| 选项 | `tcp` | `rtu_over_tcp` | `serial` |
+| --- | --- | --- | --- |
+| `baud_rate`、`parity`、`data_bits`、`stop_bits` | 抛错 | 抛错 | 适用 |
+| `reconnect_max`、`max_timeouts`、`keep_alive` | 适用 | 适用 | 抛错 |
+| `turnaround` | 抛错 | 适用 | 适用 |
+| `name`、`timeout`、`delay`、`silence`、`reconnect_time`、`modicon_zero_based` | 适用 | 适用 | 适用 |
+
+串口选项在构造时校验，无效时
+构造函数抛出异常；串口本身在首次打开时才创建（见“串口”）。
 
 当 `reconnect_time > 0` 时，构造函数会自动打开连接。`reconnect_time = 0` 时，连接丢失后客户端不会
 自行重连，但仍会按需连接：第一个请求（或 `connect()`）会打开连接。

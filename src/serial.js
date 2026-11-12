@@ -14,7 +14,7 @@ function parity_name(parity) {
  * serialport stream. Throws on an invalid option, so a constructor fails at once.
  *
  * @param {Object} options
- * @param {string} options.port - the serial device path, such as 'COM3' or '/dev/ttyUSB0'.
+ * @param {string} options.path - the serial device path, such as 'COM3' or '/dev/ttyUSB0'.
  * @param {number} [options.baud_rate=9600]
  * @param {'none'|'odd'|'even'|0|1|2} [options.parity='none'] - 0 = none, 1 = odd, 2 = even.
  * @param {number} [options.data_bits=8] - 5, 6, 7 or 8.
@@ -22,14 +22,14 @@ function parity_name(parity) {
  * @returns {{ path: string, baudRate: number, parity: string, dataBits: number, stopBits: number }}
  */
 export function serial_settings({
-	port,
+	path,
 	baud_rate = 9600,
 	parity = 'none',
 	data_bits = 8,
 	stop_bits = 1,
 }) {
-	if (typeof port !== 'string' || port === '') {
-		throw new Error(`Invalid serial port: ${port}`);
+	if (typeof path !== 'string' || path === '') {
+		throw new Error(`Invalid serial port: ${path}`);
 	}
 	if (!Number.isInteger(baud_rate) || baud_rate < 1) {
 		throw new Error(`Invalid baud rate: ${baud_rate}`);
@@ -37,7 +37,7 @@ export function serial_settings({
 	if (!DATA_BITS.includes(data_bits)) throw new Error(`Invalid data bits: ${data_bits}`);
 	if (!STOP_BITS.includes(stop_bits)) throw new Error(`Invalid stop bits: ${stop_bits}`);
 	return {
-		path: port,
+		path,
 		baudRate: baud_rate,
 		parity: parity_name(parity),
 		dataBits: data_bits,

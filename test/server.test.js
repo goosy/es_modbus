@@ -7,7 +7,7 @@ import { set_serial_port_factory } from '../src/serial.js';
 import {
 	HOST, sleep, hex, rtu_frame, tcp_frame, collect,
 	create_memory_handler, fake_socket, Fake_Serial_Port,
-	start_tcp_server, stop_tcp_server, raw_connect,
+	start_tcp_server, stop_tcp_server, raw_connect, ephemeral_server,
 } from './helpers.js';
 
 /** Sends one TCP request to a server through a fake socket; returns the written responses. */
@@ -18,10 +18,10 @@ function tcp_exchange(server, frame) {
 }
 
 describe('Modbus_Server construction', () => {
-	test('defaults', () => {
-		const server = new Modbus_Server({});
-		assert.equal(server.host, '0.0.0.0');
-		assert.equal(server.port, 502);
+	test('tcp selects TCP on its host:port; defaults', () => {
+		const server = new Modbus_Server({}, { tcp: `${HOST}:1502` });
+		assert.equal(server.host, HOST);
+		assert.equal(server.port, 1502);
 		assert.equal(server.is_tcp, true);
 		assert.equal(server.protocol, 'tcp');
 		assert.ok(server.sockets instanceof Set);
@@ -30,26 +30,28 @@ describe('Modbus_Server construction', () => {
 		assert.equal(server.is_valid_unit_id(255), true);
 	});
 
-	test('a number port selects TCP', () => {
-		const server = new Modbus_Server({}, { host: HOST, port: 1502 });
-		assert.equal(server.host, HOST);
-		assert.equal(server.port, 1502);
-		assert.equal(server.is_tcp, true);
-		assert.equal(server.protocol, 'tcp');
+	test('an empty host binds 0.0.0.0 and an omitted port is 502', () => {
+		for (const [target, host, port] of [[':1502', '0.0.0.0', 1502], ['', '0.0.0.0', 502], [HOST, HOST, 502]]) {
+			const server = new Modbus_Server({}, { tcp: target });
+			assert.equal(server.host, host, target);
+			assert.equal(server.port, port, target);
+		}
 	});
 
-	test('a number port with rtu: true selects RTU-over-TCP', () => {
-		const server = new Modbus_Server({}, { port: 1502, rtu: true });
+	test('rtu_over_tcp selects RTU-over-TCP', () => {
+		const server = new Modbus_Server({}, { rtu_over_tcp: ':1502' });
 		assert.equal(server.is_tcp, true);
 		assert.equal(server.protocol, 'rtu_over_tcp');
+		assert.equal(server.port, 1502);
 		assert.ok(server.sockets instanceof Set);
 	});
 
-	test('a string port selects serial RTU on that device path, with default serial settings', () => {
-		const server = new Modbus_Server({}, { port: 'COM_NONEXISTENT' });
+	test('serial selects serial RTU on that device path, with default serial settings', () => {
+		const server = new Modbus_Server({}, { serial: 'COM_NONEXISTENT' });
 		assert.equal(server.is_tcp, false);
 		assert.equal(server.protocol, 'rtu');
-		assert.equal(server.port, 'COM_NONEXISTENT');
+		assert.equal(server.host, null);
+		assert.equal(server.port, null);
 		assert.equal(server.sockets, null);
 		assert.equal(server.serial_port, null);
 		assert.deepEqual(server.serial_settings, {
@@ -57,9 +59,39 @@ describe('Modbus_Server construction', () => {
 		});
 	});
 
+	test('exactly one transport option must be given', () => {
+		const message = /Exactly one of tcp, rtu_over_tcp, serial must be given/;
+		assert.throws(() => new Modbus_Server({}), message);
+		assert.throws(() => new Modbus_Server({}, {}), message);
+		assert.throws(() => new Modbus_Server({}, { tcp: null, serial: undefined }), message);
+		assert.throws(() => new Modbus_Server({}, { tcp: ':1502', serial: 'COM9' }), message);
+		assert.throws(() => new Modbus_Server({}, { tcp: ':1502', rtu_over_tcp: ':1503' }), message);
+		// A nullish transport option counts as not given
+		assert.equal(new Modbus_Server({}, { tcp: null, serial: 'COM9' }).protocol, 'rtu');
+	});
+
+	test('an invalid host:port target throws', () => {
+		for (const target of [':0', ':65536', ':abc', `${HOST}:`, '[::1', '[]:502', 1502]) {
+			assert.throws(() => new Modbus_Server({}, { tcp: target }), /Invalid host/, String(target));
+		}
+	});
+
+	test('a serial option on a TCP-family server throws', () => {
+		for (const transport of ['tcp', 'rtu_over_tcp']) {
+			for (const name of ['baud_rate', 'parity', 'data_bits', 'stop_bits']) {
+				assert.throws(
+					() => new Modbus_Server({}, { [transport]: ':1502', [name]: 1 }),
+					new RegExp(`Option ${name} does not apply to ${transport}`),
+				);
+			}
+			// A nullish option counts as not given
+			assert.doesNotThrow(() => new Modbus_Server({}, { [transport]: ':1502', baud_rate: null }));
+		}
+	});
+
 	test('the flat serial options set the serial settings', () => {
 		const server = new Modbus_Server({}, {
-			port: 'COM_NONEXISTENT', baud_rate: 19200, parity: 'even', data_bits: 7, stop_bits: 2,
+			serial: 'COM_NONEXISTENT', baud_rate: 19200, parity: 'even', data_bits: 7, stop_bits: 2,
 		});
 		assert.deepEqual(server.serial_settings, {
 			path: 'COM_NONEXISTENT', baudRate: 19200, parity: 'even', dataBits: 7, stopBits: 2,
@@ -68,7 +100,7 @@ describe('Modbus_Server construction', () => {
 
 	test('parity accepts 0 = none, 1 = odd, 2 = even', () => {
 		for (const [code, name] of [[0, 'none'], [1, 'odd'], [2, 'even']]) {
-			const server = new Modbus_Server({}, { port: 'COM_NONEXISTENT', parity: code });
+			const server = new Modbus_Server({}, { serial: 'COM_NONEXISTENT', parity: code });
 			assert.equal(server.serial_settings.parity, name);
 		}
 	});
@@ -79,20 +111,15 @@ describe('Modbus_Server construction', () => {
 			...[0, 9600.5, '9600'].map((baud_rate) => [{ baud_rate }, /Invalid baud rate/]),
 			...[4, 9, '8'].map((data_bits) => [{ data_bits }, /Invalid data bits/]),
 			...[0, 3, '1'].map((stop_bits) => [{ stop_bits }, /Invalid stop bits/]),
-			[{ port: '' }, /Invalid serial port/],
+			[{ serial: '' }, /Invalid serial port/],
+			[{ serial: 3 }, /Invalid serial port/],
 		];
 		for (const [options, error] of cases) {
 			assert.throws(
-				() => new Modbus_Server({}, { port: 'COM_NONEXISTENT', ...options }),
+				() => new Modbus_Server({}, { serial: 'COM_NONEXISTENT', ...options }),
 				error,
 				JSON.stringify(options),
 			);
-		}
-	});
-
-	test('a port that is neither a number nor a string throws', () => {
-		for (const port of [{}, [], true]) {
-			assert.throws(() => new Modbus_Server({}, { port }), /Invalid port/);
 		}
 	});
 });
@@ -112,7 +139,7 @@ describe('Modbus_Server serial lifecycle', () => {
 	});
 
 	test('start() creates the serial port from the settings and opens it', async () => {
-		const server = new Modbus_Server({}, { port: 'COM9', baud_rate: 19200 });
+		const server = new Modbus_Server({}, { serial: 'COM9', baud_rate: 19200 });
 		server.start();
 		await once(server, 'start');
 		assert.equal(created.length, 1);
@@ -124,7 +151,7 @@ describe('Modbus_Server serial lifecycle', () => {
 	});
 
 	test('stop() closes the port; start() re-opens the same port', async () => {
-		const server = new Modbus_Server({}, { port: 'COM9' });
+		const server = new Modbus_Server({}, { serial: 'COM9' });
 		server.start();
 		await once(server, 'start');
 		server.stop();
@@ -137,7 +164,7 @@ describe('Modbus_Server serial lifecycle', () => {
 	});
 
 	test('start() on an open port closes and re-opens it', async () => {
-		const server = new Modbus_Server({}, { port: 'COM9' });
+		const server = new Modbus_Server({}, { serial: 'COM9' });
 		server.start();
 		await once(server, 'start');
 		const stopped = once(server, 'stop');
@@ -150,7 +177,7 @@ describe('Modbus_Server serial lifecycle', () => {
 	test('an open failure is emitted as error', async () => {
 		set_serial_port_factory(async (settings) => Object.assign(new Fake_Serial_Port(settings), { fail_open: true }));
 		try {
-			const server = new Modbus_Server({}, { port: 'COM9' });
+			const server = new Modbus_Server({}, { serial: 'COM9' });
 			server.start();
 			const [error] = await once(server, 'error');
 			assert.equal(error.message, 'open failed');
@@ -166,7 +193,7 @@ describe('Modbus_Server serial lifecycle', () => {
 			return new Fake_Serial_Port(settings);
 		});
 		try {
-			const server = new Modbus_Server({}, { port: 'COM9' });
+			const server = new Modbus_Server({}, { serial: 'COM9' });
 			server.start();
 			const [error] = await once(server, 'error');
 			assert.equal(error.message, 'no native binding');
@@ -209,26 +236,26 @@ describe('Modbus_Exception', () => {
 describe('Modbus_Server unit IDs', () => {
 	test('null, undefined, "all" and "*" accept every ID', () => {
 		for (const value of [null, undefined, 'all', '*']) {
-			const server = new Modbus_Server({}, { unit_id: value });
+			const server = new Modbus_Server({}, { tcp: ':1502', unit_id: value });
 			assert.equal(server.accept_all_units, true, String(value));
 			for (const id of [0, 1, 127, 255]) assert.equal(server.is_valid_unit_id(id), true);
 		}
 	});
 
 	test('a number accepts only that ID', () => {
-		const server = new Modbus_Server({}, { unit_id: 7 });
+		const server = new Modbus_Server({}, { tcp: ':1502', unit_id: 7 });
 		assert.equal(server.is_valid_unit_id(7), true);
 		assert.equal(server.is_valid_unit_id(8), false);
 		assert.equal(server.is_valid_unit_id(0), false);
 	});
 
 	test('an array accepts exactly those IDs', () => {
-		const server = new Modbus_Server({}, { unit_id: [1, 2, 255] });
+		const server = new Modbus_Server({}, { tcp: ':1502', unit_id: [1, 2, 255] });
 		assert.deepEqual([0, 1, 2, 3, 255].map((id) => server.is_valid_unit_id(id)), [false, true, true, false, true]);
 	});
 
 	test('set_unit_ids replaces the accepted set', () => {
-		const server = new Modbus_Server({}, { unit_id: 1 });
+		const server = new Modbus_Server({}, { tcp: ':1502', unit_id: 1 });
 		server.set_unit_ids([5, 6]);
 		assert.equal(server.is_valid_unit_id(1), false);
 		assert.equal(server.is_valid_unit_id(5), true);
@@ -238,12 +265,12 @@ describe('Modbus_Server unit IDs', () => {
 
 	test('an ID outside 0..255 throws', () => {
 		for (const value of [256, -1, 1.5, '1', [1, 300], [true]]) {
-			assert.throws(() => new Modbus_Server({}, { unit_id: value }), /Invalid unit ID/, JSON.stringify(value));
+			assert.throws(() => new Modbus_Server({}, { tcp: ':1502', unit_id: value }), /Invalid unit ID/, JSON.stringify(value));
 		}
 	});
 
 	test('0 is an ordinary ID, not a synonym for every ID', () => {
-		const server = new Modbus_Server({}, { unit_id: 0 });
+		const server = new Modbus_Server({}, { tcp: ':1502', unit_id: 0 });
 		assert.equal(server.is_valid_unit_id(0), true);
 		assert.equal(server.is_valid_unit_id(1), false);
 	});
@@ -254,7 +281,7 @@ describe('Modbus_Server request handling (TCP framing)', () => {
 	let server;
 	beforeEach(() => {
 		memory = create_memory_handler();
-		server = new Modbus_Server(memory.handler, { port: 0 });
+		server = new Modbus_Server(memory.handler, { tcp: ':1502' });
 	});
 
 	test('FC 1 reads coils packed LSB-first', () => {
@@ -808,7 +835,7 @@ describe('Modbus_Server request handling (RTU framing)', () => {
 	beforeEach(() => {
 		memory = create_memory_handler();
 		port = new Fake_Serial_Port();
-		server = new Modbus_Server(memory.handler, { port: 'COM9' });
+		server = new Modbus_Server(memory.handler, { serial: 'COM9' });
 		server.serial_port = port;
 	});
 
@@ -939,7 +966,7 @@ describe('Modbus_Server request handling (RTU framing)', () => {
 
 	test('the silence option sets the silence on a serial port', (t) => {
 		t.mock.timers.enable({ apis: ['setTimeout'] });
-		server = new Modbus_Server(memory.handler, { port: 'COM9', silence: 200 });
+		server = new Modbus_Server(memory.handler, { serial: 'COM9', silence: 200 });
 		server.serial_port = port;
 		server.set_rtu();
 		port.emit('data', rtu_frame('010800000000'));
@@ -952,7 +979,7 @@ describe('Modbus_Server request handling (RTU framing)', () => {
 	test('the silence is 3.5 character times when that is longer than 50 ms', (t) => {
 		t.mock.timers.enable({ apis: ['setTimeout'] });
 		// 300 baud, 8E1: 11 bits a character, 3.5 characters = 128.3 ms
-		server = new Modbus_Server(memory.handler, { port: 'COM9', baud_rate: 300, parity: 'even' });
+		server = new Modbus_Server(memory.handler, { serial: 'COM9', baud_rate: 300, parity: 'even' });
 		server.serial_port = port;
 		server.set_rtu();
 		port.emit('data', rtu_frame('010800000000'));
@@ -1057,7 +1084,7 @@ describe('Modbus_Server TCP lifecycle', () => {
 	});
 
 	test('error is emitted when the port is in use', async () => {
-		const other = new Modbus_Server(memory.handler, { host: HOST, port });
+		const other = new Modbus_Server(memory.handler, { tcp: `${HOST}:${port}` });
 		const error = once(other, 'error');
 		other.start();
 		const [reason] = await error;
@@ -1077,12 +1104,6 @@ describe('Modbus_Server TCP lifecycle', () => {
 });
 
 describe('Modbus_Server RTU-over-TCP', () => {
-	test('rtu is ignored for a serial port', () => {
-		const server = new Modbus_Server({}, { port: 'COM_NONEXISTENT', rtu: true });
-		assert.equal(server.protocol, 'rtu');
-		assert.equal(server.sockets, null);
-	});
-
 	/** Sends one RTU request body through a fake socket; returns the written responses as hex. */
 	const rtu_socket_exchange = (server, body) => {
 		const socket = fake_socket();
@@ -1093,17 +1114,17 @@ describe('Modbus_Server RTU-over-TCP', () => {
 	test('responses carry a CRC and go to the socket', () => {
 		const memory = create_memory_handler();
 		memory.unit(1).holding[0] = 5;
-		const server = new Modbus_Server(memory.handler, { port: 1502, rtu: true });
+		const server = new Modbus_Server(memory.handler, { rtu_over_tcp: ':1502' });
 		assert.deepEqual(rtu_socket_exchange(server, '010300000001'), [rtu_frame('0103020005').toString('hex')]);
 	});
 
 	test('an unsupported function code gets exception 0x01 at once', () => {
-		const server = new Modbus_Server(create_memory_handler().handler, { port: 1502, rtu: true });
+		const server = new Modbus_Server(create_memory_handler().handler, { rtu_over_tcp: ':1502' });
 		assert.deepEqual(rtu_socket_exchange(server, '010800000000'), [rtu_frame('018801').toString('hex')]);
 	});
 
 	test('frames are delimited by length: split and coalesced', () => {
-		const server = new Modbus_Server(create_memory_handler().handler, { port: 1502, rtu: true });
+		const server = new Modbus_Server(create_memory_handler().handler, { rtu_over_tcp: ':1502' });
 		const socket = fake_socket();
 		const frame = rtu_frame('010300000001');
 		server.on_data(Buffer.concat([frame, frame.subarray(0, 4)]), socket);
@@ -1113,7 +1134,7 @@ describe('Modbus_Server RTU-over-TCP', () => {
 
 	test('the silence option sets the silence on TCP', (t) => {
 		t.mock.timers.enable({ apis: ['setTimeout'] });
-		const server = new Modbus_Server(create_memory_handler().handler, { port: 1502, rtu: true, silence: 10 });
+		const server = new Modbus_Server(create_memory_handler().handler, { rtu_over_tcp: ':1502', silence: 10 });
 		const socket = fake_socket();
 		server.on_data(Buffer.concat([hex('011000000078f0'), rtu_frame('010300000001')]), socket);
 		t.mock.timers.tick(9);
@@ -1124,13 +1145,13 @@ describe('Modbus_Server RTU-over-TCP', () => {
 
 	test('an invalid silence throws at construction', () => {
 		for (const silence of [0, -5, '50']) {
-			assert.throws(() => new Modbus_Server({}, { port: 1502, silence }), /Invalid silence/);
-			assert.throws(() => new Modbus_Server({}, { port: 'COM9', silence }), /Invalid silence/);
+			assert.throws(() => new Modbus_Server({}, { tcp: ':1502', silence }), /Invalid silence/);
+			assert.throws(() => new Modbus_Server({}, { serial: 'COM9', silence }), /Invalid silence/);
 		}
 	});
 
 	test('an MBAP frame is not served', () => {
-		const server = new Modbus_Server(create_memory_handler().handler, { port: 1502, rtu: true });
+		const server = new Modbus_Server(create_memory_handler().handler, { rtu_over_tcp: ':1502' });
 		const socket = fake_socket();
 		server.on_data(tcp_frame(1, '010300000001'), socket);
 		assert.deepEqual(socket.written, []);
@@ -1138,16 +1159,16 @@ describe('Modbus_Server RTU-over-TCP', () => {
 
 	test('serial bus semantics: a non-accepted unit and a broadcast are not answered', () => {
 		const memory = create_memory_handler();
-		const server = new Modbus_Server(memory.handler, { port: 1502, rtu: true, unit_id: [0, 1] });
+		const server = new Modbus_Server(memory.handler, { rtu_over_tcp: ':1502', unit_id: [0, 1] });
 		assert.deepEqual(rtu_socket_exchange(server, '020300000001'), []);
 		assert.deepEqual(rtu_socket_exchange(server, '000600010005'), []);
 		assert.equal(memory.unit(0).holding[1], 5);
 	});
 
-	test('rtu: true serves RTU frames on TCP sockets', async () => {
+	test('rtu_over_tcp serves RTU frames on TCP sockets', async () => {
 		const memory = create_memory_handler();
 		memory.unit(1).holding[0] = 5;
-		const { server, port } = await start_tcp_server(memory.handler, { rtu: true });
+		const { server, port } = await start_tcp_server(memory.handler, { rtu_over_tcp: true });
 		try {
 			const socket = await raw_connect(port);
 			socket.write(rtu_frame('010300000001'));
@@ -1179,7 +1200,7 @@ describe('Modbus_Server start() / stop() promises (TCP)', () => {
 	});
 
 	test('start() resolves after start, stop() after stop', async () => {
-		server = new Modbus_Server({}, { host: HOST, port: 0 });
+		server = ephemeral_server({});
 		const events = record_events(server);
 		await server.start();
 		assert.deepEqual(events, ['start']);
@@ -1190,7 +1211,7 @@ describe('Modbus_Server start() / stop() promises (TCP)', () => {
 	});
 
 	test('stop() resolves at once when not started', async () => {
-		server = new Modbus_Server({}, { host: HOST, port: 0 });
+		server = ephemeral_server({});
 		const events = record_events(server);
 		await server.stop();
 		await server.start();
@@ -1200,7 +1221,7 @@ describe('Modbus_Server start() / stop() promises (TCP)', () => {
 	});
 
 	test('stop() destroys the live sockets before it resolves', async () => {
-		server = new Modbus_Server({}, { host: HOST, port: 0 });
+		server = ephemeral_server({});
 		await server.start();
 		const socket = await raw_connect(server.server.address().port);
 		await sleep(20);
@@ -1211,7 +1232,7 @@ describe('Modbus_Server start() / stop() promises (TCP)', () => {
 	});
 
 	test('start() while started restarts: stop, then start; live sockets are destroyed', async () => {
-		server = new Modbus_Server({}, { host: HOST, port: 0 });
+		server = ephemeral_server({});
 		await server.start();
 		const socket = await raw_connect(server.server.address().port);
 		await sleep(20);
@@ -1224,7 +1245,7 @@ describe('Modbus_Server start() / stop() promises (TCP)', () => {
 	});
 
 	test('a start() during a start joins it; a stop() during a stop joins it', async () => {
-		server = new Modbus_Server({}, { host: HOST, port: 0 });
+		server = ephemeral_server({});
 		const events = record_events(server);
 		const a = server.start();
 		const b = server.start();
@@ -1238,7 +1259,7 @@ describe('Modbus_Server start() / stop() promises (TCP)', () => {
 	});
 
 	test('start(); stop(); start(); runs in call order', async () => {
-		server = new Modbus_Server({}, { host: HOST, port: 0 });
+		server = ephemeral_server({});
 		const events = record_events(server);
 		await Promise.all([server.start(), server.stop(), server.start()]);
 		assert.deepEqual(events, ['start', 'stop', 'start']);
@@ -1246,7 +1267,7 @@ describe('Modbus_Server start() / stop() promises (TCP)', () => {
 	});
 
 	test('a start() from the start listener restarts instead of joining', async () => {
-		server = new Modbus_Server({}, { host: HOST, port: 0 });
+		server = ephemeral_server({});
 		const events = record_events(server);
 		let restarted;
 		server.once('start', () => {
@@ -1260,7 +1281,7 @@ describe('Modbus_Server start() / stop() promises (TCP)', () => {
 	describe('a port in use', () => {
 		let other;
 		beforeEach(async () => {
-			other = new Modbus_Server({}, { host: HOST, port: 0 });
+			other = ephemeral_server({});
 			await other.start();
 		});
 		afterEach(async () => {
@@ -1268,13 +1289,13 @@ describe('Modbus_Server start() / stop() promises (TCP)', () => {
 		});
 
 		test('without an error listener, start() rejects and nothing is emitted', async () => {
-			server = new Modbus_Server({}, { host: HOST, port: other.server.address().port });
+			server = new Modbus_Server({}, { tcp: `${HOST}:${other.server.address().port}` });
 			await assert.rejects(server.start(), { code: 'EADDRINUSE' });
 			assert.equal(server.server.listening, false);
 		});
 
 		test('with an error listener, the error is emitted and the rejection is handled', async () => {
-			server = new Modbus_Server({}, { host: HOST, port: other.server.address().port });
+			server = new Modbus_Server({}, { tcp: `${HOST}:${other.server.address().port}` });
 			const errors = [];
 			server.on('error', (error) => errors.push(error));
 			const unhandled = [];
@@ -1294,13 +1315,13 @@ describe('Modbus_Server start() / stop() promises (TCP)', () => {
 		});
 
 		test('with an error listener, an awaiting caller also gets the rejection', async () => {
-			server = new Modbus_Server({}, { host: HOST, port: other.server.address().port });
+			server = new Modbus_Server({}, { tcp: `${HOST}:${other.server.address().port}` });
 			server.on('error', () => { });
 			await assert.rejects(server.start(), { code: 'EADDRINUSE' });
 		});
 
 		test('a later start() retries', async () => {
-			server = new Modbus_Server({}, { host: HOST, port: other.server.address().port });
+			server = new Modbus_Server({}, { tcp: `${HOST}:${other.server.address().port}` });
 			await assert.rejects(server.start());
 			await other.stop();
 			await server.start();
@@ -1310,7 +1331,7 @@ describe('Modbus_Server start() / stop() promises (TCP)', () => {
 		test('handled by nobody, the failure terminates the process', async () => {
 			const url = new URL('../src/ModbusServer.js', import.meta.url).href;
 			const script = `import { Modbus_Server } from '${url}';
-				new Modbus_Server({}, { host: '${HOST}', port: ${other.server.address().port} }).start();`;
+				new Modbus_Server({}, { tcp: '${HOST}:${other.server.address().port}' }).start();`;
 			const [exit_code, stderr] = await new Promise((resolve) => {
 				execFile(process.execPath, ['--input-type=module', '-e', script], (error, _, stderr) => {
 					resolve([error?.code ?? 0, stderr]);
@@ -1327,7 +1348,7 @@ describe('Modbus_Server start() / stop() promises (serial)', () => {
 	after(() => set_serial_port_factory(null));
 
 	test('start() resolves after start, stop() after stop', async () => {
-		const server = new Modbus_Server({}, { port: 'COM9' });
+		const server = new Modbus_Server({}, { serial: 'COM9' });
 		const events = record_events(server);
 		await server.start();
 		assert.deepEqual(events, ['start']);
@@ -1338,7 +1359,7 @@ describe('Modbus_Server start() / stop() promises (serial)', () => {
 	});
 
 	test('start() while open closes and re-opens the port', async () => {
-		const server = new Modbus_Server({}, { port: 'COM9' });
+		const server = new Modbus_Server({}, { serial: 'COM9' });
 		await server.start();
 		const events = record_events(server);
 		await server.start();
@@ -1348,7 +1369,7 @@ describe('Modbus_Server start() / stop() promises (serial)', () => {
 	});
 
 	test('stop() resolves at once after the port closed by itself', async () => {
-		const server = new Modbus_Server({}, { port: 'COM9' });
+		const server = new Modbus_Server({}, { serial: 'COM9' });
 		await server.start();
 		const stopped = once(server, 'stop');
 		server.serial_port.close();
@@ -1359,7 +1380,7 @@ describe('Modbus_Server start() / stop() promises (serial)', () => {
 	});
 
 	test('an open failure rejects start(); without a listener nothing is emitted', async () => {
-		const server = new Modbus_Server({}, { port: 'COM9' });
+		const server = new Modbus_Server({}, { serial: 'COM9' });
 		const ports = [];
 		set_serial_port_factory(async (settings) => {
 			const port = Object.assign(new Fake_Serial_Port(settings), { fail_open: true });
@@ -1384,7 +1405,7 @@ describe('Modbus_Server start() / stop() promises (serial)', () => {
 			if (++attempts === 1) throw new Error('no native binding');
 			return new Fake_Serial_Port(settings);
 		});
-		const server = new Modbus_Server({}, { port: 'COM9' });
+		const server = new Modbus_Server({}, { serial: 'COM9' });
 		let retried;
 		server.once('error', () => {
 			retried = server.start();

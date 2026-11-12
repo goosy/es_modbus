@@ -9,18 +9,33 @@
 ```js
 import { Modbus_Server } from 'es-modbus';
 
-const server = new Modbus_Server(handler, options);
+const server = new Modbus_Server(handler, { tcp: '0.0.0.0:502' });
 await server.start();
 ```
+
+传输选项 `tcp`、`rtu_over_tcp`、`serial` 中恰好一个选定传输方式，它的字符串值就是目标（见
+`spec-protocol.zh-cn.md` 的“传输选项”和“`host:port` 目标”）。没有默认的传输方式。
+
+```js
+const tcp = new Modbus_Server(handler, { tcp: '0.0.0.0:502' });
+const gateway = new Modbus_Server(handler, { rtu_over_tcp: ':4001' });
+const serial = new Modbus_Server(handler, { serial: 'COM4', baud_rate: 19200 });
+```
+
+| 选项           | 传输方式     | 行为                                                            |
+| -------------- | ------------ | --------------------------------------------------------------- |
+| `tcp`          | TCP          | 监听 `host:port`；每个连接使用带 MBAP 的 Modbus TCP 帧格式。主机为空时绑定 `0.0.0.0`。 |
+| `rtu_over_tcp` | RTU-over-TCP | 监听 `host:port`；每个连接使用 RTU 帧（单元 ID + PDU + CRC16）。主机为空时绑定 `0.0.0.0`。 |
+| `serial`       | RTU          | 打开该串口设备路径，作为 Modbus RTU 从站应答。不接受串口实例。   |
+
+RTU 服务端就是串行线路上的 Modbus 从站：它没有连接，并以 CRC-16 封装响应。三种传输方式的请求
+处理（单元 ID 路由、`handler`、异常响应）完全相同；只有帧格式和生命周期事件不同。
 
 ### options
 
 | 选项      | 默认值      | 含义                                                                          |
 | --------- | ----------- | ----------------------------------------------------------------------------- |
 | `name`    | `'Modbus_Server'` | 用于区分实例的名称，例如在日志中；保存在 `name` 属性中。库本身不使用它。 |
-| `host`    | `'0.0.0.0'` | 绑定地址（仅 TCP）。                                                          |
-| `port`    | `502`       | `number` → 监听该 TCP 端口。`string` → 作为串口设备路径打开。其他值抛出 `Invalid port`；不接受串口实例。 |
-| `rtu`     | `false`     | `port` 为 `number` 时，在接受的 TCP 套接字上使用 RTU 帧格式（RTU-over-TCP）。串口忽略此项。 |
 | `silence` | `50`        | 静默时间（ms），超过之后处理不完整帧留下的残留字节（见 `spec-protocol.zh-cn.md` 的“帧的界定”）。必须是有限的正数（否则抛出 `Invalid silence`）。串口上至少为 3.5 个字符时间（19200 波特以上为 1.75 ms）。 |
 | `unit_id` | 全部        | 应答哪些 Modbus 单元 ID；省略时为所有 ID（见 `set_unit_ids`）。              |
 | `baud_rate` | `9600`    | 串口波特率，正整数（否则抛出 `Invalid baud rate`）。 |
@@ -28,21 +43,14 @@ await server.start();
 | `data_bits` | `8`       | 串口数据位：`5`、`6`、`7` 或 `8`（否则抛出 `Invalid data bits`）。 |
 | `stop_bits` | `1`       | 串口停止位：`1`、`1.5` 或 `2`（否则抛出 `Invalid stop bits`）。 |
 
-串口选项（`baud_rate`、`parity`、`data_bits`、`stop_bits`）只在 `port` 为串口设备路径时生效，对 TCP
-端口会被忽略。它们在构造时校验，无效时构造函数抛出异常；串口本身由 `start()` 创建并打开。
+不适用于所选传输方式的选项会抛错（见 `spec-protocol.zh-cn.md` 的“传输选项”）：
 
-### 传输方式选择
+| 选项 | `tcp` | `rtu_over_tcp` | `serial` |
+| --- | --- | --- | --- |
+| `baud_rate`、`parity`、`data_bits`、`stop_bits` | 抛错 | 抛错 | 适用 |
+| `name`、`silence`、`unit_id` | 适用 | 适用 | 适用 |
 
-服务端的传输方式在构造时由 `port` 和 `rtu` 决定：
-
-| `port`                        | `rtu`   | 传输方式       | 行为                                                            |
-| ----------------------------- | ------- | -------------- | --------------------------------------------------------------- |
-| `number`                      | `false` | TCP            | 监听 `host:port`；每个连接使用带 MBAP 的 Modbus TCP 帧格式。     |
-| `number`                      | `true`  | RTU-over-TCP   | 监听 `host:port`；每个连接使用 RTU 帧（单元 ID + PDU + CRC16）。 |
-| `string`                      | 忽略    | RTU            | 打开串口，作为 Modbus RTU 从站应答。                             |
-
-RTU 服务端就是串行线路上的 Modbus 从站：它没有连接，并以 CRC-16 封装响应。三种传输方式的请求
-处理（单元 ID 路由、`handler`、异常响应）完全相同；只有帧格式和生命周期事件不同。
+串口选项在构造时校验，无效时构造函数抛出异常；串口本身由 `start()` 创建并打开。
 
 ### `set_unit_ids(unit_id)`
 

@@ -33,7 +33,7 @@
 //   set_serial_port_factory(serial_port_factory);
 //   const bridge = await create_serial_bridge(
 //       { serial: 'COM_A' }, { connect: server_port }, { to_a: { chunk: 1 } });
-//   const client = new Modbus_Client(null, { port: 'COM_A', baud_rate: 19200, reconnect_time: 0 });
+//   const client = new Modbus_Client({ serial: 'COM_A', baud_rate: 19200, reconnect_time: 0 });
 //   ...
 //   bridge.inject('a', Buffer.from([0x00]));   // noise toward `a`
 //   bridge.unplug();                           // the device is gone

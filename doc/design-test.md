@@ -39,7 +39,9 @@ missing or older than any file in `src/`.
 ## Fakes and isolation
 
 - Servers listen on `127.0.0.1` with port `0`, so every test gets a free ephemeral port and test
-  files can run in parallel.
+  files can run in parallel. The public options do not accept port `0`, so a test server is built
+  with a fixed target and its `port` property is then set to `0` (`ephemeral_server` in
+  `test/helpers.js`).
 - Client tests use a raw `node:net` server as a fake slave, so the exact bytes on the wire can be
   checked and malformed or out-of-order replies can be produced.
 - Server tests feed frames to `on_data` through a fake socket or a fake serial port where no

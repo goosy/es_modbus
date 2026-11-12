@@ -72,7 +72,7 @@ describe('build output dist/modbus.js', { skip }, () => {
 
 	test('importing the bundle does not load the native addon; the first serial start does', async () => {
 		assert.equal(native_addon_loaded(), false);
-		const server = new bundle.Modbus_Server({}, { port: 'COM_NONEXISTENT_ES_MODBUS' });
+		const server = new bundle.Modbus_Server({}, { serial: 'COM_NONEXISTENT_ES_MODBUS' });
 		server.start();
 		const [error] = await once(server, 'error');
 		// Opening a missing device fails in the native addon, which therefore loaded
@@ -86,13 +86,15 @@ describe('build output dist/modbus.js', { skip }, () => {
 		let client;
 		before(async () => {
 			memory = create_memory_handler();
-			server = new bundle.Modbus_Server(memory.handler, { host: HOST, port: 0, unit_id: [18, 19] });
+			server = new bundle.Modbus_Server(memory.handler, { tcp: `${HOST}:502`, unit_id: [18, 19] });
+			// An ephemeral port, which the options do not accept (see helpers.js, ephemeral_server)
+			server.port = 0;
 			server.on('error', () => { });
 			const started = once(server, 'start');
 			server.start();
 			await started;
-			client = new bundle.Modbus_Client(HOST, {
-				port: server.server.address().port, reconnect_time: 0, timeout: 1000, delay: 0,
+			client = new bundle.Modbus_Client({
+				tcp: `${HOST}:${server.server.address().port}`, reconnect_time: 0, timeout: 1000, delay: 0,
 			});
 			client.on('error', () => { });
 			await client.connect();

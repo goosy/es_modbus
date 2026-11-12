@@ -7,33 +7,35 @@ Master/client. `extends EventEmitter`.
 ```js
 import { Modbus_Client } from 'es-modbus';
 
-const client = new Modbus_Client(address, options);
+const client = new Modbus_Client(options);
 ```
 
-- `address`
-  - **string** → TCP-family transport: TCP, or RTU-over-TCP when `options.rtu` is true.
-  - **non-string** (for example `null`) → serial RTU transport on the device path
-    `options.port`, with the serial options below. The client creates the serial port itself;
-    it does not accept a port instance.
+The constructor takes a single options object. Exactly one of the transport options `tcp`,
+`rtu_over_tcp` and `serial` selects the transport, and its string value is the target (see
+"Transport options" and "`host:port` target" in `spec-protocol.md`):
 
 ```js
-const client = new Modbus_Client(null, { port: 'COM3', baud_rate: 19200, parity: 'even' });
+const tcp = new Modbus_Client({ tcp: '10.0.0.5:502', timeout: 500 });
+const gateway = new Modbus_Client({ rtu_over_tcp: 'gateway:4001' });
+const serial = new Modbus_Client({ serial: 'COM3', baud_rate: 19200, parity: 'even' });
 ```
+
+- `tcp`, `rtu_over_tcp` — the server to connect to, as `host:port`; the host must be named.
+- `serial` — the serial device path. The client creates the serial port itself; it does not
+  accept a port instance.
 
 ### options
 
 | Option           | Default | Meaning                                                                 |
 | ---------------- | ------- | --------------------------------------------------------------------- |
 | `name`           | `'Modbus_Client'` | A name for telling instances apart, e.g. in logs; kept in the `name` property. The library does not use it itself. |
-| `port`           | `502`   | TCP port. For a serial client, the serial device path (a non-empty `string`; anything else throws `Invalid serial port`). |
-| `rtu`            | `false` | With a string address, use RTU framing over the TCP socket.           |
 | `timeout`        | `1000`  | Per-transaction response timeout, ms, counted from when the request's frame is written. On expiry the request rejects and `timeout` is emitted. |
 | `delay`          | `20`    | Minimum gap before the next frame write, ms (send pacing; see "Ordering / pacing"). |
-| `turnaround`     | `100`   | RTU and RTU-over-TCP: minimum wait after a broadcast before the next frame write, ms (the serial line "turnaround delay"). Ignored on TCP. |
+| `turnaround`     | `100`   | RTU and RTU-over-TCP: minimum wait after a broadcast before the next frame write, ms (the serial line "turnaround delay"). |
 | `reconnect_time` | `10000` | Initial reconnect delay for TCP and RTU-over-TCP, ms; the delay grows from there (see "Reconnect"). `> 0` also makes the constructor connect immediately (for serial, open the port); `0` disables the timed reconnect. Both apply only while `enable_reconnect` is true. |
 | `reconnect_max`  | `60000` | TCP and RTU-over-TCP: upper bound of the growing reconnect delay, ms. A finite positive number (else `Invalid reconnect_max`); a value below `reconnect_time` acts as `reconnect_time`. |
-| `max_timeouts`   | `3`     | TCP and RTU-over-TCP: consecutive timeouts after which the connection is taken as dead and closed (see "Dead-link detection"). A non-negative integer (else `Invalid max_timeouts`); `0` disables the detection. Ignored on serial. |
-| `keep_alive`     | `10000` | TCP and RTU-over-TCP: idle time in ms before the socket sends its first TCP keep-alive probe; `0` disables keep-alive. A non-negative finite number (else `Invalid keep_alive`). Ignored on serial. |
+| `max_timeouts`   | `3`     | TCP and RTU-over-TCP: consecutive timeouts after which the connection is taken as dead and closed (see "Dead-link detection"). A non-negative integer (else `Invalid max_timeouts`); `0` disables the detection. |
+| `keep_alive`     | `10000` | TCP and RTU-over-TCP: idle time in ms before the socket sends its first TCP keep-alive probe; `0` disables keep-alive. A non-negative finite number (else `Invalid keep_alive`). |
 | `silence`        | `50`    | Silence in ms after which the bytes left of an incomplete frame are resolved (see "Frame delimiting" in `spec-protocol.md`). A finite positive number (else `Invalid silence`). On a serial port at least 3.5 character times (1.75 ms above 19200 baud). |
 | `modicon_zero_based` | `false` | `true` selects 0-based Modicon point numbering (see below). |
 | `baud_rate`      | `9600`  | Serial baud rate, a positive integer (else `Invalid baud rate`). |
@@ -41,9 +43,18 @@ const client = new Modbus_Client(null, { port: 'COM3', baud_rate: 19200, parity:
 | `data_bits`      | `8`     | Serial data bits: `5`, `6`, `7` or `8` (else `Invalid data bits`). |
 | `stop_bits`      | `1`     | Serial stop bits: `1`, `1.5` or `2` (else `Invalid stop bits`). |
 
-The serial options (`baud_rate`, `parity`, `data_bits`, `stop_bits`) apply only to a serial
-client and are ignored for a TCP-family client. They are checked at construction, which throws on
-an invalid one; the serial port itself is created when it is first opened (see "Serial port").
+An option that does not apply to the selected transport throws (see "Transport options" in
+`spec-protocol.md`):
+
+| Option | `tcp` | `rtu_over_tcp` | `serial` |
+| --- | --- | --- | --- |
+| `baud_rate`, `parity`, `data_bits`, `stop_bits` | throws | throws | applies |
+| `reconnect_max`, `max_timeouts`, `keep_alive` | applies | applies | throws |
+| `turnaround` | throws | applies | applies |
+| `name`, `timeout`, `delay`, `silence`, `reconnect_time`, `modicon_zero_based` | applies | applies | applies |
+
+The serial options are checked at construction, which throws on an invalid one; the
+serial port itself is created when it is first opened (see "Serial port").
 
 The constructor opens the connection automatically when `reconnect_time > 0`. With
 `reconnect_time = 0` the client does not reconnect by itself after the connection is lost, but

@@ -150,9 +150,21 @@ export function collect(stream, length, ms = 500) {
 	});
 }
 
-/** Starts a Modbus_Server on an ephemeral TCP port. */
+/**
+ * Makes a TCP-family Modbus_Server on HOST that listens on an ephemeral port, which the public
+ * options do not accept: the server is built with a fixed target, then its `port` is set to 0.
+ * `rtu_over_tcp: true` selects RTU-over-TCP.
+ */
+export function ephemeral_server(handler, { rtu_over_tcp = false, ...options } = {}) {
+	const transport = rtu_over_tcp ? 'rtu_over_tcp' : 'tcp';
+	const server = new Modbus_Server(handler, { [transport]: `${HOST}:502`, ...options });
+	server.port = 0;
+	return server;
+}
+
+/** Starts a Modbus_Server on an ephemeral TCP port (options as for `ephemeral_server`). */
 export async function start_tcp_server(handler, options = {}) {
-	const server = new Modbus_Server(handler, { host: HOST, port: 0, ...options });
+	const server = ephemeral_server(handler, options);
 	server.on('error', () => { });
 	server.on('socket_error', () => { });
 	const started = once(server, 'start');
@@ -221,10 +233,14 @@ export async function closed_port() {
 	return port;
 }
 
-/** Creates a TCP client that does not auto-reconnect and swallows `error` events. */
-export function create_client(port, options = {}) {
-	const client = new Modbus_Client(HOST, {
-		port, reconnect_time: 0, timeout: 500, delay: 0, ...options,
+/**
+ * Creates a TCP client to HOST that does not auto-reconnect and swallows `error` events.
+ * `rtu_over_tcp: true` selects RTU-over-TCP.
+ */
+export function create_client(port, { rtu_over_tcp = false, ...options } = {}) {
+	const transport = rtu_over_tcp ? 'rtu_over_tcp' : 'tcp';
+	const client = new Modbus_Client({
+		[transport]: `${HOST}:${port}`, reconnect_time: 0, timeout: 500, delay: 0, ...options,
 	});
 	client.on('error', () => { });
 	return client;

@@ -853,7 +853,7 @@ describe('silence_option', () => {
 });
 
 describe('silence_time', () => {
-	const settings = (options) => serial_settings({ port: 'COM9', ...options });
+	const settings = (options) => serial_settings({ path: 'COM9', ...options });
 
 	test('is the silence when it is longer than 3.5 character times', () => {
 		assert.equal(silence_time(settings(), 50), 50);

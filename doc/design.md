@@ -7,21 +7,31 @@ file; so far [design-test.md](./design-test.md), the test suite.
 
 ## Transport selection
 
-- **Client.** The constructor sets `this.protocol`: `tcp`, `rtu_over_tcp` (string address with
-  `rtu: true`), or `rtu` (non-string address). For `rtu` it checks the serial options with
-  `serial_settings` and calls `set_serial` with the result; the port is created later.
+- **`src/transport.js`.** Shared by both constructors, which call it in the order the spec fixes:
+  `select_transport` picks the one given transport option (nullish counts as not given) and
+  returns it with its target; for `tcp` and `rtu_over_tcp`, `parse_host_port(target, server)`
+  returns `{ host, port }`, where a target starting with `[` must match `[<host>]` with an
+  optional `:<port>`, an unbracketed target is split only at a single `:` (more than one is a
+  bare IPv6 address), the port must be all digits in `1..65535`, and an empty host is `0.0.0.0`
+  when `server` is true and invalid otherwise; `check_applicable` then throws for the first given
+  option that a side's exclusion list (`CLIENT_EXCLUSIONS`, `SERVER_EXCLUSIONS`) bars from the
+  selected transport. The values are checked after that.
+- **Client.** The constructor sets `this.protocol` from the transport option: `tcp`,
+  `rtu_over_tcp`, or `rtu` for `serial`. For the TCP family it calls `set_tcp(host, port)`; for
+  `rtu` it checks the serial options with `serial_settings` and calls `set_serial` with the
+  result; the port is created later.
 - **Decoding.** Response decoding branches on `protocol === 'tcp'` **only**, so `rtu_over_tcp` is
   decoded with the RTU parser (`parse_rtu_response`).
-- **Server.** The constructor keeps `port` as given: a `number` (TCP) or a `string` device path,
-  whose options `serial_settings` checks into `this.serial_settings`; anything else throws.
-  It sets `this.protocol` with the client's values: `tcp`, `rtu_over_tcp` (number port with
-  `rtu: true`), or `rtu` (string port; `rtu` is ignored). `is_tcp` is a getter:
-  `typeof this.port === 'number'`, true for both TCP-family transports. The serial port is
+- **Server.** The constructor sets `this.protocol` with the client's values. For the TCP family
+  it keeps the parsed target in `this.host` and `this.port`, which `start()` listens on; for
+  `rtu` `serial_settings` checks the device path and serial options into
+  `this.serial_settings`, and `host` and `port` stay `null`. `is_tcp` is a getter:
+  `this.protocol !== 'rtu'`, true for both TCP-family transports. The serial port is
   `this.serial_port`, created by the first `start()` (`#open_serial`, which shares one pending
   creation and resets it on failure so a later `start()` retries); `send_response` and `stop`
   use it. See "Server lifecycle".
 - **`src/serial.js`.** `serial_settings` validates the snake_case options and maps them to the
-  `serialport-rs` settings, which are those of `serialport` (`port` → `path`, `baud_rate` →
+  `serialport-rs` settings, which are those of `serialport` (`path` as is, `baud_rate` →
   `baudRate`, `parity` with `0`/`1`/`2` mapped to `none`/`odd`/`even`, `data_bits` → `dataBits`,
   `stop_bits` → `stopBits`). `create_serial_port` makes a closed `SerialPortStream` with the
   `RustBinding` of `serialport-rs` and `autoOpen: false`. It reaches `serialport-rs/lib/stream.js`
