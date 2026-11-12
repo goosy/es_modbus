@@ -1,5 +1,91 @@
 # Changelog
 
+## v0.3.0-beta.5 - 2026-11-12
+
+### Breaking changes
+
+- The transport is selected by exactly one of the options `tcp`, `rtu_over_tcp` and `serial`,
+  on both sides:
+  - `Modbus_Client` takes a single options object: `new Modbus_Client({ tcp: '10.0.0.5:502' })`,
+    `{ rtu_over_tcp: 'gateway:4001' }` or `{ serial: 'COM3', baud_rate: 19200 }`. The `address`
+    parameter and the `port` and `rtu` options are removed.
+  - `Modbus_Server` keeps `(handler, options)`, with `{ tcp: '0.0.0.0:502' }`,
+    `{ rtu_over_tcp: ':4001' }` or `{ serial: 'COM4' }`. The `host`, `port` and `rtu` options are
+    removed, and there is no longer a default of TCP on `0.0.0.0:502`.
+  - A `host:port` target may omit the port (`502`) and takes IPv6 in brackets (`'[::1]:502'`);
+    port `0` is not accepted. A server may leave the host empty to bind `0.0.0.0`.
+- An option that does not apply to the selected transport throws
+  `Option <name> does not apply to <transport>` instead of being ignored, e.g. `baud_rate` on a
+  TCP client or `keep_alive` on a serial client.
+
+### Server
+
+- A `handler` can reject a request with an exception code of its choice: a thrown value whose
+  `exception_code` is `0x01`, `0x02`, `0x03`, `0x04` or `0x06` is answered with that code, and
+  no `handler_error` is emitted. The new `Modbus_Exception` builds such an error:
+  `throw new Modbus_Exception(0x02, 'read-only')`. Anything else thrown still answers `0x04`
+  with `handler_error`.
+
+### Both
+
+- The package now ships a README.
+- Serial lines use `serialport-rs` 0.7.1. The known issue of v0.3.0-beta.4 (Windows serial reads
+  complete one timer tick late) remains.
+
+### Tests
+
+- `pnpm test:serial` runs the serial tests over every direction of a serial port in one
+  command: `pnpm test:serial COM4 COM5` runs `COM4,COM5` and then `COM5,COM4`;
+  `pnpm test:serial COM4 :502 192.168.89.2:502 192.168.89.2:503` runs the serial port against a
+  converter in TCP client mode, then against one in TCP server mode. A failed run does not stop
+  the others, and a summary lists each run as `pass` or `FAIL`.
+- `MODBUS_SERIAL_PORTS` takes a remote pool, several `host:port` ends separated by `|`
+  (`COM3,192.168.1.10:4001|192.168.1.10:4002`), taken in turn, for a converter that keeps only one
+  TCP connection.
+- The serial tests retry opening a serial port for up to 500 ms, since a port just closed may
+  refuse to re-open for a few tens of milliseconds (seen with a CH340 driver). The library itself
+  does not retry.
+
+## v0.3.0-beta.5 - 2026-11-12 (中文)
+
+### 破坏性变更
+
+- 客户端和服务端都改为由 `tcp`、`rtu_over_tcp`、`serial` 三个选项中确定的一个来选择传输方式：
+  - `Modbus_Client` 只接受一个选项对象：`new Modbus_Client({ tcp: '10.0.0.5:502' })`、
+    `{ rtu_over_tcp: 'gateway:4001' }` 或 `{ serial: 'COM3', baud_rate: 19200 }`。移除了 `address`
+    参数以及 `port`、`rtu` 选项。
+  - `Modbus_Server` 仍是 `(handler, options)`，写作 `{ tcp: '0.0.0.0:502' }`、
+    `{ rtu_over_tcp: ':4001' }` 或 `{ serial: 'COM4' }`。移除了 `host`、`port`、`rtu` 选项，
+    也不再默认在 `0.0.0.0:502` 上提供 TCP 服务。
+  - `host:port` 目标可以省略端口（即 `502`），IPv6 地址写在方括号里（`'[::1]:502'`）；不接受端口 `0`。
+    服务端可以留空主机，此时绑定 `0.0.0.0`。
+- 不适用于所选传输方式的选项会抛出 `Option <name> does not apply to <transport>`，不再被忽略，
+  例如 TCP 客户端的 `baud_rate`，或串口客户端的 `keep_alive`。
+
+### 服务端
+
+- `handler` 可以用自己选定的异常码拒绝请求：抛出值的 `exception_code` 为 `0x01`、`0x02`、`0x03`、
+  `0x04` 或 `0x06` 时，以该异常码应答，且不触发 `handler_error`。新增的 `Modbus_Exception`
+  用于构造这样的错误：`throw new Modbus_Exception(0x02, 'read-only')`。抛出其他任何值仍以 `0x04`
+  应答并触发 `handler_error`。
+
+### 通用
+
+- 发布包中新增 README。
+- 串口改用 `serialport-rs` 0.7.1。v0.3.0-beta.4 的已知问题（Windows 上串口读取晚一个系统定时器
+  周期完成）仍然存在。
+
+### 测试
+
+- `pnpm test:serial` 一条命令即可在串口的每个方向上运行串口测试：`pnpm test:serial COM4 COM5`
+  先运行 `COM4,COM5`，再运行 `COM5,COM4`；`pnpm test:serial COM4 :502 192.168.89.2:502 192.168.89.2:503`
+  先对 TCP 客户端模式的转换器运行，再对 TCP 服务端模式的转换器运行。某次运行失败不影响其余运行，
+  最后汇总列出每次运行的 `pass` 或 `FAIL`。
+- `MODBUS_SERIAL_PORTS` 支持远端池：多个 `host:port` 端用 `|` 分隔
+  （`COM3,192.168.1.10:4001|192.168.1.10:4002`），依次轮流使用，适用于只保持一个 TCP 连接的转换器。
+- 串口测试打开串口失败时会重试，最长 500 ms，因为刚关闭的串口可能在几十毫秒内无法重新打开
+  （在 CH340 驱动上见到过）。库本身不重试。
+
 ## v0.3.0-beta.4
 
 ### Breaking changes
@@ -41,7 +127,7 @@
 
 - On Windows, a serial read completes about one system timer tick (typically 12
   to 16 ms) after its last byte, so each serial transaction takes that much
-  longer; framing is unaffected.
+  longer; framing is unaffected (DragonWork/node-serialport-rs#30).
 
 ## v0.3.0-beta.4 (中文)
 
@@ -77,7 +163,7 @@
 ### 已知问题
 
 - 在 Windows 上，串口读取在最后一个字节到达后约一个系统定时器周期（通常 12 到 16 ms）
-  才完成，因此每次串口事务都相应变长；帧分隔不受影响。
+  才完成，因此每次串口事务都相应变长；帧分隔不受影响（DragonWork/node-serialport-rs#30）。
 
 ## v0.3.0-beta.2
 

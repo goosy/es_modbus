@@ -4,7 +4,7 @@ opened: 2026-11-12T14:53:10.701Z
 closed: 2026-11-12T19:47:41.151Z
 title: Serial tests have no command-line entry with arguments and test only one link per run
 status: fixed           # open | accepted | fixed | rejected | wontfix
-fixed_in: []        # commit IDs, backfilled at version commit time
+fixed_in: [9fab5ce] # commit IDs, backfilled at version commit time
 labels: [test]
 remote:
 problem_title:
