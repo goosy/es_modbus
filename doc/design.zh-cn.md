@@ -403,14 +403,3 @@
   清空 `#reported`。不在执行期间时，传输的 `error` 照旧发出，没有监听者时抛出。
 - **自行关闭。** 串口被设备关闭时，同一个 `close` 处理函数发出 `stop`；没有执行在进行时
   `#end_run` 不起作用，之后的 `stop()` 发现串口已关闭，立即兑现。
-
----
-
-## 已知问题：在 Windows 上，串口读操作晚一个定时器周期才完成
-
-在 Windows 上，`serialport-rs` 0.7.1 把 `COMMTIMEOUTS.ReadIntervalTimeout` 设为 1 ms。串口驱动按系统
-定时器度量这个间隔，因此一次读操作要在最后一个字节到达后约一个定时器周期（通常 12 到 16 ms）才完成。
-帧按长度切分，默认 `silence` 为 50 ms，所以帧切分不受影响；只是每次串口事务都要多花这么长时间。
-在一对虚拟串口上实测，把 `ReadIntervalTimeout` 和 `ReadTotalTimeoutMultiplier` 设为 `MAXDWORD`、
-`ReadTotalTimeoutConstant` 设为 `MAXDWORD - 1`，读操作就会在数据到达时立即完成；这个修复应在
-`serialport-rs` 中进行。

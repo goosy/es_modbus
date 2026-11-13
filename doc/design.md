@@ -486,16 +486,3 @@ run)`, which returns the call's promise.
 - **Self-close.** A port closed by its device emits `stop` through the same `close` handler;
   with no run in progress, `#end_run` changes nothing, and a later `stop()` finds the port closed
   and resolves at once.
-
-
----
-
-## Known issue: serial reads on Windows complete one timer tick late
-
-On Windows, `serialport-rs` 0.7.1 sets `COMMTIMEOUTS.ReadIntervalTimeout` to 1 ms. The serial
-driver measures that interval with the system timer, so a read completes about one timer tick
-(typically 12 to 16 ms) after its last byte arrives. Frames are delimited by their length and the
-default `silence` is 50 ms, so framing is unaffected; each serial transaction takes that much
-longer. Measured over a virtual pair, setting `ReadIntervalTimeout` and
-`ReadTotalTimeoutMultiplier` to `MAXDWORD` and `ReadTotalTimeoutConstant` to `MAXDWORD - 1`
-makes reads complete as soon as data arrives; the fix belongs in `serialport-rs`.
