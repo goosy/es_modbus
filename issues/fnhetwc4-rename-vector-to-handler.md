@@ -4,12 +4,8 @@ opened: 2026-10-24T06:26:15.703Z
 closed: 2026-10-24T06:26:35.586Z
 title: Rename the server's vector to handler
 status: fixed       # open | accepted | fixed | rejected | wontfix
-fixed_in: [36ac96a] # commit IDs, backfilled at version commit time
 labels: []
 remote:
-problem_title:
-proposal_title:
-decision_title:
 ---
 
 ## Problem

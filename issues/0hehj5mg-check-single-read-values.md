@@ -4,12 +4,8 @@ opened: 2026-10-24T04:06:31.416Z
 closed: 2026-10-24T04:22:58.090Z
 title: Single-point register reads are not checked; an out-of-range value can crash the server
 status: fixed       # open | accepted | fixed | rejected | wontfix
-fixed_in: [3404e7d] # commit IDs, backfilled at version commit time
 labels: []
 remote:
-problem_title:
-proposal_title:
-decision_title:
 ---
 
 ## Problem

@@ -4,12 +4,8 @@ opened: 2026-10-24T02:34:21.148Z
 closed: 2026-10-24T04:12:05.578Z
 title: Add optional batch read and write methods to the vector
 status: fixed       # open | accepted | fixed | rejected | wontfix
-fixed_in: [68a16aa] # commit IDs, backfilled at version commit time
 labels: []
 remote:
-problem_title:
-proposal_title:
-decision_title:
 ---
 
 ## Problem

@@ -4,12 +4,8 @@ opened: 2026-11-05T14:20:36.332Z
 closed: 2026-11-06T18:58:28.903Z
 title: Let a handler specify the exception code
 status: fixed       # open | accepted | fixed | rejected | wontfix
-fixed_in: [117dc8f] # commit IDs, backfilled at version commit time
 labels: []
 remote:
-problem_title:
-proposal_title:
-decision_title:
 ---
 
 ## Problem

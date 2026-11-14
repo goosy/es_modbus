@@ -4,12 +4,8 @@ opened: 2026-10-24T03:14:23.284Z
 closed: 2026-10-24T04:28:45.678Z
 title: Add discrete input read methods to the vector (single-point and batch)
 status: fixed       # open | accepted | fixed | rejected | wontfix
-fixed_in: [066d076] # commit IDs, backfilled at version commit time
 labels: []
 remote:
-problem_title:
-proposal_title:
-decision_title:
 ---
 
 ## Problem

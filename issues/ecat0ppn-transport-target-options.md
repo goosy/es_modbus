@@ -4,12 +4,8 @@ opened: 2026-11-12T08:35:45.067Z
 closed: 2026-11-12T10:04:59.145Z
 title: Select the Modbus_Client and Modbus_Server transport by a tcp / rtu_over_tcp / serial option
 status: fixed       # open | accepted | fixed | rejected | wontfix
-fixed_in: [f429c76] # commit IDs, backfilled at version commit time
 labels: []
 remote:
-problem_title:
-proposal_title:
-decision_title:
 ---
 
 ## Problem
