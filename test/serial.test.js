@@ -6,7 +6,8 @@
 // connects to the converter, ":port" listens for it. Several "host:port" ends separated by "|"
 // form a remote pool: each connection takes the next one. With two serial ports a baud-rate sweep
 // runs first, and the suites run at 9600 baud, or at the first rate that worked when 9600 did
-// not. A link that is set but cannot be used fails the run.
+// not. A link that is set but cannot be used fails the run. MODBUS_CONVERTER_SETTLE_MS sets how
+// long a converter that connects to ":port" is left before it is written to (20 ms by default).
 import { describe, test, before, after, beforeEach } from 'node:test';
 import assert from 'node:assert/strict';
 import { once } from 'node:events';
@@ -21,8 +22,16 @@ const DEFAULT_BAUD_RATE = 9600;
 const SWEEP_BAUD_RATES = [1200, 2400, 4800, 9600, 19200, 38400, 57600, 115200];
 // The baud rate of the suites: the default, unless the sweep shows it does not work on the link
 let suite_baud_rate = DEFAULT_BAUD_RATE;
-// How long to wait for a TCP end: a connection to the converter, or the converter connecting
-const TCP_WAIT_MS = 10000;
+// How long to wait for a TCP end: a connection to the converter, or the converter connecting.
+// Some converters wait a fixed ~15 s before reconnecting after a connection is closed, whatever
+// their reconnect setting (seen with an InHand IR315), so this leaves room for that.
+const TCP_WAIT_MS = 30000;
+// How long to leave a converter that has just connected to us before writing to it, by default
+// the client's default `delay` between two frame writes. MODBUS_CONVERTER_SETTLE_MS (set by
+// `pnpm test:serial --settle <ms>`) raises it for a converter that resets a connection receiving
+// data too soon (seen with an InHand IR315, which needs about 300 ms or more).
+const DEFAULT_CONVERTER_SETTLE_MS = 20;
+let converter_settle_ms = DEFAULT_CONVERTER_SETTLE_MS;
 // A serial port just closed may refuse to re-open for a few tens of ms (seen with a CH340
 // driver), so opening a serial port is retried at this interval up to this limit
 const OPEN_RETRY_INTERVAL_MS = 20;
@@ -53,6 +62,13 @@ function parse_link(spec) {
 	if (tcp_ends.length === 1 && tcp_ends[0].listen) return { first: { serial: first }, second: tcp_ends[0] };
 	if (tcp_ends.some((end) => end.listen)) throw invalid('a remote pool takes only "host:port" ends');
 	return { first: { serial: first }, second: { remotes: tcp_ends, next: 0 } };
+}
+
+/** Parses MODBUS_CONVERTER_SETTLE_MS: the default when unset; throws when not a non-negative integer. */
+function parse_settle(value) {
+	if (value === undefined || value === '') return DEFAULT_CONVERTER_SETTLE_MS;
+	if (!/^\d+$/.test(value)) throw new Error(`Invalid MODBUS_CONVERTER_SETTLE_MS "${value}": expected milliseconds`);
+	return Number(value);
 }
 
 /** Takes the next remote of a remote pool, cycling through it. */
@@ -110,21 +126,30 @@ async function open_end(end, baud_rate = suite_baud_rate) {
 		const remote = take_remote(end);
 		const socket = connect(remote.port, remote.host);
 		socket.on('error', () => { });
-		await with_timeout(once(socket, 'connect'), TCP_WAIT_MS, `no connection to ${remote_name(remote)}`);
+		try {
+			await with_timeout(once(socket, 'connect'), TCP_WAIT_MS, `no connection to ${remote_name(remote)}`);
+		} catch (error) {
+			// A connection still being attempted would keep the process alive
+			socket.destroy();
+			throw error;
+		}
 		return socket;
 	}
 	// The converter connects to us; once it has, stop accepting so the port is free again
 	const server = createServer();
 	server.listen(end.listen);
+	let socket;
 	try {
 		await once(server, 'listening');
-		const [socket] = await with_timeout(
+		[socket] = await with_timeout(
 			once(server, 'connection'), TCP_WAIT_MS, `the converter did not connect to :${end.listen}`);
 		socket.on('error', () => { });
-		return socket;
 	} finally {
 		server.close();
 	}
+	// Some converters reset a connection that receives data right after it is made
+	await sleep(converter_settle_ms);
+	return socket;
 }
 
 /** Closes a raw stream opened by open_end(). */
@@ -202,6 +227,7 @@ let link = null;
 let link_error = null;
 if (link_spec) {
 	try {
+		converter_settle_ms = parse_settle(process.env.MODBUS_CONVERTER_SETTLE_MS);
 		link = parse_link(link_spec);
 		await check_link(link);
 	} catch (error) {
@@ -325,8 +351,12 @@ describe(`Modbus RTU server on ${first_name}, raw peer on ${second_name}`, { ski
 		const received = once(server, 'receive');
 		const sent = once(server, 'send');
 		await exchange(peer, '010300000001', 7);
-		assert.equal(as_hex((await received)[0]), as_hex(rtu_frame('010300000001')));
-		assert.equal(as_hex((await sent)[0]), as_hex(rtu_frame('0103020000')));
+		// exchange() has already waited for the response, so the events are due by now; a link
+		// that lost the request must fail the test, not hang the run
+		const [receive_frame] = await with_timeout(received, 500, 'no receive event');
+		const [send_frame] = await with_timeout(sent, 500, 'no send event');
+		assert.equal(as_hex(receive_frame), as_hex(rtu_frame('010300000001')));
+		assert.equal(as_hex(send_frame), as_hex(rtu_frame('0103020000')));
 	});
 
 	test('back-to-back requests', async () => {
@@ -458,7 +488,13 @@ async function start_pair(handler) {
 	server.on('socket_error', () => { });
 	const converter = once(server, 'socket_connect');
 	await server.start();
-	await with_timeout(converter, TCP_WAIT_MS, `the converter did not connect to :${link.second.listen}`);
+	try {
+		await with_timeout(converter, TCP_WAIT_MS, `the converter did not connect to :${link.second.listen}`);
+	} catch (error) {
+		// The caller never gets the server, so stop it here or it keeps the process alive
+		await server.stop();
+		throw error;
+	}
 	const client = new Modbus_Client({ serial: link.first.serial, baud_rate: suite_baud_rate, ...client_options });
 	return { server, client };
 }

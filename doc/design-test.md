@@ -76,6 +76,21 @@ runner" below); it can also be set by hand, e.g. to run the serial tests under
   not wait for a converter to release a connection; a converter that keeps only one connection
   drops the new one while it still holds the old. For such a converter, give at least 2 remote
   ends (e.g. different channels of one gateway) as a remote pool.
+- **TCP wait.** Each time the tests open a TCP end, they wait up to 30 s for it: for the
+  connection to the converter, or for the converter to connect to `:port`. A converter in TCP
+  client mode reconnects on its own schedule after a suite closes its connection, and some wait a
+  fixed ~15 s whatever their reconnect setting (seen with an InHand IR315), so a shorter wait would
+  fail every suite after the first. A converter that answers at once costs no extra time.
+- **Converter settle time.** When a converter connects to `:port`, the tests stop listening and
+  leave the connection alone for a settle time before using it: 20 ms by default, the client's
+  default `delay` between two frame writes, so a sound converter is tested at a normal pace. The
+  environment variable `MODBUS_CONVERTER_SETTLE_MS` (set by `pnpm test:serial --settle <ms>`)
+  raises it for a converter with a known defect; a value that is not a non-negative integer fails
+  the pre-check. Some converters reset a connection when data arrives in its first tens of
+  milliseconds (seen with an InHand IR315: a write 50 ms after the connection was reset, one after
+  300 ms was not), so the IR315 is tested with `--settle 500`. The larger value also spares the
+  IR315 from a pre-check that closes a connection at once, which it treats as a failed connection
+  and backs off for its maximum reconnect interval.
 - **Remote pool.** Each time the tests connect to a remote end (the pre-check, a raw-stream suite,
   the `rtu_over_tcp` target of a `Modbus_Client`), they take the next end of the pool, cycling
   through it, so two consecutive connections go to different ends. An end the run does not reach
@@ -123,9 +138,13 @@ It takes one of two forms, and the first argument is always a serial port (no `:
   one of the two must be given; leaving one out tests only the other direction.
 - The two forms cannot be mixed (e.g. `COM4 COM5 :502`): that would need the first serial port
   wired to another serial port and to a converter at the same time.
-- Arguments that fit neither form print the usage and exit with code 2; no test runs.
-- Each run is a `node --test test/serial.test.js` child process with `MODBUS_SERIAL_PORTS` set for
-  it only; the next run starts once it has exited, so every port and connection it held has been
+- The option `--settle <ms>` may come before the ends, in either form; it sets
+  `MODBUS_CONVERTER_SETTLE_MS` for every run (see "Converter settle time" above), e.g.
+  `pnpm test:serial --settle 500 COM4 :502`. Without it the tests use their default.
+- Arguments that fit neither form, an unknown option, or a `--settle` value that is not a
+  non-negative integer print the usage and exit with code 2; no test runs.
+- Each run is a `node --test test/serial.test.js` child process with `MODBUS_SERIAL_PORTS` (and
+  `MODBUS_CONVERTER_SETTLE_MS` when `--settle` is given) set for it only; the next run starts once it has exited, so every port and connection it held has been
   released. There is no wait between runs: re-opening a serial port is covered by the open retry
   above, and the TCP side by the converter requirement. With two serial ports the baud-rate sweep
   runs in each direction.
