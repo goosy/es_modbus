@@ -3,11 +3,12 @@
 // MODBUS_SERIAL_PORTS="<first>,<second>" sets the two ends of the link; when it is unset the
 // suites are skipped. Both ends are serial ports linked like a null-modem cable, or the first is
 // a serial port and the second the TCP end of a transparent serial-to-TCP converter: "host:port"
-// connects to the converter, ":port" listens for it. Several "host:port" ends separated by "|"
-// form a remote pool: each connection takes the next one. With two serial ports a baud-rate sweep
-// runs first, and the suites run at 9600 baud, or at the first rate that worked when 9600 did
-// not. A link that is set but cannot be used fails the run. MODBUS_CONVERTER_SETTLE_MS sets how
-// long a converter that connects to ":port" is left before it is written to (20 ms by default).
+// connects to the converter, ":port" listens for it (":port@address" accepts only the converter
+// at that address). Several "host:port" ends separated by "|" form a remote pool: each connection
+// takes the next one. With two serial ports a baud-rate sweep runs first, and the suites run at
+// 9600 baud, or at the first rate that worked when 9600 did not. A link that is set but cannot be
+// used fails the run. MODBUS_CONVERTER_SETTLE_MS sets how long a converter that connects to
+// ":port" is left before it is written to (20 ms by default).
 import { describe, test, before, after, beforeEach } from 'node:test';
 import assert from 'node:assert/strict';
 import { once } from 'node:events';
@@ -16,6 +17,9 @@ import { SerialPort } from 'serialport-rs';
 import { Modbus_Client } from '../src/ModbusClient.js';
 import { Modbus_Server } from '../src/ModbusServer.js';
 import { sleep, hex, rtu_frame, collect, create_memory_handler } from './helpers.js';
+import {
+	parse_link, parse_settle, take_remote, remote_name, end_name, accepts_peer,
+} from './serial-link.js';
 
 // The default settings of every suite: 9600 8N1, the usual Modbus default
 const DEFAULT_BAUD_RATE = 9600;
@@ -26,12 +30,9 @@ let suite_baud_rate = DEFAULT_BAUD_RATE;
 // Some converters wait a fixed ~15 s before reconnecting after a connection is closed, whatever
 // their reconnect setting (seen with an InHand IR315), so this leaves room for that.
 const TCP_WAIT_MS = 30000;
-// How long to leave a converter that has just connected to us before writing to it, by default
-// the client's default `delay` between two frame writes. MODBUS_CONVERTER_SETTLE_MS (set by
-// `pnpm test:serial --settle <ms>`) raises it for a converter that resets a connection receiving
-// data too soon (seen with an InHand IR315, which needs about 300 ms or more).
-const DEFAULT_CONVERTER_SETTLE_MS = 20;
-let converter_settle_ms = DEFAULT_CONVERTER_SETTLE_MS;
+// How long to leave a converter that has just connected to us before writing to it: see
+// DEFAULT_CONVERTER_SETTLE_MS in serial-link.js; set from MODBUS_CONVERTER_SETTLE_MS
+let converter_settle_ms;
 // A serial port just closed may refuse to re-open for a few tens of ms (seen with a CH340
 // driver), so opening a serial port is retried at this interval up to this limit
 const OPEN_RETRY_INTERVAL_MS = 20;
@@ -39,47 +40,8 @@ const OPEN_RETRY_LIMIT_MS = 500;
 // The pause between stop() and start() in the restart test, for the same driver timing
 const RESTART_PAUSE_MS = 100;
 
-/**
- * Parses MODBUS_SERIAL_PORTS into `{ first, second }`. The first end is `{ serial: path }`; the
- * second is `{ serial: path }`, `{ listen: port }` or a remote pool `{ remotes: [{ host, port }],
- * next }` (connect, taking the remotes in turn). Throws on an invalid value.
- */
-function parse_link(spec) {
-	const ends = spec.split(',').map((end) => end.trim());
-	const invalid = (reason) => new Error(`Invalid MODBUS_SERIAL_PORTS "${spec}": ${reason}`);
-	if (ends.length !== 2 || ends.includes('')) throw invalid('expected "<first>,<second>"');
-	const [first, second] = ends;
-	if (first.includes(':')) throw invalid('the first end must be a serial port');
-	if (!second.includes(':')) return { first: { serial: first }, second: { serial: second } };
-	const tcp_ends = second.split('|').map((end) => end.trim()).map((end) => {
-		const index = end.lastIndexOf(':');
-		if (index < 0) throw invalid(`"${end}" is not a TCP end`);
-		const host = end.slice(0, index);
-		const port = Number(end.slice(index + 1));
-		if (!Number.isInteger(port) || port < 1 || port > 0xffff) throw invalid(`bad TCP port in "${end}"`);
-		return host === '' ? { listen: port } : { host, port };
-	});
-	if (tcp_ends.length === 1 && tcp_ends[0].listen) return { first: { serial: first }, second: tcp_ends[0] };
-	if (tcp_ends.some((end) => end.listen)) throw invalid('a remote pool takes only "host:port" ends');
-	return { first: { serial: first }, second: { remotes: tcp_ends, next: 0 } };
-}
-
-/** Parses MODBUS_CONVERTER_SETTLE_MS: the default when unset; throws when not a non-negative integer. */
-function parse_settle(value) {
-	if (value === undefined || value === '') return DEFAULT_CONVERTER_SETTLE_MS;
-	if (!/^\d+$/.test(value)) throw new Error(`Invalid MODBUS_CONVERTER_SETTLE_MS "${value}": expected milliseconds`);
-	return Number(value);
-}
-
-/** Takes the next remote of a remote pool, cycling through it. */
-function take_remote(end) {
-	const remote = end.remotes[end.next % end.remotes.length];
-	end.next += 1;
-	return remote;
-}
-
-const remote_name = ({ host, port }) => `${host}:${port}`;
-const end_name = (end) => end.serial ?? (end.listen ? `:${end.listen}` : end.remotes.map(remote_name).join('|'));
+/** The timeout message for a listening end the converter did not connect to. */
+const no_converter = (end) => `the converter${end.from ? ` at ${end.from}` : ''} did not connect to :${end.listen}`;
 
 const with_timeout = (promise, ms, message) => {
 	let timer;
@@ -135,15 +97,27 @@ async function open_end(end, baud_rate = suite_baud_rate) {
 		}
 		return socket;
 	}
-	// The converter connects to us; once it has, stop accepting so the port is free again
+	// The converter connects to us; once it has, stop accepting so the port is free again. A
+	// connection from another address than the end names is closed, and the wait goes on.
 	const server = createServer();
-	server.listen(end.listen);
 	let socket;
+	let on_converter;
+	const converter = new Promise((resolve) => {
+		on_converter = resolve;
+	});
+	server.on('connection', (incoming) => {
+		incoming.on('error', () => { });
+		if (socket || !accepts_peer(end, incoming.remoteAddress)) {
+			incoming.destroy();
+			return;
+		}
+		socket = incoming;
+		on_converter();
+	});
+	server.listen(end.listen);
 	try {
 		await once(server, 'listening');
-		[socket] = await with_timeout(
-			once(server, 'connection'), TCP_WAIT_MS, `the converter did not connect to :${end.listen}`);
-		socket.on('error', () => { });
+		await with_timeout(converter, TCP_WAIT_MS, no_converter(end));
 	} finally {
 		server.close();
 	}
@@ -486,10 +460,19 @@ async function start_pair(handler) {
 	const server = new Modbus_Server(handler, { rtu_over_tcp: `:${link.second.listen}` });
 	server.on('error', () => { });
 	server.on('socket_error', () => { });
-	const converter = once(server, 'socket_connect');
+	// `socket_connect` comes before the server takes the socket in, so a connection from another
+	// address than the end names is closed here before it can send the server anything
+	let on_converter;
+	const converter = new Promise((resolve) => {
+		on_converter = resolve;
+	});
+	server.on('socket_connect', (socket) => {
+		if (accepts_peer(link.second, socket.remoteAddress)) on_converter();
+		else socket.destroy();
+	});
 	await server.start();
 	try {
-		await with_timeout(converter, TCP_WAIT_MS, `the converter did not connect to :${link.second.listen}`);
+		await with_timeout(converter, TCP_WAIT_MS, no_converter(link.second));
 	} catch (error) {
 		// The caller never gets the server, so stop it here or it keeps the process alive
 		await server.stop();

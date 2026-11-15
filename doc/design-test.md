@@ -24,7 +24,9 @@ needs. A topic split out of [design.md](./design.md).
 each class alone; `test/tcp.test.js`, `test/serial.test.js` and `test/serial-bridge.test.js` run
 the classes end to end over loopback TCP, a serial port pair and a simulated serial line;
 `test/bundle.test.js` covers the build output `dist/modbus.js` with `native/`. Fixtures live in
-`test/helpers.js` and `test/serial-bridge.js`.
+`test/helpers.js` and `test/serial-bridge.js`. The parsing of the serial tests' link and of the
+serial test runner's arguments lives in `test/serial-link.js`, so `test/serial-link.test.js`
+covers it without serial hardware.
 
 ## Commands
 
@@ -56,7 +58,7 @@ The serial tests run over a link whose two ends are set by the environment varia
 `MODBUS_SERIAL_PORTS="<first>,<second>"`. They are off by default, since a machine need not have
 serial ports, virtual or physical: when the variable is unset, the serial suites are skipped.
 
-The variable takes one of four forms. An end containing `:` is a TCP end; any other end is a
+The variable takes one of five forms. An end containing `:` is a TCP end; any other end is a
 serial device path. The usual way to set it is the runner `pnpm test:serial` (see "Serial test
 runner" below); it can also be set by hand, e.g. to run the serial tests under
 `node --test --experimental-test-coverage`.
@@ -67,6 +69,7 @@ runner" below); it can also be set by hand, e.g. to run the serial tests under
 | `COM3,192.168.1.10:4001`                       | A serial port wired to a transparent serial-to-TCP converter in TCP server mode; the tests connect to it. |
 | `COM3,192.168.1.10:4001\|192.168.1.10:4002`     | The same, with a remote pool: several `host:port` ends separated by `\|`, taken in turn.                  |
 | `COM3,:4001`                                   | The same, with the converter in TCP client mode; the tests listen on the port and wait for it.            |
+| `COM3,:4001@192.168.1.10`                      | The same, accepting only the converter at that IP address (see "Converter address" below).                |
 
 - **Transparent converters only.** A TCP end must be a converter that passes bytes through
   unchanged. A Modbus RTU-to-TCP gateway is not supported: it rewrites the frames, so the tests
@@ -91,6 +94,16 @@ runner" below); it can also be set by hand, e.g. to run the serial tests under
   300 ms was not), so the IR315 is tested with `--settle 500`. The larger value also spares the
   IR315 from a pre-check that closes a connection at once, which it treats as a failed connection
   and backs off for its maximum reconnect interval.
+- **Converter address.** Several converters on the LAN may connect to the same port of the test
+  machine, and only one of them is wired to the serial port under test. A listening end
+  `:port@address` names that converter by its IP address (IPv4, or IPv6; a host name is refused):
+  wherever the tests wait for the converter (the pre-check, a raw-stream suite, the
+  `Modbus_Server` of the RTU-over-TCP pair), a connection from any other address is closed at once
+  and the wait goes on, up to the TCP wait. The `Modbus_Server` is given only the named
+  converter: the tests close any other connection on its `socket_connect` event, which comes
+  before the server reads from the socket. An IPv4 peer that the socket reports in its
+  IPv6-mapped form (`::ffff:a.b.c.d`) matches its IPv4 address. Without `@address` the first
+  connection is taken, whatever its address.
 - **Remote pool.** Each time the tests connect to a remote end (the pre-check, a raw-stream suite,
   the `rtu_over_tcp` target of a `Modbus_Client`), they take the next end of the pool, cycling
   through it, so two consecutive connections go to different ends. An end the run does not reach
@@ -128,20 +141,26 @@ runner" below); it can also be set by hand, e.g. to run the serial tests under
 port in one command. It handles only the serial tests; the other tests run with `pnpm test`.
 It takes one of two forms, and the first argument is always a serial port (no `:`):
 
-| Form                                            | Runs, in order                                                                    |
-| ----------------------------------------------- | --------------------------------------------------------------------------------- |
-| `pnpm test:serial COMn COMm`                    | `COMn,COMm`, then the reverse direction `COMm,COMn`                               |
-| `pnpm test:serial COMn [:port] [host:port ...]` | `COMn,:port` when `:port` is given; then `COMn,<pool>` when remote ends are given |
+| Form                                                    | Runs, in order                                                              |
+| ------------------------------------------------------- | --------------------------------------------------------------------------- |
+| `pnpm test:serial COMn COMm`                            | `COMn,COMm`, then the reverse direction `COMm,COMn`                         |
+| `pnpm test:serial COMn [:port] [host:port[,host:port]]` | `COMn,:port` when `:port` is given; then `COMn,<pool>` when a pool is given |
 
 - `:port` is optional; when given, it comes right after the serial port, and there is only one.
-  Any number of remote ends `host:port` may follow and form the remote pool of one run. At least
-  one of the two must be given; leaving one out tests only the other direction.
+  It may name its converter as `:port@address` (see "Converter address" above), e.g.
+  `pnpm test:serial COM4 :502@192.168.213.254`.
+- The remote pool is optional and is one argument: one or more remote ends `host:port` separated
+  by `,`, e.g. `192.168.89.2:502,192.168.89.2:503`. It comes last and forms the pool of one run;
+  the runner joins its ends with `|` in `MODBUS_SERIAL_PORTS`. Writing the pool as one argument
+  shows that its ends make up one run, not one run each. At least one of `:port` and the pool
+  must be given; leaving one out tests only the other direction.
 - The two forms cannot be mixed (e.g. `COM4 COM5 :502`): that would need the first serial port
   wired to another serial port and to a converter at the same time.
 - The option `--settle <ms>` may come before the ends, in either form; it sets
   `MODBUS_CONVERTER_SETTLE_MS` for every run (see "Converter settle time" above), e.g.
   `pnpm test:serial --settle 500 COM4 :502`. Without it the tests use their default.
-- Arguments that fit neither form, an unknown option, or a `--settle` value that is not a
+- Arguments that fit neither form, an end that `MODBUS_SERIAL_PORTS` would refuse (a bad port, an
+  `@address` that is not an IP address), an unknown option, or a `--settle` value that is not a
   non-negative integer print the usage and exit with code 2; no test runs.
 - Each run is a `node --test test/serial.test.js` child process with `MODBUS_SERIAL_PORTS` (and
   `MODBUS_CONVERTER_SETTLE_MS` when `--settle` is given) set for it only; the next run starts once it has exited, so every port and connection it held has been
