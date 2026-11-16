@@ -1,5 +1,54 @@
 # Changelog
 
+## v0.3.1 - 2026-11-16
+
+### Both
+
+- Two new transports, Modbus UDP and RTU over UDP, selected by the options `udp` and
+  `rtu_over_udp` in the same way as `tcp`, `rtu_over_tcp` and `serial`:
+  `new Modbus_Client({ udp: '10.0.0.6:502' })`, `new Modbus_Server(handler, { rtu_over_udp: ':4001' })`.
+  They use Node's built-in `dgram`, with no native addon, so they work on every platform.
+
+### Client
+
+- On UDP, connecting binds the socket and only a failed bind is retried; a lost datagram shows
+  as a request timeout, and a timed-out request is never resent.
+- The new `local` option binds the socket to a fixed local `host:port`, for a device (such as a
+  serial device server in UDP mode) that replies to a fixed destination port.
+- Only datagrams from the target's address and port are accepted; `any_source_port: true`
+  accepts any source port of that address, for a device that replies from another port.
+- Modbus UDP matches responses by transaction ID and discards out-of-order, late and duplicate
+  ones. RTU over UDP sends one request at a time, as on a serial line, and waits
+  `max(delay, turnaround)` ms after a timeout so that a late answer is not taken for the next one.
+
+### Server
+
+- A UDP server serves every client from one socket and answers each request to its source
+  address and port.
+
+## v0.3.1 - 2026-11-16 (中文)
+
+### 通用
+
+- 新增 Modbus UDP 和 RTU over UDP 两种传输方式，用 `udp`、`rtu_over_udp` 选项选择，用法与
+  `tcp`、`rtu_over_tcp`、`serial` 相同：`new Modbus_Client({ udp: '10.0.0.6:502' })`、
+  `new Modbus_Server(handler, { rtu_over_udp: ':4001' })`。它们使用 Node 内置的 `dgram`，
+  不需要原生插件，因此在所有平台上都可用。
+
+### 客户端
+
+- UDP 上，连接即绑定套接字，只有绑定失败才会重试；丢失的数据报表现为请求超时，超时的请求不会重发。
+- 新增 `local` 选项，把套接字绑定到固定的本地 `host:port`，用于向固定目标端口应答的设备
+  （例如 UDP 模式下的串口服务器）。
+- 只接受来自目标地址和端口的数据报；`any_source_port: true` 接受该地址的任意源端口，
+  用于从另一个端口应答的设备。
+- Modbus UDP 按事务 ID 匹配响应，丢弃乱序、迟到和重复的响应。RTU over UDP 与串口一样一次只发一个请求，
+  超时后等待 `max(delay, turnaround)` 毫秒，以免把迟到的应答当作下一个请求的应答。
+
+### 服务端
+
+- UDP 服务端用一个套接字服务所有客户端，并把每个响应发回其请求的源地址和端口。
+
 ## v0.3.0 - 2026-11-13
 
 A rework of the client and server since v0.1.4: they follow the contract in `doc/spec*.md`,
