@@ -9,21 +9,25 @@
 ## 传输方式选择
 
 - **`src/transport.js`。** 两端的构造函数共用，按 spec 规定的顺序调用：`select_transport` 选出
-  唯一给出的传输选项（值为 nullish 视为未给出），连同其目标一起返回；对 `tcp` 和 `rtu_over_tcp`，
-  `parse_host_port(target, server)` 返回 `{ host, port }`：以 `[` 开头的目标必须形如 `[<host>]`，
-  后面可带 `:<port>`；不带方括号的目标只在恰好一个 `:` 处拆分（不止一个则为纯 IPv6 地址）；端口
-  必须全为数字且在 `1..65535` 内；主机为空时，`server` 为真则取 `0.0.0.0`，否则无效。随后
-  `check_applicable` 对第一个被该端排除表（`CLIENT_EXCLUSIONS`、`SERVER_EXCLUSIONS`）排除在所选
-  传输方式之外的已给出选项抛错。之后才校验各选项的值。
-- **客户端。** 构造函数按传输选项设置 `this.protocol`：`tcp`、`rtu_over_tcp`，`serial` 时为
-  `rtu`。TCP 系列调用 `set_tcp(host, port)`；对 `rtu`，先用 `serial_settings` 校验串口选项，再以
-  结果调用 `set_serial`；串口在之后才创建。
-- **解码。** 响应解码**仅**按 `protocol === 'tcp'` 分支，因此 `rtu_over_tcp` 使用 RTU 解析器
+  唯一给出的传输选项（值为 nullish 视为未给出），连同其目标一起返回，选项不是对象时同样抛错；对
+  `serial` 以外的所有传输方式，`parse_host_port(target, server)` 返回 `{ host, port }`：以 `[` 开头
+  的目标必须形如 `[<host>]`，后面可带 `:<port>`；不带方括号的目标只在恰好一个 `:` 处拆分（不止一个
+  则为纯 IPv6 地址）；端口必须全为数字且在 `1..65535` 内；主机为空时，`server` 为真则取 `0.0.0.0`，
+  否则无效。随后 `check_applicable` 对第一个被该端排除表（`CLIENT_EXCLUSIONS`、`SERVER_EXCLUSIONS`）
+  排除在所选传输方式之外的已给出选项抛错。之后才校验各选项的值。`parse_local` 按同样的规则解析
+  客户端的 `local` 选项，但把空主机保留为 `undefined`，使套接字绑定其自身地址族的任意地址。
+- **客户端。** 构造函数按传输选项设置 `this.protocol`：取传输选项的名称，`serial` 时为 `rtu`。
+  两个私有 getter 命名代码据以分支的家族：`#mbap`（`tcp`、`udp`）和 `#udp`（`udp`、
+  `rtu_over_udp`）。UDP 家族先校验 `local` 和 `any_source_port`，再调用
+  `set_udp(host, port, local, any_source_port)`；TCP 系列调用 `set_tcp(host, port)`；对 `rtu`，先用
+  `serial_settings` 校验串口选项，再以结果调用 `set_serial`。套接字或串口在之后才创建。
+- **解码。** 响应解码**仅**按 `#mbap` 分支，因此 `rtu_over_tcp` 和 `rtu_over_udp` 使用 RTU 解析器
   （`parse_rtu_response`）解码。
-- **服务端。** 构造函数按与客户端相同的取值设置 `this.protocol`。TCP 系列把解析出的目标存入
-  `this.host` 和 `this.port`，供 `start()` 监听；对 `rtu`，由 `serial_settings` 校验设备路径和串口
-  选项后存入 `this.serial_settings`，`host` 和 `port` 保持 `null`。`is_tcp` 是一个 getter：
-  `this.protocol !== 'rtu'`，对两种 TCP 系列传输都为真。串口是 `this.serial_port`，由首次 `start()` 创建
+- **服务端。** 构造函数按与客户端相同的取值设置 `this.protocol`。TCP 系列和 UDP 家族把解析出的
+  目标存入 `this.host` 和 `this.port`，供 `start()` 监听或绑定；对 `rtu`，由 `serial_settings` 校验
+  设备路径和串口选项后存入 `this.serial_settings`，`host` 和 `port` 保持 `null`。`is_tcp`（`tcp`、
+  `rtu_over_tcp`）和 `is_udp`（`udp`、`rtu_over_udp`）是 getter，私有的 `#mbap` 与客户端一样表示
+  MBAP 帧格式。串口是 `this.serial_port`，由首次 `start()` 创建
   （`#open_serial`：共用同一个待决的创建，失败时将其重置，使之后的 `start()` 重试）；
   `send_response` 和 `stop` 使用它。见“服务端生命周期”。
 - **`src/serial.js`。** `serial_settings` 校验 snake_case 选项，并转换为 `serialport-rs` 的参数，
@@ -40,6 +44,15 @@
   下次尝试会重试），挂接串口事件（`listen_serial`），并打开它（并发调用者共用一次尝试）。失败时执行 `abort_pending()` 并发出 `error`。连接阶段跟随串口的 `open` / `close` /
   `error` 事件（见“客户端连接状态”）。串口绝不进入 `BACKING_OFF`：关闭后转入 `IDLE`，已关闭的
   串口只会按需重新打开。
+- **客户端 UDP 生命周期。** `set_udp` 为 `_open` 赋值：它用 `dns.promises.lookup` 解析主机，然后
+  按地址族（`udp4` / `udp6`）新建一个套接字，绑定到 `local` 或端口 `0`：已关闭的 `dgram` 套接字
+  不能再次绑定。套接字的 `listening` 报告 `#transport_opened()`。`listening` 之前的 `error` 是绑定
+  失败：保存该错误，关闭套接字，由其 `close` 带着它报告丢失，与 TCP 套接字在连接失败后的 `close`
+  一样，因此阶段转入 `BACKING_OFF` 或 `IDLE`。`listening` 之后的 `error` 只发出。解析失败时自行
+  报告丢失，再发出 `error`。`_close` 关闭套接字；主机仍在解析时则把这次尝试标记为已关闭，解析
+  完成后不创建套接字，直接报告丢失。尝试对象 `{ socket, closing }` 防止同一个套接字被关闭两次，
+  那样 `dgram` 会抛出异常。`message` 只有来自解析出的地址、且（除非 `any_source_port`）来自目标
+  端口时，才交给 `on_data`。
 
 ## 构建（`build.js`）
 
@@ -102,19 +115,19 @@
    - FC 15/16：数量、字节数，然后是数据字节。
 2. 起始地址即 PDU 地址，原样写入。Modicon→PDU 的转换（默认 `point - 1`；当客户端以
    `options.modicon_zero_based = true` 构造时为 `point`）已由 Modicon 解析器完成。
-3. 用 `encode_tcp_frame(tid, body)`（`tcp`：协议 ID 为 0 的 MBAP 头）或 `encode_rtu_frame(body)`
+3. 用 `encode_tcp_frame(tid, body)`（`tcp` 和 `udp`：协议 ID 为 0 的 MBAP 头）或 `encode_rtu_frame(body)`
    （追加小端 CRC-16）给帧体加上头尾。服务端也用这两个函数给应答加头尾。
 
 ## 客户端事务生命周期
 
 - **包表。** `#packets` 是一个普通数组，按 `tid - TRANSACTION_START` 索引
   （`TRANSACTION_START = 8000`）。`set_packet` / `get_packet` 封装了偏移计算。`packets_length`
-  为 256。只有 TCP 使用它：RTU 系列最多只有一个已写出的请求，从帧写出到请求结束都保存在
+  为 256。只有 MBAP 传输使用它：RTU 系列最多只有一个已写出的请求，从帧写出到请求结束都保存在
   `#current` 中。
-- **TID 分配（`get_tid`）。** 非 TCP 始终返回 `TRANSACTION_START`（RTU 没有事务字段）。TCP
-  则递增 `#last_tid`，一旦超过 `packets_length + TRANSACTION_START` 就回绕到
-  `TRANSACTION_START`。由于只有 256 个槽位，且不检查槽位是否空闲，同时待决的 TCP 事务超过
-  256 个就会冲突。
+- **TID 分配（`get_tid`）。** RTU 系列始终得到 `TRANSACTION_START`（RTU 没有事务字段）。MBAP
+  传输则递增 `#last_tid`，一旦超过 `packets_length + TRANSACTION_START` 就回绕到
+  `TRANSACTION_START`。由于只有 256 个槽位，且不检查槽位是否空闲，同时待决的事务超过 256 个就会
+  冲突。
 - **`process_packet_transaction`。** 处于 `BACKING_OFF`、`DISCONNECTING` 或 `DISCONNECTED` 时，
   它返回一个已以 `Error('connection lost')` 拒绝的 Promise；帧从不入队。仅在 `BACKING_OFF` 时它
   同时发出 `error`，且仅当客户端有 `error` 监听者时：没有监听者时发出 `error` 会抛出异常，而参数
@@ -123,20 +136,21 @@
   Promise。它把 `resolve` / `reject` / `on_timeout` 闭包存放在 packet 上；定时器（`timeout_id`）
   由 `#write` 在帧写出时启动，因此排队时间不计入超时。`end_transaction` 递减计数，标记 `status`，
   清除定时器，把 `resolve`/`reject` 换成 `DO_NOTHING` 使迟到/重复的响应无效，并调用
-  `#transaction_ended`。RTU 超时还会清空帧接收器，以免迟到应答的字节混到下一个响应
-  前面。`on_timeout` 以 `Error('transaction 0x<tid> timeout')` 拒绝，然后调用 `#count_timeout()`
-  （见“死链”）。
+  `#transaction_ended(packet, timed_out)`。RTU 超时还会清空帧接收器，以免迟到应答的字节混到下一个
+  响应前面。`on_timeout` 以 `Error('transaction 0x<tid> timeout')` 拒绝，然后调用
+  `#count_timeout()`（见“死链”）。
 - **界定（`on_data`）。** 数据块交给 `#receiver`，它是构造函数创建的 `Frame_Receiver`（见“解析器
-  说明”）：`tcp` 用 `mbap_frame_length`，否则用 `rtu_response_length`，带上静默时长，`rtu` 时
-  `serial_line` 为真；它把每一帧交给 `#on_frame`。`unprocessed_buffer` 是读取其残留字节的 getter。
-  `#transport_opened` 和 `#transport_lost` 会清空它。响应的帧长不会是 `UNKNOWN`，所以客户端没有
-  帧长未知的情况。
+  说明”）：MBAP 用 `mbap_frame_length`，否则用 `rtu_response_length`，带上静默时长，`rtu` 和
+  `rtu_over_udp` 时 `serial_line` 为真；它把每一帧交给 `#on_frame`。`unprocessed_buffer` 是读取其
+  残留字节的 getter。`#transport_opened` 和 `#transport_lost` 会清空它。响应的帧长不会是
+  `UNKNOWN`，所以客户端没有帧长未知的情况。`udp` 上不使用接收器：每个数据报单独经
+  `mbap_frame_length` 交给 `split_frames`，其 `rest` 被丢弃。
 - **匹配（`#on_frame`）。** 对每一帧：解析 → 发出 `receive` → 跳过 `func_code === 0` →
   `#link_proved()`（有效帧，来自任意单元：见“死链”）→ 按 `tid`
-  查找（TCP）或取 `#current`（RTU 系列）→ 除非 `status === 'pending'` 否则忽略 → RTU 系列上，
+  查找（MBAP）或取 `#current`（RTU 系列）→ 除非 `status === 'pending'` 否则忽略 → RTU 系列上，
   除非 `response_fits()`（单元 ID 相同、去掉异常位后功能码相同，读还要求字节数与所请求的相符）
   否则忽略 → 有 `exception_code` 则以 `Error('response error: <code>')` `reject`，否则兑现：读以 `response.data` 兑现，写以
-  `echo_matches()` 的结果兑现。TCP 不检查 `response_fits()`：事务 ID 已经匹配，而且有些网关会以
+  `echo_matches()` 的结果兑现。MBAP 不检查 `response_fits()`：事务 ID 已经匹配，而且有些网关会以
   别的单元 ID 应答。
 - **写回显。** `transact()` 保存 `packet.echo`，即写响应在地址之后必须回显的值（`expected_echo()`：
   FC 5 为 `0xFF00` / `0x0000`，FC 6 为值，FC 15/16 为数量；读为 `undefined`）。`echo_matches()` 把响应的
@@ -150,18 +164,19 @@
 - `sending` 由 `#busy` 保护，队列为空时立即返回。已连接时，它设置 `#busy`，取出一个 packet 交给
   `#write`，后者启动超时并调用 `_send`。`#release(gap)` 在 `gap` 毫秒后清除 `#busy` 并重新进入。
   `#gap` 为 `delay`，串口上为 `max(delay, silence)`。
-  - **TCP：** `#write` 写出后立即调用 `#release(#gap)`，因此写入受节流，但可以有多个未完成的请求。
+  - **MBAP：** `#write` 写出后立即调用 `#release(#gap)`，因此写入受节流，但可以有多个未完成的请求。
   - **RTU 系列：** `#write` 把 packet 存入 `#current`，不释放；`end_transaction` 调用
     `#transaction_ended`，后者清空 `#current` 并调用 `#release(#gap)`。因此下一帧在请求结束（响应、
     异常、超时或 `abort_pending()`）之后才写出；每个已写出的请求都会结束，所以 `#busy` 不会一直
-    保持。
-  - **广播**（`packet.broadcast`：非 TCP 协议上发往单元 `0` 的任何请求）：不会有应答，因此
+    保持。`rtu_over_udp` 上超时之后的间隔为 `max(turnaround, #gap)`；其间到达的迟到应答发现
+    `#current` 为空。
+  - **广播**（`packet.broadcast`：RTU 系列上发往单元 `0` 的任何请求）：不会有应答，因此
     `#write` 在 `_send` 之后立即兑现它（写以 `true`，读以空 `Buffer`），不启动定时器，并调用
     `#release(max(turnaround, #gap))`。
 - 处于 `IDLE`（或加入进行中的 `CONNECTING`）时，`sending` 以自身作为成功回调发起连接。它绝不从其他阶段发起连接：退避
   或手动关闭都在 `abort_pending()` 清空队列之后才开始，而此时发出的请求在入队之前就被拒绝。
 - **`abort_pending()`。** 清空 `send_queue`，并以 `Error('connection lost')` 拒绝每个 `status` 为
-  `'pending'` 的 packet：排队的，以及已写出的（TCP 上为 `#packets`，RTU 系列上为 `#current`）。它在每次传输层 `close` / `error`（经由 `#transport_lost`，TCP 套接字和
+  `'pending'` 的 packet：排队的，以及已写出的（MBAP 上为 `#packets`，RTU 系列上为 `#current`）。它在每次传输层 `close` / `error`（经由 `#transport_lost`，TCP 套接字和
   串口）时运行，也在从 `IDLE` 或 `BACKING_OFF` 调用 `disconnect()` 时运行，因此按需连接失败时，其
   请求也会立即失败。
 
@@ -233,7 +248,7 @@
 - **稳定的连接。** `#last_delay` 不为 `0`（连接跟在一次退避之后）时，`#transport_opened()` 以
   `#last_delay` 启动 `#stable_timer`；`#transport_lost()` 清除它。连接保持打开这么久，就调用
   `#reset_delay()`。这个定时器与 `#reconnect_timer` 一样是资源。
-- **死链。** `#timeouts` 记录连接上连续的超时次数。在串口上、`max_timeouts = 0` 时或不处于
+- **死链。** `#timeouts` 记录连接上连续的超时次数。在串口上、UDP 家族上、`max_timeouts = 0` 时或不处于
   `CONNECTED` 时，`#count_timeout()` 什么也不做；否则递增计数，达到 `max_timeouts` 时将其清零并
   调用 `_close()`。随后 TCP 套接字的 `close` 经 `#transport_lost()` 报告丢失，与对端关闭完全
   相同：阶段转入 `BACKING_OFF` 或 `IDLE`，而不是 `DISCONNECTING`，因此不会抑制重连。
@@ -265,6 +280,8 @@
 - **串口（`set_serial`）。** `_open()` 只创建一次串口（`creating` Promise，是懒创建缓存，不是
   阶段）并打开它；`opening` Promise 让 `_close()` 能等待进行中的打开。由打开的回调（而不是 `open`
   事件）报告 `#transport_opened()`。
+- **UDP（`set_udp`）。** `_open()` 解析主机并绑定一个新套接字；`_send` 发往解析出的地址和目标
+  端口；`_close()` 关闭套接字（见“客户端 UDP 生命周期”）。
 
 ## 解析器说明（`src/util.js`）
 
@@ -321,9 +338,10 @@
 
 ## 服务端分发说明
 
-- 帧格式取决于 `this.protocol`：`on_data` 据此选择帧长函数，`#on_frame` 据此选择解析器，`send_response` 据此组帧，`_on_data`
-  据此确定串行总线语义。`socket` 参数只表示响应写到哪里：两种 TCP 系列传输写入套接字，没有
-  `socket` 时写入串口。
+- 帧格式取决于 `this.protocol`：`on_data` 据此选择帧长函数，`#on_frame` 据此选择解析器，
+  `send_response` 据此组帧，`_on_data` 据此确定串行总线语义，都经由 `#mbap`。`socket` 参数只表示
+  响应写到哪里：两种 TCP 系列传输写入套接字，没有 `socket` 时写入串口，UDP 家族上是该数据报的对端
+  `{ address, port }`。
 - `handle_read_bits` 服务 FC 1 和 FC 2。对 FC 2，`handler` 有 `get_discrete_inputs` 或
   `get_discrete_input` 时使用离散输入的方法，否则使用线圈的方法；随后与其他请求一样由
   `read_points` 选择成批方法或单点方法。`handle_read_registers` 服务 FC 3（保持）和 FC 4（输入），
@@ -336,11 +354,16 @@
    `mbap_frame_length`，否则用 `rtu_request_length`，带上静默时长，`rtu` 时 `serial_line` 为真。
    socket 的接收器在 socket `close` 时清空并移除；串口的在串口 `close` 时清空。因此在
    `rtu_over_tcp` 上，帧长未知的请求立即得到服务，在串口上则在线路静默之后。
-   每一帧交给 `#on_frame`：`tcp` 时用 `parse_tcp_request` 解析，否则用
+   数据报则交给 `#on_datagram(message, remote)`。`udp` 上它用 `split_frames` 和
+   `mbap_frame_length` 单独界定，`rest` 被丢弃。`rtu_over_udp` 上它被推入其对端的接收器：接收器在
+   `#receivers` 中以 `"<address> <port>"` 为键，创建时 `serial_line` 为真；推入之后仍持有字节的
+   接收器才会保留，因此这个映射不会随每个发过数据报的客户端增长。套接字的 `close` 清空全部接收器。
+   每一帧交给 `#on_frame`：MBAP 时用 `parse_tcp_request` 解析，否则用
    `parse_rtu_request`，然后发出 `receive`。`func_code: 0` 的帧被丢弃，除非解析器设置了
    `illegal_function`；此时以该功能码继续处理。
-2. `_on_data(request, socket?)` — RTU 帧格式（`rtu` 和 `rtu_over_tcp`）时 `serial_bus` 为真。在串行总线上，广播（单元 `0`）从不应答：若单元 `0` 被接受且功能为写
-   （5、6、15、16），则执行并丢弃响应，其余一律丢弃；未被接受的单元 ID 静默丢弃。在 TCP 上单元
+2. `_on_data(request, socket?)` — RTU 帧格式（`rtu`、`rtu_over_tcp` 和 `rtu_over_udp`）时
+   `serial_bus` 为真。在串行总线上，广播（单元 `0`）从不应答：若单元 `0` 被接受且功能为写
+   （5、6、15、16），则执行并丢弃响应，其余一律丢弃；未被接受的单元 ID 静默丢弃。在 MBAP 上单元
    `0` 是普通单元，未被接受的单元 ID 得到 `0x0B`。否则由 `serve()` 调用 `dispatch()`，按
    `func_code` 分支到对应的 `handle_*` 方法，由其调用 `handler` 并构造响应 PDU。不支持的功能码 →
    以其自身功能码（`fc | 0x80`）应答异常 `0x01`。
@@ -370,9 +393,10 @@
      检查）不带码。没有监听者的 `handler_error` 会被忽略。其他异常属于程序缺陷，会向外传播。
    - `Modbus_Exception`（从 `ModbusServer.js` 和 `index.js` 导出）在 `HANDLER_EXCEPTIONS` 中查找它的
      码，映射的值是默认消息中使用的名称；码不存在时在 `super()` 之前抛出 `RangeError`。
-3. `send_response(pdu, socket?, tid)` — `tcp`：`encode_tcp_frame`，其协议 ID 为 0，与所服务的每个
-   请求相同（`mbap_frame_length` 不会界定协议 ID 不为 0 的帧）。`rtu` 和 `rtu_over_tcp`：
-   `encode_rtu_frame`。发出 `send`，然后写入 `socket`；没有 `socket` 时写入串口。
+3. `send_response(pdu, socket?, tid)` — MBAP：`encode_tcp_frame`，其协议 ID 为 0，与所服务的每个
+   请求相同（`mbap_frame_length` 不会界定协议 ID 不为 0 的帧）。RTU 系列：`encode_rtu_frame`。
+   发出 `send`，然后写入 `socket`；没有 `socket` 时写入串口；UDP 家族上从 `udp_socket` 把数据报
+   发给对端。
 
 ## 服务端生命周期
 
@@ -389,9 +413,14 @@
   否则它会并入一个结果已经发出的执行，永远等待一个已经过去的 `start`。落定对外 Promise 的那个
   `then` 如果发现 `#last` 仍是该调用，也会将其清除。
 - **执行。** `#run_start` 先执行 `#run_stop`（即重启；未启动时什么也不做），再执行 `#listen`
-  （TCP 系列）或 `#open_serial`。`#run_stop` 销毁存活的套接字并等待 `server.close`，或等待
-  `serial_port.close`；监听器未在监听或串口未打开时立即返回，因此它不需要自己的状态：传输本身
-  就是状态。`#listen` 在首次执行时创建 `net.Server`（`set_tcp`），并等待 `listening` 或 `error`；
+  （TCP 系列）、`#bind`（UDP 家族）或 `#open_serial`。`#run_stop` 销毁存活的套接字并等待
+  `server.close`，或等待 `udp_socket.close`，或等待 `serial_port.close`；监听器未在监听、没有
+  `udp_socket` 或串口未打开时立即返回，因此它不需要自己的状态：传输本身就是状态。`#bind` 用
+  `dns.promises.lookup` 解析主机，每次启动都按其地址族新建一个套接字（已关闭的 `dgram` 套接字不能
+  再次绑定）并绑定。在 `listening` 时它调用 `set_udp(socket)`，后者把它设为 `udp_socket` 并挂接
+  `message`、`error` 和 `close` 监听函数，然后发出 `start`。解析或绑定失败由执行本身报告；绑定
+  失败的套接字在没有 `close` 监听函数的情况下关闭，因此不会随后发出 `stop`，`udp_socket` 保持为
+  `null`。`close` 监听函数清空 `udp_socket`。`#listen` 在首次执行时创建 `net.Server`（`set_tcp`），并等待 `listening` 或 `error`；
   它的监听函数注册在 `set_tcp` 的之后，因此 `start` / `error` 先于 Promise 落定发出；
   `server.listen` 立即抛出（无效的端口号）也算失败。`#open_serial` 以回调方式打开串口：此时
   `SerialPortStream` 把打开失败交给回调，而不是发出 `error`，并且在调用回调之前发出 `open`。
@@ -401,5 +430,6 @@
   给它挂上 `catch`，因此不会出现 `unhandledRejection`；否则该拒绝保持未处理。这一判断在发出事件
   时做出，而不是在拒绝时看 `listenerCount`：`once('error')` 的监听者那时已经移除。每次执行结束后
   清空 `#reported`。不在执行期间时，传输的 `error` 照旧发出，没有监听者时抛出。
+- **UDP 错误。** `udp_socket` 的错误与其他错误一样经过 `#transport_error`，套接字保持打开。
 - **自行关闭。** 串口被设备关闭时，同一个 `close` 处理函数发出 `stop`；没有执行在进行时
   `#end_run` 不起作用，之后的 `stop()` 发现串口已关闭，立即兑现。

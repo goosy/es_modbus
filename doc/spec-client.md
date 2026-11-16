@@ -11,16 +11,19 @@ const client = new Modbus_Client(options);
 ```
 
 The constructor takes a single options object. Exactly one of the transport options `tcp`,
-`rtu_over_tcp` and `serial` selects the transport, and its string value is the target (see
-"Transport options" and "`host:port` target" in `spec-protocol.md`):
+`rtu_over_tcp`, `udp`, `rtu_over_udp` and `serial` selects the transport, and its string value is
+the target (see "Transport options" and "`host:port` target" in `spec-protocol.md`):
 
 ```js
 const tcp = new Modbus_Client({ tcp: '10.0.0.5:502', timeout: 500 });
 const gateway = new Modbus_Client({ rtu_over_tcp: 'gateway:4001' });
+const udp = new Modbus_Client({ udp: '10.0.0.6:502' });
+const device_server = new Modbus_Client({ rtu_over_udp: '10.0.0.7:4001', local: ':4001' });
 const serial = new Modbus_Client({ serial: 'COM3', baud_rate: 19200, parity: 'even' });
 ```
 
 - `tcp`, `rtu_over_tcp` — the server to connect to, as `host:port`; the host must be named.
+- `udp`, `rtu_over_udp` — the server to send requests to, as `host:port`; the host must be named.
 - `serial` — the serial device path. The client creates the serial port itself; it does not
   accept a port instance.
 
@@ -31,12 +34,14 @@ const serial = new Modbus_Client({ serial: 'COM3', baud_rate: 19200, parity: 'ev
 | `name`           | `'Modbus_Client'` | A name for telling instances apart, e.g. in logs; kept in the `name` property. The library does not use it itself. |
 | `timeout`        | `1000`  | Per-transaction response timeout, ms, counted from when the request's frame is written. On expiry the request rejects and `timeout` is emitted. |
 | `delay`          | `20`    | Minimum gap before the next frame write, ms (send pacing; see "Ordering / pacing"). |
-| `turnaround`     | `100`   | RTU and RTU-over-TCP: minimum wait after a broadcast before the next frame write, ms (the serial line "turnaround delay"). |
-| `reconnect_time` | `10000` | Initial reconnect delay for TCP and RTU-over-TCP, ms; the delay grows from there (see "Reconnect"). `> 0` also makes the constructor connect immediately (for serial, open the port); `0` disables the timed reconnect. Both apply only while `enable_reconnect` is true. |
-| `reconnect_max`  | `60000` | TCP and RTU-over-TCP: upper bound of the growing reconnect delay, ms. A finite positive number (else `Invalid reconnect_max`); a value below `reconnect_time` acts as `reconnect_time`. |
-| `max_timeouts`   | `3`     | TCP and RTU-over-TCP: consecutive timeouts after which the connection is taken as dead and closed (see "Dead-link detection"). A non-negative integer (else `Invalid max_timeouts`); `0` disables the detection. |
-| `keep_alive`     | `10000` | TCP and RTU-over-TCP: idle time in ms before the socket sends its first TCP keep-alive probe; `0` disables keep-alive. A non-negative finite number (else `Invalid keep_alive`). |
+| `turnaround`     | `100`   | RTU family: minimum wait after a broadcast before the next frame write, ms (the serial line "turnaround delay"); on RTU-over-UDP also after a timeout (see "UDP"). |
+| `reconnect_time` | `10000` | Initial reconnect delay for the TCP and UDP families, ms; the delay grows from there (see "Reconnect"). `> 0` also makes the constructor connect immediately (for serial, open the port; for UDP, bind the socket); `0` disables the timed reconnect. Both apply only while `enable_reconnect` is true. |
+| `reconnect_max`  | `60000` | TCP and UDP families: upper bound of the growing reconnect delay, ms. A finite positive number (else `Invalid reconnect_max`); a value below `reconnect_time` acts as `reconnect_time`. |
+| `max_timeouts`   | `3`     | TCP family: consecutive timeouts after which the connection is taken as dead and closed (see "Dead-link detection"). A non-negative integer (else `Invalid max_timeouts`); `0` disables the detection. |
+| `keep_alive`     | `10000` | TCP family: idle time in ms before the socket sends its first TCP keep-alive probe; `0` disables keep-alive. A non-negative finite number (else `Invalid keep_alive`). |
 | `silence`        | `50`    | Silence in ms after which the bytes left of an incomplete frame are resolved (see "Frame delimiting" in `spec-protocol.md`). A finite positive number (else `Invalid silence`). On a serial port at least 3.5 character times (1.75 ms above 19200 baud). |
+| `local`          | —       | UDP family: the local address and port the socket binds, as a `host:port` target whose host may be empty (any local address); see "`host:port` target" in `spec-protocol.md`. Omitted, the socket binds a port the system assigns. For a device that replies to a fixed destination port. |
+| `any_source_port` | `false` | UDP family: `true` accepts a datagram from the server's address whatever its source port; `false` only from the server's address and port. A `boolean` (else `Invalid any_source_port`). For a device that replies from a port other than the one it listens on. |
 | `modicon_zero_based` | `false` | `true` selects 0-based Modicon point numbering (see below). |
 | `baud_rate`      | `9600`  | Serial baud rate, a positive integer (else `Invalid baud rate`). |
 | `parity`         | `'none'` | Serial parity: `'none'`, `'odd'`, `'even'`, or `0` = none, `1` = odd, `2` = even. Anything else throws `Invalid parity`. |
@@ -46,15 +51,19 @@ const serial = new Modbus_Client({ serial: 'COM3', baud_rate: 19200, parity: 'ev
 An option that does not apply to the selected transport throws (see "Transport options" in
 `spec-protocol.md`):
 
-| Option | `tcp` | `rtu_over_tcp` | `serial` |
-| --- | --- | --- | --- |
-| `baud_rate`, `parity`, `data_bits`, `stop_bits` | throws | throws | applies |
-| `reconnect_max`, `max_timeouts`, `keep_alive` | applies | applies | throws |
-| `turnaround` | throws | applies | applies |
-| `name`, `timeout`, `delay`, `silence`, `reconnect_time`, `modicon_zero_based` | applies | applies | applies |
+| Option | `tcp` | `rtu_over_tcp` | `udp` | `rtu_over_udp` | `serial` |
+| --- | --- | --- | --- | --- | --- |
+| `baud_rate`, `parity`, `data_bits`, `stop_bits` | throws | throws | throws | throws | applies |
+| `max_timeouts`, `keep_alive` | applies | applies | throws | throws | throws |
+| `reconnect_max` | applies | applies | applies | applies | throws |
+| `local`, `any_source_port` | throws | throws | applies | applies | throws |
+| `turnaround` | throws | applies | throws | applies | applies |
+| `silence` | applies | applies | throws | applies | applies |
+| `name`, `timeout`, `delay`, `reconnect_time`, `modicon_zero_based` | applies | applies | applies | applies | applies |
 
 The serial options are checked at construction, which throws on an invalid one; the
-serial port itself is created when it is first opened (see "Serial port").
+serial port itself is created when it is first opened (see "Serial port"). `local` is checked at
+construction too; the UDP socket is created when the client connects (see "UDP").
 
 The constructor opens the connection automatically when `reconnect_time > 0`. With
 `reconnect_time = 0` the client does not reconnect by itself after the connection is lost, but
@@ -68,7 +77,7 @@ connect again, and `true` at all other times, including after construction. It i
 directly: it follows from the client's connection phase (see `design.md`).
 
 - **`true`** — the automatic mechanisms work as described elsewhere: the timed reconnect after a
-  connection loss (`reconnect_time > 0`, TCP and RTU-over-TCP) and the on-demand connect by a
+  connection loss (`reconnect_time > 0`, TCP and UDP families) and the on-demand connect by a
   request (all transports).
 - **`false`** (manual close) — the client never opens the connection by itself: no reconnect
   timer is started, and a request is rejected at once with `Error('connection lost')` instead of
@@ -169,7 +178,7 @@ it is already closed. It never rejects. Concurrent calls settle together, on the
 
 | Event        | Argument            | Fired when                                              |
 | ------------ | ------------------- | ----------------------------------------------------- |
-| `connect`    | —                   | Transport connected.                                   |
+| `connect`    | —                   | Transport connected (UDP family: socket bound).        |
 | `disconnect` | —                   | Transport closed.                                      |
 | `error`      | `Error` \| `string` | Socket error, or a send attempted with no usable connection. |
 | `timeout`    | —                   | A transaction's `timeout` elapsed with no response.    |
@@ -182,30 +191,33 @@ it is already closed. It never rejects. Concurrent calls settle together, on the
 
 ## Behavior contract
 
-- **Transaction ID.** On TCP the client puts a transaction ID in every request header; the
-  server echoes it and the client matches the response by it. A timeout rejection identifies the
-  transaction by this ID. How IDs are allocated is not specified.
-- **Concurrency.** On TCP, multiple `read`/`write` calls may be outstanding at once, and
-  responses with no matching pending transaction are ignored. RTU-family transports have no
-  transaction ID, so requests are serialized: only one request is outstanding at a time, and the
-  next frame is written only after it resolves, rejects or times out. While a request is
-  outstanding, a response whose unit ID or function code (ignoring the exception bit) differs
-  from the request, or a read response whose byte count differs from the requested length, is
-  ignored and the request keeps waiting. A late response to an earlier request that matches in
-  all of these (the same unit, function code and length) cannot be told apart from the answer to
-  the current one; this is a limit of the RTU protocol.
-- **Broadcast (RTU, RTU-over-TCP).** On a serial bus every request to unit `0` is a broadcast:
+- **Transaction ID.** On the MBAP transports (TCP, UDP) the client puts a transaction ID in every
+  request header; the server echoes it and the client matches the response by it. A timeout
+  rejection identifies the transaction by this ID. How IDs are allocated is not specified.
+- **Concurrency.** On the MBAP transports, multiple `read`/`write` calls may be outstanding at
+  once, and responses with no matching pending transaction are ignored, so a response that
+  arrives out of order, late or twice is matched or discarded by its transaction ID. RTU-family
+  transports have no transaction ID, so requests are serialized: only one request is outstanding
+  at a time, and the next frame is written only after it resolves, rejects or times out. While a
+  request is outstanding, a response whose unit ID or function code (ignoring the exception bit)
+  differs from the request, or a read response whose byte count differs from the requested
+  length, is ignored and the request keeps waiting. A response that arrives while no request is
+  outstanding is discarded. A late response to an earlier request that matches in all of these
+  (the same unit, function code and length) cannot be told apart from the answer to the current
+  one; this is a limit of the RTU protocol.
+- **Broadcast (RTU family).** On a serial bus every request to unit `0` is a broadcast:
   slaves execute a broadcast write, ignore a broadcast read, and never answer. The promise
   resolves as soon as the frame has been written, without waiting for a response: a write with
   `true` (there is no echo to check), a read with an empty `Buffer` (there is no data). It still
   rejects with `connection lost` if the connection is lost before the frame is written. The next
   frame is written no earlier than `turnaround` ms after the broadcast, giving the slaves time to
-  execute it. On TCP unit `0` is an ordinary unit.
+  execute it. On the MBAP transports unit `0` is an ordinary unit.
 - **Ordering / pacing.** Outgoing frames are queued and written one at a time, in the order the
-  requests were issued. On TCP the next frame is written at least `delay` ms after the previous
-  write. On RTU-family transports it is written at least `delay` ms after the previous request
-  ended (resolved, rejected or timed out), or `turnaround` ms after a broadcast, whichever
-  applies; on a serial port the gap is never shorter than the line's 3.5-character silence. The
+  requests were issued. On the MBAP transports the next frame is written at least `delay` ms
+  after the previous write. On RTU-family transports it is written at least `delay` ms after the
+  previous request ended (resolved, rejected or timed out), or `turnaround` ms after a broadcast,
+  whichever applies (on RTU-over-UDP also after a timeout, see "UDP"); on a serial port the gap
+  is never shorter than the line's 3.5-character silence. The
   queue is bounded (256 frames, not counting the one outstanding); on overflow the **oldest**
   queued requests are dropped, and each rejects at once with an `Error` whose message is
   `queue overflow`; their frames are never written.
@@ -218,9 +230,10 @@ it is already closed. It never rejects. Concurrent calls settle together, on the
   queued frames are discarded, so no request is executed after it was reported as failed. A
   request issued while a reconnect back-off is pending, or while `enable_reconnect` is false, is
   rejected at once instead of being queued.
-- **Reconnect (TCP and RTU-over-TCP).** On `close` or `error`, if `reconnect_time > 0` and
+- **Reconnect (TCP and UDP families).** On `close` or `error`, if `reconnect_time > 0` and
   `enable_reconnect` is true, the client retries after a delay; `connect()` called during the
-  back-off rejects with `ERR_ILLEGAL_STATE`. After `disconnect()` no retry happens.
+  back-off rejects with `ERR_ILLEGAL_STATE`. After `disconnect()` no retry happens. On the UDP
+  family only a failed connect is retried (see "UDP").
   - **Exponential back-off.** The first back-off waits `reconnect_time`, and each further one
     twice the previous, up to `reconnect_max`. A failed connect attempt is a loss too, so a peer
     that refuses connections is retried less and less often.
@@ -237,7 +250,7 @@ it is already closed. It never rejects. Concurrent calls settle together, on the
   supported function code), from any unit, whether or not it matches a pending request; an
   exception response counts. It proves that the peer is alive. It resets the reconnect delay and
   the timeout count.
-- **Dead-link detection (TCP and RTU-over-TCP).** A peer that vanishes without closing (cable
+- **Dead-link detection (TCP family).** A peer that vanishes without closing (cable
   pulled, gateway powered off) leaves a half-open connection: no event fires, and a polling client
   is never idle, so TCP keep-alive never probes it either; only the operating system's
   retransmission timeout ends it, which can take many minutes. The client therefore counts the
@@ -251,7 +264,7 @@ it is already closed. It never rejects. Concurrent calls settle together, on the
     connection closed and reopened every `max_timeouts` timeouts.
   - On a serial port timeouts are not counted: a timeout there means a slave did not answer, not
     that the line is gone, and a serial port is never re-opened automatically.
-- **Keep-alive (TCP and RTU-over-TCP).** The socket enables TCP keep-alive, probing after
+- **Keep-alive (TCP family).** The socket enables TCP keep-alive, probing after
   `keep_alive` ms of idleness. It covers a client that polls rarely, whose socket is idle long
   enough for the probes to run; the timeout count covers a client that polls often.
 - **Serial port.** The port is created and opened at construction when `reconnect_time > 0`,
@@ -262,3 +275,28 @@ it is already closed. It never rejects. Concurrent calls settle together, on the
   `connect()` tries again. A closed serial port is never re-opened automatically (a close usually
   means the device is gone); the next request (while `enable_reconnect` is true) or `connect()`
   opens it again. After `disconnect()` a request does not open the port.
+- **UDP (UDP and RTU-over-UDP).** UDP has no connection: the client's connection is its local
+  socket.
+  - **Connecting** resolves the target's host and binds the socket: to `local` when given, else
+    to a port the system assigns, on any local address of the target's address family. The
+    client is connected once the socket is bound, and emits `connect`. A lookup or bind that
+    fails (for example, `local` names a port in use) is a failed connect: it emits `error`,
+    rejects `connect()` and the pending requests with `connection lost`, and is retried as under
+    "Reconnect".
+  - **Datagrams.** Requests are sent to the target's address and port. A received datagram is
+    taken only from the target's address and, unless `any_source_port` is true, its port; any
+    other datagram is discarded unseen, without `receive`. How the bytes of the datagrams are
+    delimited into frames is in "Datagrams" in `spec-protocol.md`.
+  - **Errors.** Once the socket is bound, a socket error (for example, an unreachable port
+    reported by the system) is emitted as `error`, and the socket stays open. A datagram is not
+    acknowledged, so a request whose request or response datagram is lost fails by its timeout.
+    The socket closes only on `disconnect()`.
+  - **No dead-link detection, no keep-alive.** There is no connection to probe, and binding a new
+    socket cannot repair a path that loses datagrams, so timeouts are not counted.
+  - **No resend.** A request that timed out is not sent again; the caller decides whether to
+    retry, since some devices execute a write as a command, and would execute it twice.
+  - **Late responses (RTU-over-UDP).** After a request times out, the next frame is written no
+    earlier than `max(delay, turnaround)` ms later. A datagram that arrives in between finds no
+    outstanding request and is discarded, so a late answer to the request that timed out is not
+    taken for the answer to the next one. A later one still can be (see "Concurrency"); a
+    `turnaround` longer than the device's longest response delay prevents that.

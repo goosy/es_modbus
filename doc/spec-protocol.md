@@ -8,29 +8,41 @@ Covers the wire-level rules shared by client and server.
 | -------------- | ---------------- | ----------------------- | -------------------------------------------------- |
 | TCP            | `tcp`            | `host:port`             | MBAP header (7 bytes) + PDU.                        |
 | RTU-over-TCP   | `rtu_over_tcp`   | `host:port`             | RTU framing (unit ID + PDU + CRC16) carried on a TCP socket. |
+| UDP            | `udp`            | `host:port`             | MBAP header (7 bytes) + PDU, carried in UDP datagrams. |
+| RTU-over-UDP   | `rtu_over_udp`   | `host:port`             | RTU framing (unit ID + PDU + CRC16) carried in UDP datagrams. |
 | RTU            | `serial`         | serial device path      | RTU framing on a serial port.                       |
+
+The transports fall into families, which the rest of the specification names:
+
+- **MBAP transports**: TCP and UDP. A request carries a transaction ID.
+- **RTU family**: RTU, RTU-over-TCP and RTU-over-UDP. There is no transaction ID; the unit ID
+  is that of a serial bus (see "Unit ID").
+- **TCP family**: TCP and RTU-over-TCP, on a TCP connection.
+- **UDP family**: UDP and RTU-over-UDP, on a UDP socket, with no connection.
 
 ### Transport options
 
 The client and the server select their transport the same way (see `spec-client.md` and
 `spec-server.md`):
 
-- Exactly one of the options `tcp`, `rtu_over_tcp` and `serial` must be given; its string value is
-  the target. With none of them, or more than one, the constructor throws
-  `Error('Exactly one of tcp, rtu_over_tcp, serial must be given')`. An option whose value is
-  `undefined` or `null` counts as not given, for the transport options as well as the others.
+- Exactly one of the options `tcp`, `rtu_over_tcp`, `udp`, `rtu_over_udp` and `serial` must be
+  given; its string value is the target. With none of them, or more than one, or with options
+  that are not an object, the constructor throws
+  `Error('Exactly one of tcp, rtu_over_tcp, udp, rtu_over_udp, serial must be given')`. An option
+  whose value is `undefined` or `null` counts as not given, for the transport options as well as
+  the others.
 - The target of `serial` is the serial device path, such as `'COM3'` or `'/dev/ttyUSB0'`: a
   non-empty `string`, else `Invalid serial port`.
 - An option that does not apply to the selected transport makes the constructor throw
-  `` Error(`Option <name> does not apply to <transport>`) ``, where `<transport>` is `tcp`,
-  `rtu_over_tcp` or `serial`, instead of being ignored. Each side lists the transports its options
+  `` Error(`Option <name> does not apply to <transport>`) ``, where `<transport>` is the name of
+  the transport option, instead of being ignored. Each side lists the transports its options
   apply to.
 - The constructor checks the transport options first, then whether each option applies, then the
   option values.
 
 ### `host:port` target
 
-The target of `tcp` and `rtu_over_tcp` is a `string`:
+The target of `tcp`, `rtu_over_tcp`, `udp` and `rtu_over_udp` is a `string`:
 
 - The port may be omitted and is then `502`: `'10.0.0.5'` is the same as `'10.0.0.5:502'`.
 - An IPv6 address with a port is enclosed in brackets: `'[::1]:502'`; `'[::1]'` is port `502`. A
@@ -42,7 +54,7 @@ The target of `tcp` and `rtu_over_tcp` is a `string`:
 
 Any other value throws `` Error(`Invalid host: <value>`) ``.
 
-### MBAP header (TCP)
+### MBAP header (TCP, UDP)
 
 | Offset | Field              | Notes                                        |
 | ------ | ------------------ | -------------------------------------------- |
@@ -61,20 +73,22 @@ except the trailing 2 CRC bytes) must be 3–253. RTU has no transaction field.
 
 The meaning of the unit ID depends on the transport, following common Modbus practice:
 
-- **Serial bus** (RTU, and RTU-over-TCP, which carries a serial line). `0` is the broadcast
+- **Serial bus** (the RTU family: RTU, and RTU-over-TCP and RTU-over-UDP, which carry a serial
+  line). `0` is the broadcast
   address: a broadcast write is executed by every slave and answered by none. `1..247` are
   individual slave addresses. `248..255` are reserved by the Modbus serial line specification and
   should not be assigned to a slave. A slave answers only requests addressed to itself.
-- **TCP.** There is no broadcast; `0` is an ordinary unit ID. The unit ID selects a unit behind
-  the server, as through a gateway. By convention (Modbus TCP implementation guide) `0xFF` (255)
-  addresses the server itself when no unit routing is needed; this library treats it as an
-  ordinary unit ID.
+- **MBAP transports** (TCP, UDP). There is no broadcast; `0` is an ordinary unit ID. The unit ID
+  selects a unit behind the server, as through a gateway. By convention (Modbus TCP
+  implementation guide) `0xFF` (255) addresses the server itself when no unit routing is needed;
+  this library treats it as an ordinary unit ID.
 
 ### Frame delimiting
 
 A read carries no frame boundaries: it may hold several frames, or only part of one. Every
-transport (TCP, RTU-over-TCP, serial RTU) delimits frames by **length**, with one receive buffer
-per connection (each TCP socket, the serial port). Each read is appended to the buffer; then, as
+transport delimits frames by **length**. TCP, RTU-over-TCP, serial RTU and RTU-over-UDP keep one
+receive buffer per byte stream: each TCP socket, the serial port, and on RTU-over-UDP the
+datagrams of each peer (see "Datagrams" below). Each read is appended to the buffer; then, as
 long as bytes remain, the length of the frame at the start of the buffer is worked out:
 
 - **Complete**: the frame is cut off and processed, and the rest of the buffer is examined in
@@ -99,12 +113,24 @@ bytes, and a correct frame received behind it is found when the silence ends.
 The buffer is emptied when the connection closes. Discarded bytes are not frames and are not
 reported as received.
 
-**MBAP (TCP).** The length is `6 + ` the MBAP length field. A protocol ID other than `0`, or a
-length field outside `3..253`, cannot be delimited.
+**Datagrams (UDP family).** A UDP datagram arrives whole or not at all, but who sends it decides
+how its bytes relate to frames:
 
-**RTU (RTU-over-TCP and serial).** The length follows from the function code and, where present,
-the byte count, and differs by direction. Once the whole frame is received its CRC must be
-valid; a frame with an invalid CRC cannot be delimited.
+- **UDP.** A device that speaks Modbus UDP sends one ADU per datagram. Each datagram is delimited
+  on its own, as a buffer of its own: the MBAP frames in it are taken, and the bytes left are
+  discarded. Nothing is carried over to the next datagram, and there is no silence.
+- **RTU-over-UDP.** A transparent serial device server packs the bytes of its serial line into
+  datagrams by its own timing, so one frame may be split across datagrams, and one datagram may
+  hold several frames. The datagrams of one peer (its address and port) form one byte stream,
+  delimited like a serial line: an incomplete frame waits for the next datagram from that peer,
+  and the bytes left after a silence are discarded, since a lost datagram is never sent again.
+
+**MBAP (TCP, UDP).** The length is `6 + ` the MBAP length field. A protocol ID other than `0`, or
+a length field outside `3..253`, cannot be delimited.
+
+**RTU (serial, RTU-over-TCP and RTU-over-UDP).** The length follows from the function code and,
+where present, the byte count, and differs by direction. Once the whole frame is received its CRC
+must be valid; a frame with an invalid CRC cannot be delimited.
 
 | Direction | Function code     | Frame length            |
 | --------- | ----------------- | ----------------------- |
@@ -120,9 +146,9 @@ function code `1..127`), and any length beyond the RTU maximum of 256 bytes, can
 delimited.
 
 A request whose length is unknown (an unsupported function code) is taken as one frame made of
-the bytes received so far: at once on RTU-over-TCP, and on a serial line once the line has been
-silent (below). If its CRC is valid it is answered with exception `0x01`; otherwise it is
-dropped.
+the bytes received so far: at once on RTU-over-TCP, and on a serial line or RTU-over-UDP once the
+line or peer has been silent (below). If its CRC is valid it is answered with exception `0x01`;
+otherwise it is dropped.
 
 **Silence.** The silence is the `silence` option of the server or client, 50 ms by default. On a
 serial line it is at least 3.5 character times, so it never cuts a frame still being received:
@@ -132,11 +158,12 @@ parity bit, if any + stop bits) / baud rate. Once the silence has elapsed with b
 buffer:
 
 - a request of unknown length at the start of the buffer is taken as one frame (on a serial
-  line; RTU-over-TCP takes it at once);
+  line and RTU-over-UDP; RTU-over-TCP takes it at once);
 - otherwise the receiver resynchronizes, and delimits the frames that follow;
 - the bytes still left are discarded on a serial line, where the bytes of one frame are sent
-  back to back, and kept on a TCP connection, where a correct frame may be delayed by any
-  amount, for example by a retransmission.
+  back to back, and on RTU-over-UDP, where a lost datagram is never sent again; they are kept on
+  a TCP connection, where a correct frame may be delayed by any amount, for example by a
+  retransmission.
 
 A longer silence suits a USB serial adapter with a high latency, or a gateway that forwards in
 large batches, such as a cellular one. A shorter one finds a frame stuck behind bad bytes sooner,
@@ -280,7 +307,7 @@ message is `` `response error: ${exception_code}` ``. Exception codes the server
 | `0x03` | Illegal Data Value                        | A quantity outside the limits above (`>= 1` and at most the maximum), a byte count that does not match the quantity (FC 15/16), or an FC 5 value other than `0xFF00` / `0x0000`; or a `handler` rejects the request with it. |
 | `0x04` | Server Device Failure                     | A `handler` function failed while serving the request; or a `handler` rejects the request with it. |
 | `0x06` | Server Device Busy                        | Only when a `handler` rejects the request with it. |
-| `0x0B` | Gateway Target Device Failed To Respond   | TCP only: request addressed to a unit ID the server is not configured to accept. On a serial bus such a request is not answered. |
+| `0x0B` | Gateway Target Device Failed To Respond   | MBAP transports (TCP, UDP) only: request addressed to a unit ID the server is not configured to accept. On a serial bus such a request is not answered. |
 
 For a supported function code the server checks the request in this order, as the Modbus
 application protocol does: the data values (`0x03`), then the address range (`0x02`), and only

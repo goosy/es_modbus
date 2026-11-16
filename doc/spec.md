@@ -33,13 +33,14 @@ mix. The server works in PDU addresses only.
 
 ### In scope
 
-- Transports: Modbus **TCP**, Modbus **RTU** over a serial port, and **RTU-over-TCP** (RTU
-  framing on a TCP socket).
+- Transports: Modbus **TCP**, Modbus **RTU** over a serial port, **RTU-over-TCP** (RTU framing
+  on a TCP socket), Modbus **UDP** (MBAP framing in UDP datagrams), and **RTU-over-UDP** (RTU
+  framing in UDP datagrams).
 - Function codes `1, 2, 3, 4, 5, 6, 15, 16` (read/write coils and registers, single and multiple).
 - Modbus exception responses (function code + `0x80`, one exception byte).
 - Multi-unit servers: a single server instance can host several unit IDs and route by unit ID.
 - Client-side transaction tracking, per-request timeout, send pacing, and automatic reconnect
-  for TCP and RTU-over-TCP.
+  for the TCP family (TCP and RTU-over-TCP) and the UDP family (UDP and RTU-over-UDP).
 - Event emitters on both classes for wire tracing (`send` / `receive`) and lifecycle.
 - An automated test suite for the codec, the server and the client (see `design-test.md`).
 
@@ -54,18 +55,19 @@ mix. The server works in PDU addresses only.
 ## Tools and dependencies
 
 - **Runtime:** Node.js with ES modules (`"type": "module"`). Only Node built-ins are used at
-  runtime (`node:net`, `node:events`), plus `serialport-rs` for the serial/RTU paths.
+  runtime (`node:net`, `node:dgram`, `node:dns`, `node:events`), plus `serialport-rs` for the
+  serial/RTU paths.
   The published package has **no runtime dependencies**: users install `es-modbus` alone. The
   JavaScript of `serialport-rs` (its stream and binding modules) is bundled into
   `dist/modbus.js`, and its native addons ship in `native/` (N-API, so one file per platform
   serves every Node.js version). The bundle loads `serialport-rs` only on the first use of a
   serial port, never at import: loading it loads the native addon, and a platform without an
-  addon (or a process that forbids native addons) must still be able to use TCP. The licenses of
-  the bundled packages ship in `THIRD_PARTY_LICENSES`, those of the Rust crates in the native
-  addons in `native/THIRD_PARTY_LICENSES.md`.
+  addon (or a process that forbids native addons) must still be able to use TCP and UDP. The
+  licenses of the bundled packages ship in `THIRD_PARTY_LICENSES`, those of the Rust crates in
+  the native addons in `native/THIRD_PARTY_LICENSES.md`.
 - **Serial platforms:** native addons ship for Windows (x64, ia32, arm64), macOS (x64, arm64),
   Linux with glibc or musl (x64, arm64, armv7), Linux with glibc on armv6, and Android (arm64,
-  armv7). On any other platform the serial paths fail on first use; TCP works everywhere.
+  armv7). On any other platform the serial paths fail on first use; TCP and UDP work everywhere.
 - **Node.js version:** `>=20.11` (`engines`), for `import.meta.dirname`.
 - **Package manager:** pnpm (required — see `AGENTS.md`).
 - **Bundler:** Rolldown, driven by `build.js` through its API (built-in node resolution and

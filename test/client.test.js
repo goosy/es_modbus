@@ -79,7 +79,7 @@ describe('Modbus_Client construction', () => {
 	});
 
 	test('exactly one transport option must be given', () => {
-		const message = /Exactly one of tcp, rtu_over_tcp, serial must be given/;
+		const message = /Exactly one of tcp, rtu_over_tcp, udp, rtu_over_udp, serial must be given/;
 		assert.throws(() => new Modbus_Client(), message);
 		assert.throws(() => new Modbus_Client(HOST), message);
 		assert.throws(() => new Modbus_Client({ reconnect_time: 0 }), message);

@@ -4,7 +4,7 @@
 
 一个小巧的 Node.js Modbus 客户端与服务端，ES 模块，没有运行时依赖。
 
-- **传输方式：** Modbus TCP、串口上的 Modbus RTU，以及 RTU over TCP。
+- **传输方式：** Modbus TCP、串口上的 Modbus RTU、RTU over TCP、Modbus UDP，以及 RTU over UDP。
 - **功能码：** 1、2、3、4、5、6、15、16，以及异常响应。
 - **客户端：** 基于 Promise 的读写、按请求计算的超时、发送节奏控制、指数退避的自动重连，
   以及 TCP 上的死链检测。
@@ -17,7 +17,7 @@ pnpm add es-modbus
 ```
 
 需要 Node.js 20.11 或更高版本。串口支持以预编译的原生插件提供，覆盖 Windows、macOS、
-Linux（glibc 与 musl）和 Android；它只在首次使用串口时加载，所以 TCP 在任何平台都能用。
+Linux（glibc 与 musl）和 Android；它只在首次使用串口时加载，所以 TCP 和 UDP 在任何平台都能用。
 
 ## 客户端
 
@@ -38,12 +38,18 @@ await client.write('00001,16', Buffer.from([0xff, 0x00]), 1);
 await client.disconnect();
 ```
 
-`tcp`、`rtu_over_tcp`、`serial` 中恰好一个选定传输方式。前两者取 `host:port` 字符串（端口默认为
-`502`，IPv6 主机写作 `[::1]:502`），`serial` 取串口设备路径：
+`tcp`、`rtu_over_tcp`、`udp`、`rtu_over_udp`、`serial` 中恰好一个选定传输方式。除 `serial` 外都取
+`host:port` 字符串（端口默认为 `502`，IPv6 主机写作 `[::1]:502`），`serial` 取串口设备路径：
 
 ```js
 // RTU over TCP，例如串口转以太网网关
 const gateway = new Modbus_Client({ rtu_over_tcp: '192.168.1.20:4001' });
+
+// Modbus UDP
+const udp = new Modbus_Client({ udp: '192.168.1.30:502' });
+
+// RTU over UDP，例如向固定本地端口回复的串口服务器
+const device_server = new Modbus_Client({ rtu_over_udp: '192.168.1.40:4001', local: ':4001' });
 
 // 串口上的 RTU
 const serial = new Modbus_Client({ serial: 'COM3', baud_rate: 19200, parity: 'even' });
@@ -82,12 +88,14 @@ const serial = new Modbus_Client({ serial: 'COM3', baud_rate: 19200, parity: 'ev
 
 | 选项             | 默认值  | 含义                                                   |
 | ---------------- | ------- | ------------------------------------------------------ |
-| `tcp`、`rtu_over_tcp`、`serial` | — | 传输方式及其目标；必须恰好给出一个。 |
+| `tcp`、`rtu_over_tcp`、`udp`、`rtu_over_udp`、`serial` | — | 传输方式及其目标；必须恰好给出一个。 |
 | `timeout`        | `1000`  | 每个请求的响应超时，毫秒。                             |
 | `delay`          | `20`    | 帧之间的最小间隔，毫秒。                               |
 | `reconnect_time` | `10000` | 初始重连延迟，毫秒；`> 0` 时还会立即连接。             |
 | `reconnect_max`  | `60000` | 重连延迟的上限，毫秒。                                 |
 | `max_timeouts`   | `3`     | TCP：连续超时这么多次后关闭连接；`0` 表示关闭此功能。  |
+| `local`          | —       | UDP：要绑定的本地 `host:port`；主机可以留空。          |
+| `any_source_port` | `false` | UDP：接受来自服务端地址任意端口的应答。               |
 | `baud_rate`、`parity`、`data_bits`、`stop_bits` | `9600`、`'none'`、`8`、`1` | 串口参数。 |
 
 不适用于所选传输方式的选项，例如 TCP 客户端上的 `baud_rate`，会在构造时抛错。
@@ -121,7 +129,7 @@ await server.start();
 
 服务端选定传输方式的方式与客户端相同；主机为空，例如 `':502'`，表示绑定 `0.0.0.0`。串口上的
 RTU 写作 `{ serial: '/dev/ttyUSB0', baud_rate: 19200 }`，RTU over TCP 写作
-`{ rtu_over_tcp: ':4001' }`。
+`{ rtu_over_tcp: ':4001' }`，Modbus UDP 写作 `{ udp: ':502' }`。
 
 - **单点方法：** `get_coil`、`get_discrete_input`（可选；没有它时功能码 2 读线圈）、
   `get_holding_register`、`get_input_register`、`set_coil`、`set_holding_register`。

@@ -12,16 +12,20 @@ import { Modbus_Client } from 'es-modbus';
 const client = new Modbus_Client(options);
 ```
 
-构造函数只接收一个 options 对象。传输选项 `tcp`、`rtu_over_tcp`、`serial` 中恰好一个选定传输方式，
-它的字符串值就是目标（见 `spec-protocol.zh-cn.md` 的“传输选项”和“`host:port` 目标”）：
+构造函数只接收一个 options 对象。传输选项 `tcp`、`rtu_over_tcp`、`udp`、`rtu_over_udp`、`serial`
+中恰好一个选定传输方式，它的字符串值就是目标（见 `spec-protocol.zh-cn.md` 的“传输选项”和
+“`host:port` 目标”）：
 
 ```js
 const tcp = new Modbus_Client({ tcp: '10.0.0.5:502', timeout: 500 });
 const gateway = new Modbus_Client({ rtu_over_tcp: 'gateway:4001' });
+const udp = new Modbus_Client({ udp: '10.0.0.6:502' });
+const device_server = new Modbus_Client({ rtu_over_udp: '10.0.0.7:4001', local: ':4001' });
 const serial = new Modbus_Client({ serial: 'COM3', baud_rate: 19200, parity: 'even' });
 ```
 
 - `tcp`、`rtu_over_tcp` — 要连接的服务端，写作 `host:port`；必须写明主机。
+- `udp`、`rtu_over_udp` — 请求发往的服务端，写作 `host:port`；必须写明主机。
 - `serial` — 串口设备路径。串口由客户端自行创建；不接受传入的串口实例。
 
 ### options
@@ -31,12 +35,14 @@ const serial = new Modbus_Client({ serial: 'COM3', baud_rate: 19200, parity: 'ev
 | `name`           | `'Modbus_Client'` | 用于区分实例的名称，例如在日志中；保存在 `name` 属性中。库本身不使用它。 |
 | `timeout`        | `1000`  | 单事务响应超时，毫秒，从该请求的帧写出时算起。到期时请求被拒绝，并发出 `timeout` 事件。 |
 | `delay`          | `20`    | 写出下一帧之前的最小间隔，毫秒（发送节流；见“顺序/节流”）。             |
-| `turnaround`     | `100`   | RTU 和 RTU-over-TCP：广播之后到写出下一帧的最小等待，毫秒（串行线路的“转向延迟”）。 |
-| `reconnect_time` | `10000` | TCP 和 RTU-over-TCP 的初始重连延迟，毫秒；延迟从这里开始递增（见“重连”）。`> 0` 同时使构造函数立即连接（串口则打开端口）；`0` 禁用定时重连。二者都只在 `enable_reconnect` 为真时生效。 |
-| `reconnect_max`  | `60000` | TCP 和 RTU-over-TCP：递增的重连延迟的上限，毫秒。必须是有限的正数（否则抛出 `Invalid reconnect_max`）；小于 `reconnect_time` 时按 `reconnect_time` 处理。 |
-| `max_timeouts`   | `3`     | TCP 和 RTU-over-TCP：连续超时达到该次数后，连接被视为已死并关闭（见“死链检测”）。必须是非负整数（否则抛出 `Invalid max_timeouts`）；`0` 关闭检测。 |
-| `keep_alive`     | `10000` | TCP 和 RTU-over-TCP：套接字空闲多少毫秒后发出第一个 TCP keep-alive 探测；`0` 关闭 keep-alive。必须是有限的非负数（否则抛出 `Invalid keep_alive`）。 |
+| `turnaround`     | `100`   | RTU 家族：广播之后到写出下一帧的最小等待，毫秒（串行线路的“转向延迟”）；RTU-over-UDP 上超时之后也是如此（见“UDP”）。 |
+| `reconnect_time` | `10000` | TCP 家族和 UDP 家族的初始重连延迟，毫秒；延迟从这里开始递增（见“重连”）。`> 0` 同时使构造函数立即连接（串口则打开端口；UDP 则绑定套接字）；`0` 禁用定时重连。二者都只在 `enable_reconnect` 为真时生效。 |
+| `reconnect_max`  | `60000` | TCP 家族和 UDP 家族：递增的重连延迟的上限，毫秒。必须是有限的正数（否则抛出 `Invalid reconnect_max`）；小于 `reconnect_time` 时按 `reconnect_time` 处理。 |
+| `max_timeouts`   | `3`     | TCP 家族：连续超时达到该次数后，连接被视为已死并关闭（见“死链检测”）。必须是非负整数（否则抛出 `Invalid max_timeouts`）；`0` 关闭检测。 |
+| `keep_alive`     | `10000` | TCP 家族：套接字空闲多少毫秒后发出第一个 TCP keep-alive 探测；`0` 关闭 keep-alive。必须是有限的非负数（否则抛出 `Invalid keep_alive`）。 |
 | `silence`        | `50`    | 静默时间（ms），超过之后处理不完整帧留下的残留字节（见 `spec-protocol.zh-cn.md` 的“帧的界定”）。必须是有限的正数（否则抛出 `Invalid silence`）。串口上至少为 3.5 个字符时间（19200 波特以上为 1.75 ms）。 |
+| `local`          | —       | UDP 家族：套接字绑定的本地地址和端口，写作主机可以留空（表示任意本地地址）的 `host:port` 目标；见 `spec-protocol.zh-cn.md` 的“`host:port` 目标”。省略时，套接字绑定系统分配的端口。用于向固定目标端口回复的设备。 |
+| `any_source_port` | `false` | UDP 家族：`true` 接受来自服务端地址的数据报，不论其源端口；`false` 只接受来自服务端地址和端口的数据报。必须是 `boolean`（否则抛出 `Invalid any_source_port`）。用于回复源端口与监听端口不同的设备。 |
 | `modicon_zero_based` | `false` | `true` 选择 0 起始的 Modicon 点号编号（见下文）。 |
 | `baud_rate`      | `9600`  | 串口波特率，正整数（否则抛出 `Invalid baud rate`）。 |
 | `parity`         | `'none'` | 串口校验位：`'none'`、`'odd'`、`'even'`，或 `0` = 无、`1` = 奇、`2` = 偶。其他值抛出 `Invalid parity`。 |
@@ -45,15 +51,19 @@ const serial = new Modbus_Client({ serial: 'COM3', baud_rate: 19200, parity: 'ev
 
 不适用于所选传输方式的选项会抛错（见 `spec-protocol.zh-cn.md` 的“传输选项”）：
 
-| 选项 | `tcp` | `rtu_over_tcp` | `serial` |
-| --- | --- | --- | --- |
-| `baud_rate`、`parity`、`data_bits`、`stop_bits` | 抛错 | 抛错 | 适用 |
-| `reconnect_max`、`max_timeouts`、`keep_alive` | 适用 | 适用 | 抛错 |
-| `turnaround` | 抛错 | 适用 | 适用 |
-| `name`、`timeout`、`delay`、`silence`、`reconnect_time`、`modicon_zero_based` | 适用 | 适用 | 适用 |
+| 选项 | `tcp` | `rtu_over_tcp` | `udp` | `rtu_over_udp` | `serial` |
+| --- | --- | --- | --- | --- | --- |
+| `baud_rate`、`parity`、`data_bits`、`stop_bits` | 抛错 | 抛错 | 抛错 | 抛错 | 适用 |
+| `max_timeouts`、`keep_alive` | 适用 | 适用 | 抛错 | 抛错 | 抛错 |
+| `reconnect_max` | 适用 | 适用 | 适用 | 适用 | 抛错 |
+| `local`、`any_source_port` | 抛错 | 抛错 | 适用 | 适用 | 抛错 |
+| `turnaround` | 抛错 | 适用 | 抛错 | 适用 | 适用 |
+| `silence` | 适用 | 适用 | 抛错 | 适用 | 适用 |
+| `name`、`timeout`、`delay`、`reconnect_time`、`modicon_zero_based` | 适用 | 适用 | 适用 | 适用 | 适用 |
 
 串口选项在构造时校验，无效时
-构造函数抛出异常；串口本身在首次打开时才创建（见“串口”）。
+构造函数抛出异常；串口本身在首次打开时才创建（见“串口”）。`local` 也在构造时校验；UDP 套接字在
+客户端连接时才创建（见“UDP”）。
 
 当 `reconnect_time > 0` 时，构造函数会自动打开连接。`reconnect_time = 0` 时，连接丢失后客户端不会
 自行重连，但仍会按需连接：第一个请求（或 `connect()`）会打开连接。
@@ -64,8 +74,8 @@ const serial = new Modbus_Client({ serial: 'COM3', baud_rate: 19200, parity: 'ev
 某次 `connect()` 重新开始连接为止，它为 `false`；其余时间（包括构造后）为 `true`。它不被直接设置，
 而是由客户端的连接阶段推出（见 `design.zh-cn.md`）。
 
-- **`true`** — 各处所述的自动机制照常生效：连接丢失后的定时重连（`reconnect_time > 0`，TCP 和
-  RTU-over-TCP），以及由请求触发的按需连接（所有传输）。
+- **`true`** — 各处所述的自动机制照常生效：连接丢失后的定时重连（`reconnect_time > 0`，TCP 家族
+  和 UDP 家族），以及由请求触发的按需连接（所有传输）。
 - **`false`**（手动关闭）— 客户端绝不自行打开连接：不启动重连定时器；请求被立即以
   `Error('connection lost')` 拒绝，既不入队，也不打开连接。此类请求不发出 `error` 事件：连接断开
   是调用者自己关闭的结果。只有 `connect()` 会重新打开连接。
@@ -152,7 +162,7 @@ FC 15/16 的数量）。回显与请求一致时为 `true`，不一致时为 `fa
 
 | 事件         | 参数                | 触发时机                                                |
 | ------------ | ------------------- | ------------------------------------------------------- |
-| `connect`    | —                   | 传输已连接。                                            |
+| `connect`    | —                   | 传输已连接（UDP 家族：套接字已绑定）。                  |
 | `disconnect` | —                   | 传输已关闭。                                            |
 | `error`      | `Error` \| `string` | 套接字错误，或在没有可用连接时尝试发送。                |
 | `timeout`    | —                   | 某个事务的 `timeout` 到期仍无响应。                     |
@@ -165,21 +175,23 @@ FC 15/16 的数量）。回显与请求一致时为 `true`，不一致时为 `fa
 
 ## 行为约定
 
-- **事务 ID。** 在 TCP 上，客户端在每个请求头中放入一个事务 ID；服务端原样返回，客户端据此匹配
-  响应。超时拒绝会以该 ID 标识事务。ID 如何分配不作规定。
-- **并发。** TCP 上可同时存在多个未完成的 `read`/`write` 调用，没有对应待决事务的响应会被忽略。
-  RTU 系列传输没有事务 ID，因此请求串行化：同一时刻只有一个未完成的请求，它兑现、被拒绝或超时
-  之后才写出下一帧。请求未完成期间，单元 ID 或功能码（不计异常位）与请求不符的响应，以及字节数
-  与所请求长度不符的读响应，都会被忽略，请求继续等待。对先前某个请求的迟到响应，如果以上各项都
-  相符（同一单元、功能码和长度），就无法与当前请求的应答区分；这是 RTU 协议本身的局限。
-- **广播（RTU、RTU-over-TCP）。** 在串行总线上，发往单元 `0` 的每个请求都是广播：从站执行广播写、
+- **事务 ID。** 在 MBAP 传输（TCP、UDP）上，客户端在每个请求头中放入一个事务 ID；服务端原样
+  返回，客户端据此匹配响应。超时拒绝会以该 ID 标识事务。ID 如何分配不作规定。
+- **并发。** MBAP 传输上可同时存在多个未完成的 `read`/`write` 调用，没有对应待决事务的响应会被
+  忽略，因此乱序、迟到或重复到达的响应都按事务 ID 匹配或丢弃。RTU 系列传输没有事务 ID，因此请求
+  串行化：同一时刻只有一个未完成的请求，它兑现、被拒绝或超时之后才写出下一帧。请求未完成期间，
+  单元 ID 或功能码（不计异常位）与请求不符的响应，以及字节数与所请求长度不符的读响应，都会被
+  忽略，请求继续等待。没有未完成的请求时到达的响应会被丢弃。对先前某个请求的迟到响应，如果以上
+  各项都相符（同一单元、功能码和长度），就无法与当前请求的应答区分；这是 RTU 协议本身的局限。
+- **广播（RTU 家族）。** 在串行总线上，发往单元 `0` 的每个请求都是广播：从站执行广播写、
   忽略广播读，且从不应答。帧写出后 promise 立即兑现，不等待应答：写以 `true` 兑现（没有回显可
   校验），读以空 `Buffer` 兑现（没有数据）。若帧写出之前连接丢失，仍以 `connection lost` 拒绝。
-  广播之后至少等 `turnaround` 毫秒才写出下一帧，让从站有时间执行广播。在 TCP 上单元 `0` 是普通
-  单元。
-- **顺序/节流。** 发出的帧先入队，按请求发出的顺序逐个写入。TCP 上，下一帧至少在上一次写入
+  广播之后至少等 `turnaround` 毫秒才写出下一帧，让从站有时间执行广播。在 MBAP 传输上单元 `0` 是
+  普通单元。
+- **顺序/节流。** 发出的帧先入队，按请求发出的顺序逐个写入。MBAP 传输上，下一帧至少在上一次写入
   `delay` 毫秒之后写出。RTU 系列传输上，下一帧至少在上一个请求结束（兑现、被拒绝或超时）`delay`
-  毫秒之后写出，广播之后则至少等 `turnaround` 毫秒；串口上这个间隔不短于线路的 3.5 字符静默时间。
+  毫秒之后写出，广播之后则至少等 `turnaround` 毫秒（RTU-over-UDP 上超时之后也是如此，见“UDP”）；
+  串口上这个间隔不短于线路的 3.5 字符静默时间。
   队列有上限（256 帧，不计未完成的那一个）；溢出时**最旧**的排队请求被丢弃，各自立即以消息为
   `queue overflow` 的 `Error` 拒绝，它们的帧不会写出。
 - **超时按事务计**，而非按连接计，从请求的帧写出时算起，在队列中等待的时间不计入。超时之后到达
@@ -188,9 +200,9 @@ FC 15/16 的数量）。回显与请求一致时为 `true`，不一致时为 `fa
   （无论已发出还是仍在队列中）都被立即以 `Error`（消息为
   `connection lost`）拒绝，排队的帧被丢弃，因此不会有请求在被报告失败之后又被执行。在重连退避
   期间或 `enable_reconnect` 为假时发出的请求会被立即拒绝，而不是入队。
-- **重连（TCP 和 RTU-over-TCP）。** 发生 `close` 或 `error` 时，若 `reconnect_time > 0` 且
+- **重连（TCP 家族和 UDP 家族）。** 发生 `close` 或 `error` 时，若 `reconnect_time > 0` 且
   `enable_reconnect` 为真，客户端在一段延迟后重试；退避期间调用 `connect()` 会以
-  `ERR_ILLEGAL_STATE` 拒绝。`disconnect()` 之后不会重试。
+  `ERR_ILLEGAL_STATE` 拒绝。`disconnect()` 之后不会重试。UDP 家族上只重试失败的连接（见“UDP”）。
   - **指数退避。** 第一次退避等待 `reconnect_time`，之后每次是上一次的两倍，最多到
     `reconnect_max`。连接尝试失败也算一次丢失，因此对拒绝连接的对端，重试会越来越稀疏。
   - **重置。** 连接证明了自己之后，延迟才回到 `reconnect_time`，而不是在连接打开时：否则一个
@@ -203,7 +215,7 @@ FC 15/16 的数量）。回显与请求一致时为 `true`，不一致时为 `fa
     靠的是退避，而不是把事件藏起来。
 - **有效帧。** 收到的、能解析为 Modbus 响应的帧（头部或 CRC 正确、功能码受支持），来自**任意**
   单元，无论是否与某个待决请求匹配；异常响应也算。它证明对端还活着。它会重置重连延迟和超时计数。
-- **死链检测（TCP 和 RTU-over-TCP）。** 对端没有关闭就消失（拔掉网线、网关断电）会留下半开连接：
+- **死链检测（TCP 家族）。** 对端没有关闭就消失（拔掉网线、网关断电）会留下半开连接：
   不会触发任何事件，而持续轮询的客户端从不空闲，TCP keep-alive 也就从不探测它；只有操作系统的
   重传超时能结束它，这可能要好几分钟。因此客户端对一个连接上的超时计数：连续 `max_timeouts` 个
   请求超时、其间没有收到有效帧时，客户端把该连接视为已死并关闭。这与其他连接丢失一样：待决请求
@@ -213,7 +225,7 @@ FC 15/16 的数量）。回显与请求一致时为 `true`，不一致时为 `fa
     网关之后，某一个从站离线时，只要其他单元还在应答，连接就不会被关闭；只轮询这一个从站的客户端
     则会看到连接每隔 `max_timeouts` 次超时被关闭并重新打开。
   - 串口上不计超时：那里的超时说明某个从站没有应答，而不是线路已断，而且串口从不自动重新打开。
-- **keep-alive（TCP 和 RTU-over-TCP）。** 套接字开启 TCP keep-alive，空闲 `keep_alive` 毫秒后开始
+- **keep-alive（TCP 家族）。** 套接字开启 TCP keep-alive，空闲 `keep_alive` 毫秒后开始
   探测。它覆盖低频轮询的客户端：其套接字空闲得足够久，探测才有机会进行；超时计数覆盖高频轮询的
   客户端。
 - **串口。** `reconnect_time > 0` 时串口在构造时创建并打开，否则由第一个请求或 `connect()` 按需
@@ -222,3 +234,22 @@ FC 15/16 的数量）。回显与请求一致时为 `true`，不一致时为 `fa
   `connect()`，并以 `connection lost` 拒绝所有待决请求；之后的请求或 `connect()` 会重试。已关闭的
   串口绝不自动重新打开（关闭通常意味着设备已不在）；下一个请求（`enable_reconnect` 为真时）或
   `connect()` 会再次打开它。`disconnect()` 之后，请求不会打开串口。
+- **UDP（UDP 和 RTU-over-UDP）。** UDP 没有连接：客户端的连接就是它的本地套接字。
+  - **连接**时解析目标的主机并绑定套接字：给出 `local` 时绑定到它，否则绑定到系统分配的端口，
+    地址为目标所属地址族的任意本地地址。套接字绑定后客户端即为已连接，并发出 `connect`。解析或
+    绑定失败（例如 `local` 指定的端口已被占用）属于连接失败：发出 `error`，以 `connection lost`
+    拒绝 `connect()` 和待决请求，并按“重连”重试。
+  - **数据报。** 请求发往目标的地址和端口。收到的数据报只在来自目标的地址、且（除非
+    `any_source_port` 为真）来自其端口时才被接受；其他数据报不经处理直接丢弃，不发出 `receive`。
+    数据报的字节如何界定为帧，见 `spec-protocol.zh-cn.md` 的“数据报”。
+  - **错误。** 套接字绑定之后，套接字错误（例如系统报告的端口不可达）以 `error` 发出，套接字保持
+    打开。数据报没有确认，所以请求或响应数据报丢失的请求靠超时失败。套接字只在 `disconnect()` 时
+    关闭。
+  - **没有死链检测，没有 keep-alive。** 没有连接可以探测，重新绑定套接字也修复不了丢数据报的
+    路径，所以不对超时计数。
+  - **不重发。** 超时的请求不会再次发送；是否重试由调用者决定，因为有些设备把写操作当作命令执行，
+    重发就会执行两次。
+  - **迟到的响应（RTU-over-UDP）。** 请求超时之后，下一帧至少在 `max(delay, turnaround)` 毫秒之后
+    才写出。其间到达的数据报没有未完成的请求可对应，会被丢弃，因此对超时请求的迟到应答不会被当作
+    下一个请求的应答。更晚到达的仍然可能被误收（见“并发”）；把 `turnaround` 设得比设备最长的响应
+    延迟更长，就能避免这一点。

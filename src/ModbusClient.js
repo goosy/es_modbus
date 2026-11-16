@@ -1,18 +1,26 @@
 import { Socket } from 'node:net';
+import { createSocket } from 'node:dgram';
+import { lookup } from 'node:dns/promises';
 import { EventEmitter } from 'node:events';
 import {
 	TRANSACTION_START, DO_NOTHING, BROADCAST_ID, plan_read, plan_write,
 	parse_rtu_response, parse_tcp_response, encode_tcp_frame, encode_rtu_frame,
-	silence_option, mbap_frame_length, rtu_response_length, Frame_Receiver,
+	silence_option, mbap_frame_length, rtu_response_length, split_frames, Frame_Receiver,
 } from './util.js';
 import { serial_settings, silence_time, create_serial_port } from './serial.js';
-import { SERIAL_OPTIONS, select_transport, check_applicable, parse_host_port } from './transport.js';
+import {
+	SERIAL_OPTIONS, UDP_OPTIONS, NET_TRANSPORTS,
+	select_transport, check_applicable, parse_host_port, parse_local,
+} from './transport.js';
 
 // The options that do not apply to some transports, and those transports (see spec-client.md)
 const CLIENT_EXCLUSIONS = [
-	[SERIAL_OPTIONS, ['tcp', 'rtu_over_tcp']],
-	[['reconnect_max', 'max_timeouts', 'keep_alive'], ['serial']],
-	[['turnaround'], ['tcp']],
+	[SERIAL_OPTIONS, NET_TRANSPORTS],
+	[['max_timeouts', 'keep_alive'], ['udp', 'rtu_over_udp', 'serial']],
+	[['reconnect_max'], ['serial']],
+	[UDP_OPTIONS, ['tcp', 'rtu_over_tcp', 'serial']],
+	[['turnaround'], ['tcp', 'udp']],
+	[['silence'], ['udp']],
 ];
 
 // Connection phases: the client is in exactly one at a time (see design.md, "Client connection state")
@@ -149,9 +157,19 @@ export class Modbus_Client extends EventEmitter {
 		this.#packets[tid - TRANSACTION_START] = packet;
 	}
 
+	// TCP or UDP: MBAP framing, with a transaction ID
+	get #mbap() {
+		return this.protocol === 'tcp' || this.protocol === 'udp';
+	}
+
+	// UDP or RTU-over-UDP: a UDP socket, with no connection
+	get #udp() {
+		return this.protocol === 'udp' || this.protocol === 'rtu_over_udp';
+	}
+
 	#last_tid = TRANSACTION_START;
 	get_tid() {
-		if (this.protocol !== 'tcp') return TRANSACTION_START;
+		if (!this.#mbap) return TRANSACTION_START;
 		this.#last_tid++;
 		if (
 			this.#last_tid > this.packets_length + TRANSACTION_START
@@ -178,18 +196,16 @@ export class Modbus_Client extends EventEmitter {
 	}
 
 	/**
-	 * @param {Object} options - exactly one of `tcp`, `rtu_over_tcp` (a `host:port` string) or
-	 *   `serial` (a device path) selects the transport; the other options are in spec-client.md.
+	 * @param {Object} options - exactly one of `tcp`, `rtu_over_tcp`, `udp`, `rtu_over_udp` (a
+	 *   `host:port` string) or `serial` (a device path) selects the transport; the other options
+	 *   are in spec-client.md.
 	 */
 	constructor(options) {
 		super();
 		this.packets_length = 256;
-		if (options === null || typeof options !== 'object') {
-			throw new Error('Exactly one of tcp, rtu_over_tcp, serial must be given');
-		}
 
 		const { transport, target } = select_transport(options);
-		const tcp_target = transport === 'serial' ? null : parse_host_port(target, false);
+		const net_target = transport === 'serial' ? null : parse_host_port(target, false);
 		check_applicable(options, transport, CLIENT_EXCLUSIONS);
 
 		const {
@@ -208,21 +224,30 @@ export class Modbus_Client extends EventEmitter {
 		this.turnaround = options.turnaround ?? 100;
 		let silence = silence_option(options.silence);
 
-		if (tcp_target) {
-			this.set_tcp(tcp_target.host, tcp_target.port);
-			this.protocol = transport;
+		this.protocol = transport === 'serial' ? 'rtu' : transport;
+		if (this.#udp) {
+			const local = options.local == null ? null : parse_local(options.local);
+			const any_source_port = options.any_source_port ?? false;
+			if (typeof any_source_port !== 'boolean') {
+				throw new Error(`Invalid any_source_port: ${any_source_port}`);
+			}
+			// The socket is created when the client connects
+			this.set_udp(net_target.host, net_target.port, local, any_source_port);
+		} else if (net_target) {
+			this.set_tcp(net_target.host, net_target.port);
 		} else {
 			// The options are checked here, the port is created when first opened
 			const settings = serial_settings({ path: target, baud_rate, parity, data_bits, stop_bits });
 			this.set_serial(settings);
-			this.protocol = 'rtu';
 			silence = silence_time(settings, silence);
 		}
-		// Emptied when the connection opens or closes
+		// Emptied when the connection opens or closes; unused on UDP, where each datagram is
+		// delimited on its own
 		this.#receiver = new Frame_Receiver({
-			frame_length: this.protocol === 'tcp' ? mbap_frame_length : rtu_response_length,
+			frame_length: this.#mbap ? mbap_frame_length : rtu_response_length,
 			silence,
-			serial_line: this.protocol === 'rtu',
+			// The datagrams of RTU-over-UDP are delimited like a serial line
+			serial_line: this.protocol === 'rtu' || this.protocol === 'rtu_over_udp',
 			on_frame: (frame) => this.#on_frame(frame),
 		});
 
@@ -276,7 +301,7 @@ export class Modbus_Client extends EventEmitter {
 	 * or after `turnaround` for a broadcast, which resolves at once since it is never answered.
 	 */
 	#write(packet) {
-		const rtu = this.protocol !== 'tcp';
+		const rtu = !this.#mbap;
 		if (packet.broadcast) {
 			this._send(packet.buffer);
 			packet.resolve(packet.echo === undefined ? Buffer.alloc(0) : true);
@@ -290,10 +315,12 @@ export class Modbus_Client extends EventEmitter {
 	}
 
 	// Called once a request ends, however it ends
-	#transaction_ended(packet) {
+	#transaction_ended(packet, timed_out) {
 		if (packet !== this.#current) return;
 		this.#current = null;
-		this.#release(this.#gap);
+		// On RTU-over-UDP a late answer to a request that timed out then finds none outstanding
+		const wait_late = timed_out && this.protocol === 'rtu_over_udp';
+		this.#release(wait_late ? Math.max(this.turnaround, this.#gap) : this.#gap);
 	}
 
 	/**
@@ -302,7 +329,7 @@ export class Modbus_Client extends EventEmitter {
      */
 	abort_pending() {
 		const queued = this.send_queue.splice(0);
-		const written = this.protocol === 'tcp' ? this.#packets : [this.#current];
+		const written = this.#mbap ? this.#packets : [this.#current];
 		for (const packet of [...queued, ...written]) {
 			if (packet?.status === 'pending') packet.reject(new Error('connection lost'));
 		}
@@ -321,13 +348,13 @@ export class Modbus_Client extends EventEmitter {
 			return Promise.reject(new Error('connection lost'));
 		}
 
-		const end_transaction = (status) => {
+		const end_transaction = (status, timed_out = false) => {
 			this.dec_trans_count();
 			packet.status = status;
 			packet.resolve = DO_NOTHING;
 			packet.reject = DO_NOTHING;
 			clearTimeout(packet.timeout_id);
-			this.#transaction_ended(packet);
+			this.#transaction_ended(packet, timed_out);
 		};
 
 		packet.status = 'pending';
@@ -337,8 +364,8 @@ export class Modbus_Client extends EventEmitter {
 			// Armed by `#write`, when the frame is written
 			packet.on_timeout = () => {
 				// Bytes of a late answer must not prefix the next response
-				if (this.protocol !== 'tcp') this.#receiver.clear();
-				end_transaction('rejected');
+				if (!this.#mbap) this.#receiver.clear();
+				end_transaction('rejected', true);
 				this.emit('timeout');
 				reject(new Error(`transaction 0x${packet.tid.toString(16)} timeout`));
 				this.#count_timeout();
@@ -380,11 +407,11 @@ export class Modbus_Client extends EventEmitter {
 			// The value a write response must echo; undefined for a read
 			echo: expected_echo(func_code, data, length),
 			// On a serial bus every request to unit 0 is a broadcast
-			broadcast: this.protocol !== 'tcp' && unit_id === BROADCAST_ID,
+			broadcast: !this.#mbap && unit_id === BROADCAST_ID,
 			status: 'init',
 		};
 		// The RTU family has no transaction ID: its one written request is `#current`
-		if (this.protocol === 'tcp') this.set_packet(tid, packet);
+		if (this.#mbap) this.set_packet(tid, packet);
 
 		return this.process_packet_transaction(packet);
 	}
@@ -399,24 +426,29 @@ export class Modbus_Client extends EventEmitter {
 
 	/**
 	 * Delimits the frames of a received chunk and settles the matching requests. The bytes of an
-	 * incomplete frame are kept for the next chunk.
+	 * incomplete frame are kept for the next chunk. On UDP a chunk is one datagram, delimited on
+	 * its own: the bytes left are discarded.
 	 */
 	on_data(chunk) {
-		this.#receiver.push(chunk);
+		if (this.protocol !== 'udp') {
+			this.#receiver.push(chunk);
+			return;
+		}
+		for (const frame of split_frames(chunk, mbap_frame_length).frames) this.#on_frame(frame);
 	}
 
 	#on_frame(frame) {
-		const tcp = this.protocol === 'tcp';
-		const response = tcp ? parse_tcp_response(frame) : parse_rtu_response(frame);
+		const mbap = this.#mbap;
+		const response = mbap ? parse_tcp_response(frame) : parse_rtu_response(frame);
 		this.emit('receive', response.buffer);
 
 		if (response.func_code === 0) return; // Invalid data
 		// Any valid frame, from any unit, proves the peer alive
 		this.#link_proved();
 
-		const packet = tcp ? this.get_packet(response.tid) : this.#current;
+		const packet = mbap ? this.get_packet(response.tid) : this.#current;
 		if (!packet || packet.status !== 'pending') return;
-		if (!tcp && !response_fits(packet, response)) return;
+		if (!mbap && !response_fits(packet, response)) return;
 
 		if (response.exception_code) {
 			packet.reject(new Error(`response error: ${response.exception_code}`));
@@ -453,7 +485,7 @@ export class Modbus_Client extends EventEmitter {
 					data.copy(body, 7);
 				}
 		}
-		return this.protocol === 'tcp' ? encode_tcp_frame(tid, body) : encode_rtu_frame(body);
+		return this.#mbap ? encode_tcp_frame(tid, body) : encode_rtu_frame(body);
 	}
 
 	connect() {
@@ -535,10 +567,12 @@ export class Modbus_Client extends EventEmitter {
 
 	/**
 	 * Counts a timeout; `max_timeouts` in a row close a TCP-family connection as dead. Not on a
-	 * serial port, where a timeout means a slave did not answer.
+	 * serial port, where a timeout means a slave did not answer, nor on UDP, where a new socket
+	 * cannot repair a path that loses datagrams.
 	 */
 	#count_timeout() {
-		if (this.protocol === 'rtu' || this.max_timeouts === 0 || !this.is_connected) return;
+		if (this.protocol === 'rtu' || this.#udp) return;
+		if (this.max_timeouts === 0 || !this.is_connected) return;
 		this.#timeouts++;
 		if (this.#timeouts < this.max_timeouts) return;
 		// An ordinary loss: the transport's close rejects the pending requests and reconnects
@@ -674,6 +708,97 @@ export class Modbus_Client extends EventEmitter {
 		serialport.on('close', () => {
 			this.#transport_lost(null, true);
 		});
+	}
+
+	/**
+	 * Sets up the UDP transport. `_open` resolves the host, then creates and binds a new socket;
+	 * the client is connected once it is bound. Once bound, a socket error concerns one datagram,
+	 * so the socket stays open; it closes only on `_close`, or when the bind fails.
+	 *
+	 * @param {string} host - the host of the server.
+	 * @param {number} port - the UDP port of the server.
+	 * @param {{ host: string|undefined, port: number }|null} local - the local address to bind, or
+	 *   null for a port the system assigns.
+	 * @param {boolean} any_source_port - whether a datagram from the server's address is taken
+	 *   whatever its source port.
+	 * @return {void}
+	 */
+	set_udp(host, port, local, any_source_port) {
+		// The socket of the last `_open`
+		this.stream = null;
+		// The server's address, resolved by `_open`
+		let address = null;
+		// The open attempt or the bound socket: { socket, closing }; the socket is null while
+		// the host is being resolved
+		let attempt = null;
+
+		this._send = (data) => {
+			this.stream.send(data, port, address);
+			this.emit('send', data);
+		};
+
+		const close_socket = (current) => {
+			if (current.closing) return;
+			current.closing = true;
+			current.socket.close();
+		};
+
+		const bind = (current, family) => {
+			const socket = createSocket(family === 6 ? 'udp6' : 'udp4');
+			current.socket = socket;
+			this.stream = socket;
+			let bound = false;
+			// A bind failure closes the socket, and is passed to the callers of the failed connect
+			let bind_error = null;
+
+			socket.on('message', (message, remote) => {
+				if (remote.address !== address) return;
+				if (!any_source_port && remote.port !== port) return;
+				this.on_data(message);
+			});
+			socket.on('listening', () => {
+				bound = true;
+				this.#transport_opened();
+			});
+			socket.on('error', (error) => {
+				if (!bound) {
+					bind_error ??= error;
+					close_socket(current);
+				}
+				this.emit('error', error);
+			});
+			socket.on('close', () => {
+				if (attempt === current) attempt = null;
+				this.#transport_lost(bind_error, true);
+			});
+			socket.bind({ port: local?.port ?? 0, address: local?.host });
+		};
+
+		this._open = () => {
+			const current = { socket: null, closing: false };
+			attempt = current;
+			lookup(host).then((resolved) => {
+				if (current.closing) {
+					// Closed while the host was being resolved: no socket was created
+					attempt = null;
+					this.#transport_lost(null, true);
+					return;
+				}
+				address = resolved.address;
+				bind(current, resolved.family);
+			}, (error) => {
+				if (attempt === current) attempt = null;
+				this.#transport_lost(error, true);
+				this.emit('error', error);
+			});
+		};
+
+		this._close = () => {
+			const current = attempt;
+			if (!current) return;
+			if (current.socket) close_socket(current);
+			else current.closing = true;
+		};
 	}
 
 	/**

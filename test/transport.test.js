@@ -54,7 +54,7 @@ describe('select_transport and check_applicable', () => {
 		assert.deepEqual(select_transport({ tcp: 'h', timeout: 1 }), { transport: 'tcp', target: 'h' });
 		assert.deepEqual(select_transport({ serial: '', tcp: null }), { transport: 'serial', target: '' });
 		for (const options of [{}, { tcp: undefined }, { tcp: 'h', serial: 'COM9' }]) {
-			assert.throws(() => select_transport(options), /Exactly one of tcp, rtu_over_tcp, serial must be given/);
+			assert.throws(() => select_transport(options), /Exactly one of tcp, rtu_over_tcp, udp, rtu_over_udp, serial must be given/);
 		}
 	});
 

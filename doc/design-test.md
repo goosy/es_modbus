@@ -23,6 +23,8 @@ needs. A topic split out of [design.md](./design.md).
 `test/util.test.js` covers `src/util.js`; `test/client.test.js` and `test/server.test.js` cover
 each class alone; `test/tcp.test.js`, `test/serial.test.js` and `test/serial-bridge.test.js` run
 the classes end to end over loopback TCP, a serial port pair and a simulated serial line;
+`test/udp.test.js` covers the UDP family, each class against a raw UDP peer and the two end to
+end over loopback UDP;
 `test/bundle.test.js` covers the build output `dist/modbus.js` with `native/`. Fixtures live in
 `test/helpers.js` and `test/serial-bridge.js`. The parsing of the serial tests' link and of the
 serial test runner's arguments lives in `test/serial-link.js`, so `test/serial-link.test.js`
@@ -42,8 +44,11 @@ missing or older than any file in `src/`.
 
 - Servers listen on `127.0.0.1` with port `0`, so every test gets a free ephemeral port and test
   files can run in parallel. The public options do not accept port `0`, so a test server is built
-  with a fixed target and its `port` property is then set to `0` (`ephemeral_server` in
-  `test/helpers.js`).
+  with a fixed target and its `port` property is then set to `0` (`ephemeral_server` and
+  `start_udp_server` in `test/helpers.js`).
+- UDP tests use raw `node:dgram` sockets on `127.0.0.1` as the fake device or client
+  (`start_fake_udp_device`, `raw_udp_socket`), so a reply can come from another port, be split
+  across datagrams, or arrive late. A local port in use is made by binding a raw socket to it.
 - Client tests use a raw `node:net` server as a fake slave, so the exact bytes on the wire can be
   checked and malformed or out-of-order replies can be produced.
 - Server tests feed frames to `on_data` through a fake socket or a fake serial port where no

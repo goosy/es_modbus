@@ -9,24 +9,29 @@ file; so far [design-test.md](./design-test.md), the test suite.
 
 - **`src/transport.js`.** Shared by both constructors, which call it in the order the spec fixes:
   `select_transport` picks the one given transport option (nullish counts as not given) and
-  returns it with its target; for `tcp` and `rtu_over_tcp`, `parse_host_port(target, server)`
-  returns `{ host, port }`, where a target starting with `[` must match `[<host>]` with an
-  optional `:<port>`, an unbracketed target is split only at a single `:` (more than one is a
-  bare IPv6 address), the port must be all digits in `1..65535`, and an empty host is `0.0.0.0`
-  when `server` is true and invalid otherwise; `check_applicable` then throws for the first given
-  option that a side's exclusion list (`CLIENT_EXCLUSIONS`, `SERVER_EXCLUSIONS`) bars from the
-  selected transport. The values are checked after that.
-- **Client.** The constructor sets `this.protocol` from the transport option: `tcp`,
-  `rtu_over_tcp`, or `rtu` for `serial`. For the TCP family it calls `set_tcp(host, port)`; for
-  `rtu` it checks the serial options with `serial_settings` and calls `set_serial` with the
-  result; the port is created later.
-- **Decoding.** Response decoding branches on `protocol === 'tcp'` **only**, so `rtu_over_tcp` is
-  decoded with the RTU parser (`parse_rtu_response`).
-- **Server.** The constructor sets `this.protocol` with the client's values. For the TCP family
-  it keeps the parsed target in `this.host` and `this.port`, which `start()` listens on; for
-  `rtu` `serial_settings` checks the device path and serial options into
-  `this.serial_settings`, and `host` and `port` stay `null`. `is_tcp` is a getter:
-  `this.protocol !== 'rtu'`, true for both TCP-family transports. The serial port is
+  returns it with its target, and throws as well for options that are not an object; for every
+  transport but `serial`, `parse_host_port(target, server)` returns `{ host, port }`, where a
+  target starting with `[` must match `[<host>]` with an optional `:<port>`, an unbracketed
+  target is split only at a single `:` (more than one is a bare IPv6 address), the port must be
+  all digits in `1..65535`, and an empty host is `0.0.0.0` when `server` is true and invalid
+  otherwise; `check_applicable` then throws for the first given option that a side's exclusion
+  list (`CLIENT_EXCLUSIONS`, `SERVER_EXCLUSIONS`) bars from the selected transport. The values
+  are checked after that. `parse_local` parses the client's `local` option with the same rules,
+  but keeps an empty host as `undefined`, so the socket binds any address of its own family.
+- **Client.** The constructor sets `this.protocol` from the transport option: its name, or `rtu`
+  for `serial`. Two private getters name the families the code branches on: `#mbap` (`tcp`,
+  `udp`) and `#udp` (`udp`, `rtu_over_udp`). For the UDP family it checks `local` and
+  `any_source_port` and calls `set_udp(host, port, local, any_source_port)`; for the TCP family
+  it calls `set_tcp(host, port)`; for `rtu` it checks the serial options with `serial_settings`
+  and calls `set_serial` with the result. The socket or port is created later.
+- **Decoding.** Response decoding branches on `#mbap` **only**, so `rtu_over_tcp` and
+  `rtu_over_udp` are decoded with the RTU parser (`parse_rtu_response`).
+- **Server.** The constructor sets `this.protocol` with the client's values. For the TCP and UDP
+  families it keeps the parsed target in `this.host` and `this.port`, which `start()` listens on
+  or binds; for `rtu` `serial_settings` checks the device path and serial options into
+  `this.serial_settings`, and `host` and `port` stay `null`. `is_tcp` (`tcp`, `rtu_over_tcp`)
+  and `is_udp` (`udp`, `rtu_over_udp`) are getters, and a private `#mbap` names the MBAP
+  framing as on the client. The serial port is
   `this.serial_port`, created by the first `start()` (`#open_serial`, which shares one pending
   creation and resets it on failure so a later `start()` retries); `send_response` and `stop`
   use it. See "Server lifecycle".
@@ -48,6 +53,18 @@ file; so far [design-test.md](./design-test.md), the test suite.
   `abort_pending()` and emits `error`. The connection phase follows the port's `open` / `close`
   / `error` events (see "Client connection state"). A serial port never enters `BACKING_OFF`:
   after a close it goes to `IDLE`, and a closed port is re-opened only on demand.
+- **Client UDP lifecycle.** `set_udp` assigns `_open`, which resolves the host with
+  `dns.promises.lookup`, then creates a new socket of the address's family (`udp4` / `udp6`) and
+  binds it to `local` or to port `0`: a closed `dgram` socket cannot be bound again. The
+  socket's `listening` reports `#transport_opened()`. An `error` before `listening` is a bind
+  failure: it is kept, the socket is closed, and its `close` reports the loss with it, as a TCP
+  socket's `close` does after a failed connect, so the phase moves to `BACKING_OFF` or `IDLE`.
+  An `error` after `listening` is only emitted. A lookup failure reports the loss itself, then
+  emits `error`. `_close` closes the socket, or, while the host is being resolved, marks the
+  attempt closed, and the lookup then reports the loss without creating a socket. The attempt
+  object `{ socket, closing }` guards against closing a socket twice, which `dgram` throws on.
+  A `message` is passed to `on_data` only from the resolved address and, unless
+  `any_source_port`, the target port.
 
 ## Build (`build.js`)
 
@@ -123,20 +140,20 @@ A single routine builds every outgoing frame regardless of transport:
 2. The start address is the PDU address and is written unchanged. The Modicon→PDU conversion
    (`point - 1` by default, `point` when the client was constructed with
    `options.modicon_zero_based = true`) has already been done by the Modicon parser.
-3. Frame the body with `encode_tcp_frame(tid, body)` for `tcp` (an MBAP header with protocol
-   ID 0) or `encode_rtu_frame(body)` (CRC-16 appended little-endian). The server frames its
-   responses with the same two functions.
+3. Frame the body with `encode_tcp_frame(tid, body)` for `tcp` and `udp` (an MBAP header with
+   protocol ID 0) or `encode_rtu_frame(body)` (CRC-16 appended little-endian). The server frames
+   its responses with the same two functions.
 
 ## Client transaction lifecycle
 
 - **Packet table.** `#packets` is a plain array indexed by `tid - TRANSACTION_START`
   (`TRANSACTION_START = 8000`). `set_packet` / `get_packet` wrap the offset math. `packets_length`
-  is 256. Only TCP uses it: the RTU family has at most one written request, held in `#current`
-  from its frame write until it ends.
-- **TID allocation (`get_tid`).** Non-TCP always returns `TRANSACTION_START` (RTU has no
-  transaction field). TCP increments `#last_tid` and wraps back to `TRANSACTION_START` once it
-  passes `packets_length + TRANSACTION_START`. With 256 slots and no check that a slot is free,
-  more than 256 simultaneously-pending TCP transactions would collide.
+  is 256. Only the MBAP transports use it: the RTU family has at most one written request, held
+  in `#current` from its frame write until it ends.
+- **TID allocation (`get_tid`).** The RTU family always gets `TRANSACTION_START` (RTU has no
+  transaction field). The MBAP transports increment `#last_tid` and wrap back to
+  `TRANSACTION_START` once it passes `packets_length + TRANSACTION_START`. With 256 slots and no
+  check that a slot is free, more than 256 simultaneously-pending transactions would collide.
 - **`process_packet_transaction`.** While `BACKING_OFF`, `DISCONNECTING` or `DISCONNECTED` it
   returns a Promise already rejected with `Error('connection lost')`; the frame is never queued.
   For `BACKING_OFF` only, it also emits `error`, and only when the client has an `error`
@@ -147,21 +164,23 @@ A single routine builds every outgoing frame regardless of transport:
   closures on the packet; the timer (`timeout_id`) is armed by `#write`, when the frame is written,
   so queueing time never counts. `end_transaction` decrements the count, stamps `status`, clears
   the timer, swaps `resolve`/`reject` for `DO_NOTHING` so a late/duplicate response is inert, and
-  calls `#transaction_ended`. An RTU timeout also clears the frame receiver, so the bytes of a
-  late answer do not prefix the next response. `on_timeout` rejects with
+  calls `#transaction_ended(packet, timed_out)`. An RTU timeout also clears the frame receiver,
+  so the bytes of a late answer do not prefix the next response. `on_timeout` rejects with
   `Error('transaction 0x<tid> timeout')`, then calls `#count_timeout()` (see "Dead link").
 - **Framing (`on_data`).** The chunk goes to `#receiver`, a `Frame_Receiver` (see "Parser
-  notes") made by the constructor with `mbap_frame_length` (`tcp`) or `rtu_response_length`, the
-  silence, and `serial_line` for `rtu`; it hands each frame to `#on_frame`. `unprocessed_buffer`
-  is a getter of the bytes it keeps. `#transport_opened` and `#transport_lost` clear it. A
-  response length is never `UNKNOWN`, so the client has no unknown-length case.
+  notes") made by the constructor with `mbap_frame_length` (MBAP) or `rtu_response_length`, the
+  silence, and `serial_line` for `rtu` and `rtu_over_udp`; it hands each frame to `#on_frame`.
+  `unprocessed_buffer` is a getter of the bytes it keeps. `#transport_opened` and
+  `#transport_lost` clear it. A response length is never `UNKNOWN`, so the client has no
+  unknown-length case. On `udp` the receiver is not used: each datagram goes through
+  `split_frames` with `mbap_frame_length` on its own, and its `rest` is dropped.
 - **Matching (`#on_frame`).** For each frame: parse → emit `receive` → skip `func_code === 0` →
   `#link_proved()` (a valid frame, from any unit: see "Dead link") → look
-  up by `tid` (TCP) or take `#current` (RTU family) → ignore unless `status === 'pending'` → on the
+  up by `tid` (MBAP) or take `#current` (RTU family) → ignore unless `status === 'pending'` → on the
   RTU family, ignore unless `response_fits()` (same unit ID, function code with the exception bit
   cleared, and for a read the requested byte count) → `reject` on `exception_code` with
   `Error('response error: <code>')`, else resolve:
-  a read with `response.data`, a write with `echo_matches()`. TCP does not check `response_fits()`:
+  a read with `response.data`, a write with `echo_matches()`. MBAP does not check `response_fits()`:
   the transaction ID matches, and some gateways answer with another unit ID.
 - **Write echo.** `transact()` stores `packet.echo`, the value a write response must echo after
   its address (`expected_echo()`: `0xFF00` / `0x0000` for FC 5, the value for FC 6, the quantity
@@ -178,13 +197,14 @@ A single routine builds every outgoing frame regardless of transport:
   sets `#busy`, shifts one packet and passes it to `#write`, which arms the timeout and calls
   `_send`. `#release(gap)` clears `#busy` after `gap` ms and re-enters. `#gap` is `delay`, or on a
   serial port `max(delay, silence)`.
-  - **TCP:** `#write` calls `#release(#gap)` right after the write, so writes are paced but many
+  - **MBAP:** `#write` calls `#release(#gap)` right after the write, so writes are paced but many
     requests may be outstanding.
   - **RTU family:** `#write` stores the packet in `#current` and does not release; `end_transaction`
     calls `#transaction_ended`, which clears `#current` and calls `#release(#gap)`. So the next
     frame follows the end of the request (response, exception, timeout or `abort_pending()`),
-    and `#busy` cannot stay set: every written request ends.
-  - **Broadcast** (`packet.broadcast`: any request to unit `0` on a non-TCP protocol): no response
+    and `#busy` cannot stay set: every written request ends. After a timeout on `rtu_over_udp`
+    the gap is `max(turnaround, #gap)`; a late answer arriving in it finds `#current` null.
+  - **Broadcast** (`packet.broadcast`: any request to unit `0` on the RTU family): no response
     will come, so `#write` resolves it right after `_send` (a write with `true`, a read with an
     empty `Buffer`), arms no timer, and calls `#release(max(turnaround, #gap))`.
 - In `IDLE` (or joining a `CONNECTING`), `sending` starts a connect with itself as the success
@@ -192,7 +212,7 @@ A single routine builds every outgoing frame regardless of transport:
   connects from another phase: a back-off or a manual close starts only after `abort_pending()`
   has emptied the queue, and requests issued then are rejected before they are queued.
 - **`abort_pending()`.** Empties `send_queue` and rejects with `Error('connection lost')` every
-  packet whose `status` is `'pending'`: the queued ones, and the written ones (`#packets` on TCP,
+  packet whose `status` is `'pending'`: the queued ones, and the written ones (`#packets` on MBAP,
   `#current` on the RTU family). It runs on every transport `close` / `error`
   (through `#transport_lost`, for the TCP socket and the serial port) and on a `disconnect()`
   from `IDLE` or `BACKING_OFF`, so a failed on-demand connect also fails its requests at once.
@@ -272,7 +292,7 @@ close in progress, and `disconnect()` while `DISCONNECTED` resolves at once.
   not `0` (the connection follows a back-off); `#transport_lost()` clears it. A connection that
   stays open that long calls `#reset_delay()`. The timer is a resource, like `#reconnect_timer`.
 - **Dead link.** `#timeouts` counts the consecutive timeouts on the connection.
-  `#count_timeout()` does nothing on a serial port, with `max_timeouts = 0`, or when not
+  `#count_timeout()` does nothing on a serial port, on the UDP family, with `max_timeouts = 0`, or when not
   `CONNECTED`; otherwise it increments the count and, at `max_timeouts`, resets it and calls
   `_close()`. The TCP socket's `close` then reports the loss through `#transport_lost()`, exactly
   as a peer's close would: the phase moves to `BACKING_OFF` or `IDLE`, not `DISCONNECTING`, so
@@ -308,6 +328,9 @@ the move into `CONNECTING`; a caller that arrives while `CONNECTING` is added to
 - **Serial (`set_serial`).** `_open()` creates the port once (the `creating` promise, a
   lazy-creation cache, not a phase) and opens it; the `opening` promise lets `_close()` wait for
   an open in progress. The open callback, not the `open` event, reports `#transport_opened()`.
+- **UDP (`set_udp`).** `_open()` resolves the host and binds a new socket; `_send` sends to the
+  resolved address and the target port; `_close()` closes the socket (see "Client UDP
+  lifecycle").
 
 ## Parser notes (`src/util.js`)
 
@@ -379,8 +402,10 @@ the move into `CONNECTING`; a caller that arrives while `CONNECTING` is added to
 ## Server dispatch notes
 
 - Framing follows `this.protocol`: `on_data` chooses the frame length, `#on_frame` the parser,
-  `send_response` the framing, and `_on_data` the serial-bus semantics from it. The `socket` argument only says where the
-  response is written: a socket for both TCP-family transports, the serial port when absent.
+  `send_response` the framing, and `_on_data` the serial-bus semantics from it, each through
+  `#mbap`. The `socket` argument only says where the response is written: a socket for both
+  TCP-family transports, the serial port when absent, the peer `{ address, port }` of the
+  datagram on the UDP family.
 - `handle_read_bits` serves FC 1 and FC 2. For FC 2 it uses the discrete-input methods when the
   `handler` has `get_discrete_inputs` or `get_discrete_input`, else the coil methods;
   `read_points` then picks the batch or single-point one as for any request.
@@ -395,14 +420,20 @@ the move into `CONNECTING`; a caller that arrives while `CONNECTING` is added to
    `rtu`. A socket's receiver is cleared and removed on the socket's `close`; the serial port's
    is cleared on the port's `close`. On `rtu_over_tcp` a request of unknown length is therefore
    served at once, on a serial port once the line is silent.
-   Each frame goes to `#on_frame`, which parses it with `parse_tcp_request` for `tcp`, else
+   A datagram goes to `#on_datagram(message, remote)` instead. On `udp` it is delimited alone
+   with `split_frames` and `mbap_frame_length`, its `rest` dropped. On `rtu_over_udp` it is
+   pushed to the receiver of its peer, keyed by `"<address> <port>"` in `#receivers` and made
+   with `serial_line` true; a receiver is kept only while it holds bytes after a push, so the map
+   does not grow with every client that ever sent a datagram. The socket's `close` clears them
+   all.
+   Each frame goes to `#on_frame`, which parses it with `parse_tcp_request` for MBAP, else
    `parse_rtu_request`, and emits `receive`. A frame with `func_code: 0` is dropped, unless
    the parser set `illegal_function`; then it goes on with that function code.
-2. `_on_data(request, socket?)` — `serial_bus` is true for RTU framing (`rtu` and
-   `rtu_over_tcp`). On a serial bus a broadcast (unit `0`) is never
+2. `_on_data(request, socket?)` — `serial_bus` is true for RTU framing (`rtu`, `rtu_over_tcp`
+   and `rtu_over_udp`). On a serial bus a broadcast (unit `0`) is never
    answered: if unit `0` is accepted and the function is a write (5, 6, 15, 16) it is served and
    the response discarded, anything else is dropped; a non-accepted unit ID is dropped silently.
-   On TCP unit `0` is ordinary and a non-accepted unit ID gets `0x0B`. Otherwise `serve()` calls
+   On MBAP unit `0` is ordinary and a non-accepted unit ID gets `0x0B`. Otherwise `serve()` calls
    `dispatch()`, which switches on `func_code` to the matching `handle_*` method; that method
    calls into `handler` and builds the response PDU. An unsupported function code → exception
    `0x01` under its own function code (`fc | 0x80`).
@@ -442,10 +473,10 @@ the move into `CONNECTING`; a caller that arrives while `CONNECTING` is added to
    - `Modbus_Exception` (exported from `ModbusServer.js` and `index.js`) looks its code up in
      `HANDLER_EXCEPTIONS`, whose values are the names used in the default message; a missing code
      throws `RangeError` before `super()`.
-3. `send_response(pdu, socket?, tid)` — `tcp`: `encode_tcp_frame`, whose protocol ID is 0 like
-   that of every request served (`mbap_frame_length` never delimits another). `rtu` and
-   `rtu_over_tcp`: `encode_rtu_frame`. Emit `send`, then write to `socket`, or to the serial port
-   when there is none.
+3. `send_response(pdu, socket?, tid)` — MBAP: `encode_tcp_frame`, whose protocol ID is 0 like
+   that of every request served (`mbap_frame_length` never delimits another). RTU family:
+   `encode_rtu_frame`. Emit `send`, then write to `socket`, or to the serial port when there is
+   none; on the UDP family send the datagram from `udp_socket` to the peer.
 
 ## Server lifecycle
 
@@ -465,10 +496,16 @@ run)`, which returns the call's promise.
   passed. The `then` that settles the public promise also clears `#last` if it is still that
   call.
 - **Runs.** `#run_start` first runs `#run_stop` (the restart; it does nothing when stopped), then
-  `#listen` (TCP-family) or `#open_serial`. `#run_stop` destroys the live sockets and waits for
-  `server.close`, or waits for `serial_port.close`; it returns at once when the listener is not
-  listening or the port is not open, so it never needs a state of its own: the transport is the
-  state. `#listen` creates the `net.Server` on the first run (`set_tcp`) and waits for
+  `#listen` (TCP family), `#bind` (UDP family) or `#open_serial`. `#run_stop` destroys the live
+  sockets and waits for `server.close`, waits for `udp_socket.close`, or waits for
+  `serial_port.close`; it returns at once when the listener is not listening, there is no
+  `udp_socket` or the port is not open, so it never needs a state of its own: the transport is
+  the state. `#bind` resolves the host with `dns.promises.lookup`, creates a new socket of its
+  family on every start (a closed `dgram` socket cannot be bound again) and binds it. On
+  `listening` it calls `set_udp(socket)`, which makes it `udp_socket` and attaches the
+  `message`, `error` and `close` listeners, then emits `start`. A lookup or bind failure is
+  reported by the run itself; a socket whose bind failed is closed with no `close` listener, so
+  no `stop` follows, and `udp_socket` stays `null`. The `close` listener clears `udp_socket`. `#listen` creates the `net.Server` on the first run (`set_tcp`) and waits for
   `listening` or `error`, registering after `set_tcp`'s listeners so `start` / `error` is
   emitted before the promise settles; `server.listen` throwing at once (an invalid port number)
   is a failure too. `#open_serial` opens the port with a callback: `SerialPortStream` then
@@ -483,6 +520,8 @@ run)`, which returns the call's promise.
   check is made at emission, not from `listenerCount` at rejection: a `once('error')` listener
   is gone by then. `#reported` is cleared after each run. Outside a run a transport `error` is
   emitted as before, and throws with no listener.
+- **UDP errors.** A `udp_socket` error goes through `#transport_error` like any other, and the
+  socket stays open.
 - **Self-close.** A port closed by its device emits `stop` through the same `close` handler;
   with no run in progress, `#end_run` changes nothing, and a later `stop()` finds the port closed
   and resolves at once.

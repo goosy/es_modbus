@@ -1,5 +1,6 @@
 // Shared test fixtures: in-memory handler, frame builders, fake peers.
 import { createServer, Socket } from 'node:net';
+import { createSocket } from 'node:dgram';
 import { once, EventEmitter } from 'node:events';
 import { Modbus_Client } from '../src/ModbusClient.js';
 import { Modbus_Server } from '../src/ModbusServer.js';
@@ -256,6 +257,88 @@ export async function connect_client(port, options = {}) {
 /** Tears a client down without triggering a reconnect. */
 export function close_client(client) {
 	return client.disconnect();
+}
+
+/**
+ * Starts a UDP-family Modbus_Server on HOST that binds an ephemeral port (see `ephemeral_server`).
+ * `rtu_over_udp: true` selects RTU-over-UDP.
+ */
+export async function start_udp_server(handler, { rtu_over_udp = false, ...options } = {}) {
+	const transport = rtu_over_udp ? 'rtu_over_udp' : 'udp';
+	const server = new Modbus_Server(handler, { [transport]: `${HOST}:502`, ...options });
+	server.port = 0;
+	server.on('error', () => { });
+	await server.start();
+	return { server, port: server.udp_socket.address().port };
+}
+
+/** Opens a raw UDP socket on HOST, bound to `port` (an ephemeral one by default). */
+export async function raw_udp_socket(port = 0) {
+	const socket = createSocket('udp4');
+	socket.on('error', () => { });
+	socket.bind(port, HOST);
+	await once(socket, 'listening');
+	return socket;
+}
+
+/** Returns a UDP port that nothing is bound to. */
+export async function free_udp_port() {
+	const socket = await raw_udp_socket();
+	const { port } = socket.address();
+	await new Promise((resolve) => socket.close(resolve));
+	return port;
+}
+
+/**
+ * Starts a raw UDP socket standing in for a Modbus device. `responder(frame, remote)` returns a
+ * reply Buffer, an array of them (each sent as its own datagram), or nothing; replies go back
+ * to the sender. Every received datagram is recorded in `frames` with its sender and arrival
+ * time.
+ */
+export async function start_fake_udp_device(responder = () => undefined) {
+	const frames = [];
+	const socket = await raw_udp_socket();
+	socket.on('message', (frame, remote) => {
+		frames.push({ frame, remote, time: performance.now() });
+		const reply = responder(frame, remote);
+		for (const buffer of [reply].flat()) {
+			if (buffer) socket.send(buffer, remote.port, remote.address);
+		}
+	});
+	return {
+		port: socket.address().port,
+		frames,
+		socket,
+		close: () => new Promise((resolve) => socket.close(resolve)),
+	};
+}
+
+/**
+ * Creates a UDP client to HOST that does not auto-reconnect and swallows `error` events.
+ * `rtu_over_udp: true` selects RTU-over-UDP.
+ */
+export function create_udp_client(port, { rtu_over_udp = false, ...options } = {}) {
+	const transport = rtu_over_udp ? 'rtu_over_udp' : 'udp';
+	const client = new Modbus_Client({
+		[transport]: `${HOST}:${port}`, reconnect_time: 0, timeout: 500, delay: 0, ...options,
+	});
+	client.on('error', () => { });
+	return client;
+}
+
+/** Receives the next datagram on a raw UDP socket, or null after `ms`. */
+export function next_datagram(socket, ms = 500) {
+	return new Promise((resolve) => {
+		const on_message = (message) => {
+			clearTimeout(timer);
+			resolve(message);
+		};
+		const timer = setTimeout(() => {
+			socket.off('message', on_message);
+			resolve(null);
+		}, ms);
+		socket.once('message', on_message);
+	});
 }
 
 /** Builds a TCP response to a TCP request frame from a PDU body (`unit_id + PDU`). */

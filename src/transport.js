@@ -1,5 +1,5 @@
 // The transport options, each naming a transport; exactly one is given
-const TRANSPORTS = ['tcp', 'rtu_over_tcp', 'serial'];
+const TRANSPORTS = ['tcp', 'rtu_over_tcp', 'udp', 'rtu_over_udp', 'serial'];
 
 // The port of a `host:port` target that omits it
 const DEFAULT_TCP_PORT = 502;
@@ -10,16 +10,24 @@ const ANY_HOST = '0.0.0.0';
 // The serial line options, which apply to the `serial` transport only
 export const SERIAL_OPTIONS = ['baud_rate', 'parity', 'data_bits', 'stop_bits'];
 
+// The UDP socket options of the client, which apply to the UDP family only
+export const UDP_OPTIONS = ['local', 'any_source_port'];
+
+// The transports that are not the serial one
+export const NET_TRANSPORTS = TRANSPORTS.filter((transport) => transport !== 'serial');
+
 /**
  * Selects the transport from the transport options (see spec-protocol.md, "Transport options").
  * An option whose value is nullish counts as not given.
  *
  * @param {Object} options - the constructor options.
- * @returns {{ transport: 'tcp'|'rtu_over_tcp'|'serial', target: * }}
- * @throws {Error} unless exactly one transport option is given.
+ * @returns {{ transport: 'tcp'|'rtu_over_tcp'|'udp'|'rtu_over_udp'|'serial', target: * }}
+ * @throws {Error} unless `options` is an object with exactly one transport option.
  */
 export function select_transport(options) {
-	const given = TRANSPORTS.filter((transport) => options[transport] != null);
+	const given = options !== null && typeof options === 'object'
+		? TRANSPORTS.filter((transport) => options[transport] != null)
+		: [];
 	if (given.length !== 1) {
 		throw new Error(`Exactly one of ${TRANSPORTS.join(', ')} must be given`);
 	}
@@ -46,15 +54,11 @@ export function check_applicable(options, transport, exclusions) {
 }
 
 /**
- * Parses a `host:port` target (see spec-protocol.md, "`host:port` target"). A bracketed host is
- * an IPv6 address; an unbracketed target with more than one `:` is a bare IPv6 address.
- *
- * @param {*} target - the value of the `tcp` or `rtu_over_tcp` option.
- * @param {boolean} server - whether an empty host is allowed, binding 0.0.0.0.
- * @returns {{ host: string, port: number }}
- * @throws {Error} `Invalid host: <target>` on anything else.
+ * Splits a `host:port` target (see spec-protocol.md, "`host:port` target") into its host, which
+ * may be empty, and its port. A bracketed host is an IPv6 address; an unbracketed target with
+ * more than one `:` is a bare IPv6 address.
  */
-export function parse_host_port(target, server) {
+function split_host_port(target) {
 	const invalid = () => new Error(`Invalid host: ${target}`);
 	if (typeof target !== 'string') throw invalid();
 
@@ -79,9 +83,33 @@ export function parse_host_port(target, server) {
 		port = Number(port_text);
 		if (port < 1 || port > 0xFFFF) throw invalid();
 	}
-	if (host === '') {
-		if (!server) throw invalid();
-		host = ANY_HOST;
-	}
 	return { host, port };
+}
+
+/**
+ * Parses a `host:port` target (see spec-protocol.md, "`host:port` target").
+ *
+ * @param {*} target - the value of a transport option other than `serial`.
+ * @param {boolean} server - whether an empty host is allowed, binding 0.0.0.0.
+ * @returns {{ host: string, port: number }}
+ * @throws {Error} `Invalid host: <target>` on anything else.
+ */
+export function parse_host_port(target, server) {
+	const { host, port } = split_host_port(target);
+	if (host !== '') return { host, port };
+	if (!server) throw new Error(`Invalid host: ${target}`);
+	return { host: ANY_HOST, port };
+}
+
+/**
+ * Parses the `local` option of a UDP client: a `host:port` target whose host may be empty, which
+ * binds any local address of the socket's address family.
+ *
+ * @param {*} target - the value of the `local` option.
+ * @returns {{ host: string|undefined, port: number }}
+ * @throws {Error} `Invalid host: <target>` on anything else.
+ */
+export function parse_local(target) {
+	const { host, port } = split_host_port(target);
+	return { host: host === '' ? undefined : host, port };
 }

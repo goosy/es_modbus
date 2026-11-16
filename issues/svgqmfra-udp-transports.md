@@ -1,9 +1,9 @@
 ---
 id: svgqmfra
 opened: 2026-11-15T15:00:47.072Z
-closed:
+closed: 2026-11-16T05:13:01.476Z
 title: Support the Modbus UDP and RTU-over-UDP transports
-status: accepted      # open | accepted | fixed | rejected | wontfix
+status: fixed         # open | accepted | fixed | rejected | wontfix
 labels: []
 remote:
 ---

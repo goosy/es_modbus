@@ -29,12 +29,14 @@
 
 ### 范围之内
 
-- 传输方式：Modbus **TCP**、串口上的 Modbus **RTU**，以及 **RTU-over-TCP**
-  （在 TCP 套接字上使用 RTU 帧格式）。
+- 传输方式：Modbus **TCP**、串口上的 Modbus **RTU**、**RTU-over-TCP**
+  （在 TCP 套接字上使用 RTU 帧格式）、Modbus **UDP**（在 UDP 数据报中使用 MBAP 帧格式），
+  以及 **RTU-over-UDP**（在 UDP 数据报中使用 RTU 帧格式）。
 - 功能码 `1, 2, 3, 4, 5, 6, 15, 16`（读/写线圈与寄存器，单个与多个）。
 - Modbus 异常响应（功能码 + `0x80`，外加一个异常码字节）。
 - 多单元服务端：单个服务端实例可承载多个单元 ID（unit ID），并按单元 ID 路由。
-- 客户端的事务跟踪、单请求超时、发送节流，以及 TCP 和 RTU-over-TCP 的自动重连。
+- 客户端的事务跟踪、单请求超时、发送节流，以及 TCP 家族（TCP 和 RTU-over-TCP）与 UDP 家族
+  （UDP 和 RTU-over-UDP）的自动重连。
 - 两个类都提供事件发射器，用于线路跟踪（`send` / `receive`）和生命周期通知。
 - 覆盖编解码、服务端和客户端的自动化测试套件（见 `design-test.zh-cn.md`）。
 
@@ -48,16 +50,16 @@
 ## 工具与依赖
 
 - **运行时：** 使用 ES 模块的 Node.js（`"type": "module"`）。运行时只使用 Node 内置模块
-  （`node:net`、`node:events`），串口/RTU 路径另外使用 `serialport-rs`。
+  （`node:net`、`node:dgram`、`node:dns`、`node:events`），串口/RTU 路径另外使用 `serialport-rs`。
   发布的包**没有任何运行时依赖**：用户只需安装 `es-modbus`。`serialport-rs` 的 JavaScript 部分
   （其中的 stream 和 binding 模块）被打包进 `dist/modbus.js`，它的原生模块随包放在 `native/` 中
   （基于 N-API，每个平台一份文件即可用于所有 Node.js 版本）。打包产物只在首次使用串口时才加载
   `serialport-rs`，绝不在导入时加载：加载它会加载原生模块，而在没有原生模块的平台上（或禁止原生模块
-  的进程中），TCP 也必须可用。被打包的包的许可证随包放在 `THIRD_PARTY_LICENSES` 中，原生模块所含
+  的进程中），TCP 和 UDP 也必须可用。被打包的包的许可证随包放在 `THIRD_PARTY_LICENSES` 中，原生模块所含
   Rust crate 的许可证放在 `native/THIRD_PARTY_LICENSES.md` 中。
 - **串口支持的平台：** 随包提供原生模块的平台有 Windows（x64、ia32、arm64）、macOS（x64、arm64）、
   使用 glibc 或 musl 的 Linux（x64、arm64、armv7）、使用 glibc 的 armv6 Linux，以及 Android（arm64、
-  armv7）。在其他平台上，串口路径在首次使用时失败；TCP 在所有平台上都可用。
+  armv7）。在其他平台上，串口路径在首次使用时失败；TCP 和 UDP 在所有平台上都可用。
 - **Node.js 版本：** `>=20.11`（`engines`），因为用到了 `import.meta.dirname`。
 - **包管理器：** pnpm（必须使用 — 见 `AGENTS.md`）。
 - **打包器：** Rolldown，由 `build.js` 通过其 API 调用（内置 Node 模块解析与 CommonJS 互操作，

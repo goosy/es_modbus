@@ -1,18 +1,23 @@
 import { createServer } from 'node:net';
+import { createSocket } from 'node:dgram';
+import { lookup } from 'node:dns/promises';
 import { EventEmitter } from 'node:events';
 import { serial_settings, silence_time, create_serial_port } from './serial.js';
-import { SERIAL_OPTIONS, select_transport, check_applicable, parse_host_port } from './transport.js';
+import {
+	SERIAL_OPTIONS, NET_TRANSPORTS, select_transport, check_applicable, parse_host_port,
+} from './transport.js';
 import {
 	BROADCAST_ID, check_unit_id, check_request, silence_option,
 	parse_tcp_request, parse_rtu_request, encode_tcp_frame, encode_rtu_frame,
-	mbap_frame_length, rtu_request_length, Frame_Receiver,
+	mbap_frame_length, rtu_request_length, split_frames, Frame_Receiver,
 } from './util.js';
 
 const WRITE_FUNCTIONS = new Set([5, 6, 15, 16]);
 
 // The options that do not apply to some transports, and those transports (see spec-server.md)
 const SERVER_EXCLUSIONS = [
-	[SERIAL_OPTIONS, ['tcp', 'rtu_over_tcp']],
+	[SERIAL_OPTIONS, NET_TRANSPORTS],
+	[['silence'], ['udp']],
 ];
 
 // An exception response: unit ID, function code with the exception bit, exception code
@@ -113,22 +118,25 @@ function check_register_values(values) {
 export class Modbus_Server extends EventEmitter {
 	initialized = false;
 	sockets = null;
-	host = null; // TCP family: the bind address
-	port = null; // TCP family: the TCP port
+	host = null; // TCP and UDP families: the bind address
+	port = null; // TCP and UDP families: the TCP or UDP port
 	serial_settings = null; // serial: the serial port settings
 	serial_port = null; // the serial port, created by the first start()
+	udp_socket = null; // UDP family: the socket, created by each start()
 	name; // the name of the server, for logging
-	protocol = 'tcp'; // the framing: 'tcp', 'rtu_over_tcp' or 'rtu'
+	protocol = 'tcp'; // the transport: 'tcp', 'rtu_over_tcp', 'udp', 'rtu_over_udp' or 'rtu'
 	unit_ids = null;
 	accept_all_units = true;
 
 	/**
      * Constructor for a Modbus server.
      * @param {Modbus_Handler} handler - Modbus request handler functions.
-     * @param {Object} options - Options for the server; exactly one of `tcp`, `rtu_over_tcp`
-     *   or `serial` must be given:
+     * @param {Object} options - Options for the server; exactly one of `tcp`, `rtu_over_tcp`,
+     *   `udp`, `rtu_over_udp` or `serial` must be given:
      * @param {string} [options.tcp] - Listen on this `host:port` for Modbus TCP; an empty host binds 0.0.0.0.
      * @param {string} [options.rtu_over_tcp] - Listen on this `host:port` for RTU frames on the TCP sockets.
+     * @param {string} [options.udp] - Bind this `host:port` for Modbus UDP; an empty host binds 0.0.0.0.
+     * @param {string} [options.rtu_over_udp] - Bind this `host:port` for RTU frames in UDP datagrams.
      * @param {string} [options.serial] - Answer as an RTU slave on this serial device path.
      * @param {number} [options.baud_rate=9600] - Serial baud rate, serial only.
      * @param {'none'|'odd'|'even'|0|1|2} [options.parity='none'] - Serial parity, serial only.
@@ -141,23 +149,20 @@ export class Modbus_Server extends EventEmitter {
      */
 	constructor(handler, options) {
 		super();
-		if (options === null || typeof options !== 'object') {
-			throw new Error('Exactly one of tcp, rtu_over_tcp, serial must be given');
-		}
 		const { transport, target } = select_transport(options);
-		const tcp_target = transport === 'serial' ? null : parse_host_port(target, true);
+		const net_target = transport === 'serial' ? null : parse_host_port(target, true);
 		check_applicable(options, transport, SERVER_EXCLUSIONS);
 
 		this.handler = handler;
 		this.set_unit_ids(options.unit_id);
 		this.name = options.name ?? 'Modbus_Server';
 		const silence = silence_option(options.silence);
-		if (tcp_target) {
+		if (net_target) {
 			this.protocol = transport;
-			this.host = tcp_target.host;
-			this.port = tcp_target.port;
+			this.host = net_target.host;
+			this.port = net_target.port;
 			this.#silence = silence;
-			this.sockets = new Set();
+			if (this.is_tcp) this.sockets = new Set();
 		} else {
 			// The options are checked here, the port is created by start()
 			const { baud_rate, parity, data_bits, stop_bits } = options;
@@ -169,7 +174,17 @@ export class Modbus_Server extends EventEmitter {
 
 	// TCP or RTU-over-TCP
 	get is_tcp() {
-		return this.protocol !== 'rtu';
+		return this.protocol === 'tcp' || this.protocol === 'rtu_over_tcp';
+	}
+
+	// UDP or RTU-over-UDP
+	get is_udp() {
+		return this.protocol === 'udp' || this.protocol === 'rtu_over_udp';
+	}
+
+	// TCP or UDP: MBAP framing
+	get #mbap() {
+		return this.protocol === 'tcp' || this.protocol === 'udp';
 	}
 
 	/**
@@ -285,6 +300,7 @@ export class Modbus_Server extends EventEmitter {
 		// A restart stops first; nothing to do when stopped
 		await this.#run_stop();
 		if (this.is_tcp) await this.#listen();
+		else if (this.is_udp) await this.#bind();
 		else await this.#open_serial();
 	}
 
@@ -295,6 +311,13 @@ export class Modbus_Server extends EventEmitter {
 			this.sockets.clear();
 			// The callback runs on `close`, after the `stop` event
 			await new Promise((resolve) => this.server.close(() => resolve()));
+			return;
+		}
+		if (this.is_udp) {
+			const socket = this.udp_socket;
+			if (!socket) return;
+			// The callback runs on `close`, after the `stop` event
+			await new Promise((resolve) => socket.close(() => resolve()));
 			return;
 		}
 		const serial_port = this.serial_port;
@@ -335,6 +358,56 @@ export class Modbus_Server extends EventEmitter {
 				this.#report(error);
 				reject(error);
 			}
+		});
+	}
+
+	/**
+	 * Resolves the host, then binds a new UDP socket: a closed socket cannot be bound again, so
+	 * every start makes one. The socket is `udp_socket` from its `listening` until its `close`.
+	 */
+	async #bind() {
+		let resolved;
+		try {
+			resolved = await lookup(this.host);
+		} catch (error) {
+			this.#end_run('start');
+			this.#report(error);
+			throw error;
+		}
+		const socket = createSocket(resolved.family === 6 ? 'udp6' : 'udp4');
+		await new Promise((resolve, reject) => {
+			const on_listening = () => {
+				socket.off('error', on_error);
+				this.set_udp(socket);
+				this.#end_run('start');
+				this.emit('start');
+				resolve();
+			};
+			const on_error = (error) => {
+				socket.off('listening', on_listening);
+				socket.close();
+				this.#end_run('start');
+				this.#report(error);
+				reject(error);
+			};
+			socket.once('listening', on_listening);
+			socket.once('error', on_error);
+			socket.bind(this.port, resolved.address);
+		});
+	}
+
+	// Follows the events of a bound UDP socket
+	set_udp(socket) {
+		this.udp_socket = socket;
+		socket.on('message', (message, remote) => this.#on_datagram(message, remote));
+		// The socket stays open: an error concerns one datagram
+		socket.on('error', (error) => this.#transport_error(error));
+		socket.on('close', () => {
+			if (this.udp_socket === socket) this.udp_socket = null;
+			for (const receiver of this.#receivers.values()) receiver.clear();
+			this.#receivers.clear();
+			this.#end_run('stop');
+			this.emit('stop');
 		});
 	}
 
@@ -416,8 +489,8 @@ export class Modbus_Server extends EventEmitter {
 
 	_on_data(request, socket) {
 		const { tid, unit_id, func_code } = request;
-		// RTU framing means a serial bus, over a serial port or over TCP
-		const serial_bus = this.protocol !== 'tcp';
+		// RTU framing means a serial bus, over a serial port, TCP or UDP
+		const serial_bus = !this.#mbap;
 
 		if (serial_bus && unit_id === BROADCAST_ID) {
 			// A broadcast is never answered; only an accepted write is executed
@@ -502,10 +575,22 @@ export class Modbus_Server extends EventEmitter {
 		}
 	}
 
-	// The frame receivers, by socket; the serial port's under `undefined`
+	// The frame receivers, by socket, the serial port's under `undefined`; on RTU-over-UDP by
+	// peer, kept only while they hold the bytes of an incomplete frame
 	#receivers = new Map();
 	// The silence after which the bytes left are resolved, in ms
 	#silence;
+
+	// A frame receiver whose frames come from `peer`, a socket, the serial port or a UDP peer
+	#make_receiver(peer) {
+		return new Frame_Receiver({
+			frame_length: this.#mbap ? mbap_frame_length : rtu_request_length,
+			silence: this.#silence,
+			// The datagrams of RTU-over-UDP are delimited like a serial line
+			serial_line: this.protocol === 'rtu' || this.protocol === 'rtu_over_udp',
+			on_frame: (frame) => this.#on_frame(frame, peer),
+		});
+	}
 
 	/**
 	 * Delimits the frames of a chunk received from `socket` (the serial port when undefined)
@@ -514,19 +599,32 @@ export class Modbus_Server extends EventEmitter {
 	on_data(chunk, socket) {
 		let receiver = this.#receivers.get(socket);
 		if (!receiver) {
-			receiver = new Frame_Receiver({
-				frame_length: this.protocol === 'tcp' ? mbap_frame_length : rtu_request_length,
-				silence: this.#silence,
-				serial_line: this.protocol === 'rtu',
-				on_frame: (frame) => this.#on_frame(frame, socket),
-			});
+			receiver = this.#make_receiver(socket);
 			this.#receivers.set(socket, receiver);
 		}
 		receiver.push(chunk);
 	}
 
+	/**
+	 * Serves the frames of a datagram; their responses go to the address and port it came from.
+	 * On UDP the datagram is delimited on its own; on RTU-over-UDP the datagrams of one peer form
+	 * one byte stream.
+	 */
+	#on_datagram(message, remote) {
+		const peer = { address: remote.address, port: remote.port };
+		if (this.protocol === 'udp') {
+			for (const frame of split_frames(message, mbap_frame_length).frames) this.#on_frame(frame, peer);
+			return;
+		}
+		const key = `${peer.address} ${peer.port}`;
+		const receiver = this.#receivers.get(key) ?? this.#make_receiver(peer);
+		receiver.push(message);
+		if (receiver.rest.length > 0) this.#receivers.set(key, receiver);
+		else this.#receivers.delete(key);
+	}
+
 	#on_frame(frame, socket) {
-		const request = this.protocol === 'tcp' ? parse_tcp_request(frame) : parse_rtu_request(frame);
+		const request = this.#mbap ? parse_tcp_request(frame) : parse_rtu_request(frame);
 		this.emit('receive', request.buffer);
 		if (request.func_code !== 0) {
 			this._on_data(request, socket);
@@ -539,14 +637,16 @@ export class Modbus_Server extends EventEmitter {
 
 	/**
 	 * Frames a response (unit ID + PDU) for the configured protocol and writes it to `socket`,
-	 * or to the serial port when there is no `socket`.
+	 * or to the serial port when there is no `socket`. On the UDP family `socket` is the peer
+	 * `{ address, port }` the datagram is sent to.
 	 */
 	send_response(response, socket, transaction_id) {
-		const frame = this.protocol === 'tcp'
+		const frame = this.#mbap
 			? encode_tcp_frame(transaction_id, response)
 			: encode_rtu_frame(response);
 		this.emit('send', frame);
-		(socket ?? this.serial_port).write(frame);
+		if (this.is_udp) this.udp_socket.send(frame, socket.port, socket.address);
+		else (socket ?? this.serial_port).write(frame);
 	}
 
 	handle_read_bits(function_code, start_address, quantity, unit_id) {

@@ -60,7 +60,7 @@ describe('Modbus_Server construction', () => {
 	});
 
 	test('exactly one transport option must be given', () => {
-		const message = /Exactly one of tcp, rtu_over_tcp, serial must be given/;
+		const message = /Exactly one of tcp, rtu_over_tcp, udp, rtu_over_udp, serial must be given/;
 		assert.throws(() => new Modbus_Server({}), message);
 		assert.throws(() => new Modbus_Server({}, {}), message);
 		assert.throws(() => new Modbus_Server({}, { tcp: null, serial: undefined }), message);

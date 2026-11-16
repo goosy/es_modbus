@@ -11,13 +11,14 @@ const server = new Modbus_Server(handler, { tcp: '0.0.0.0:502' });
 await server.start();
 ```
 
-Exactly one of the transport options `tcp`, `rtu_over_tcp` and `serial` selects the transport,
-and its string value is the target (see "Transport options" and "`host:port` target" in
-`spec-protocol.md`). There is no default transport.
+Exactly one of the transport options `tcp`, `rtu_over_tcp`, `udp`, `rtu_over_udp` and `serial`
+selects the transport, and its string value is the target (see "Transport options" and
+"`host:port` target" in `spec-protocol.md`). There is no default transport.
 
 ```js
 const tcp = new Modbus_Server(handler, { tcp: '0.0.0.0:502' });
 const gateway = new Modbus_Server(handler, { rtu_over_tcp: ':4001' });
+const udp = new Modbus_Server(handler, { udp: ':502' });
 const serial = new Modbus_Server(handler, { serial: 'COM4', baud_rate: 19200 });
 ```
 
@@ -25,11 +26,15 @@ const serial = new Modbus_Server(handler, { serial: 'COM4', baud_rate: 19200 });
 | -------------- | ------------ | --------------------------------------------------------------- |
 | `tcp`          | TCP          | Listens on `host:port`; each connection speaks MBAP-framed Modbus TCP. An empty host binds `0.0.0.0`. |
 | `rtu_over_tcp` | RTU-over-TCP | Listens on `host:port`; each connection speaks RTU frames (unit ID + PDU + CRC16). An empty host binds `0.0.0.0`. |
+| `udp`          | UDP          | Binds a UDP socket to `host:port`; each datagram carries MBAP-framed requests. An empty host binds `0.0.0.0`. |
+| `rtu_over_udp` | RTU-over-UDP | Binds a UDP socket to `host:port`; the datagrams of each peer carry RTU frames. An empty host binds `0.0.0.0`. |
 | `serial`       | RTU          | Opens the serial device path and answers as a Modbus RTU slave. A port instance is not accepted. |
 
 An RTU server is a Modbus slave on a serial line: it has no connections and frames its responses
-with CRC-16. Request handling (unit ID routing, the `handler`, exception responses) is identical
-across the three transports; only the framing and the lifecycle events differ.
+with CRC-16. A UDP-family server has no connections either: one socket serves every client, and
+each response is sent to the address and port the request came from. Request handling (unit ID
+routing, the `handler`, exception responses) is identical across the transports; only the
+framing and the lifecycle events differ.
 
 ### options
 
@@ -46,10 +51,11 @@ across the three transports; only the framing and the lifecycle events differ.
 An option that does not apply to the selected transport throws (see "Transport options" in
 `spec-protocol.md`):
 
-| Option | `tcp` | `rtu_over_tcp` | `serial` |
-| --- | --- | --- | --- |
-| `baud_rate`, `parity`, `data_bits`, `stop_bits` | throws | throws | applies |
-| `name`, `silence`, `unit_id` | applies | applies | applies |
+| Option | `tcp` | `rtu_over_tcp` | `udp` | `rtu_over_udp` | `serial` |
+| --- | --- | --- | --- | --- | --- |
+| `baud_rate`, `parity`, `data_bits`, `stop_bits` | throws | throws | throws | throws | applies |
+| `silence` | applies | applies | throws | applies | applies |
+| `name`, `unit_id` | applies | applies | applies | applies | applies |
 
 The serial options are checked at construction, which throws on an invalid one; the serial port
 itself is created and opened by `start()`.
@@ -64,10 +70,10 @@ itself is created and opened by `start()`.
 
 How unit IDs behave depends on the transport (see "Unit ID" in `spec-protocol.md`):
 
-- **TCP.** Every unit ID, `0` included, is an ordinary unit. A request to an accepted unit is
-  served through the `handler`; a request to a non-accepted unit gets an exception response with
-  code `0x0B`.
-- **Serial bus (RTU, RTU-over-TCP).** The server is one slave on a shared line, so a request to a
+- **MBAP transports (TCP, UDP).** Every unit ID, `0` included, is an ordinary unit. A request to
+  an accepted unit is served through the `handler`; a request to a non-accepted unit gets an
+  exception response with code `0x0B`.
+- **Serial bus (RTU family).** The server is one slave on a shared line, so a request to a
   non-accepted unit ID is not answered at all. A request to unit `0` is a broadcast: if unit `0`
   is accepted (explicitly, or because every ID is accepted) a write request is executed; a read
   request is ignored. A broadcast is never answered, whether or not unit `0` is accepted.
@@ -230,12 +236,14 @@ the Promises settle after them.
 
 ### `start() → Promise<void>`
 
-Begins listening (TCP-family) or opens the serial port. The first serial `start()` creates the
-serial port, which loads `serialport-rs` and its native addon.
+Begins listening (TCP family), binds the UDP socket (UDP family) or opens the serial port. The
+first serial `start()` creates the serial port, which loads `serialport-rs` and its native
+addon.
 
-- The promise resolves once the listener is listening or the port is open, after the `start`
-  event.
-- It rejects with the first error before that point: an address in use (`EADDRINUSE`), a serial
+- The promise resolves once the listener is listening, the socket is bound or the port is open,
+  after the `start` event.
+- It rejects with the first error before that point: an address in use (`EADDRINUSE`), a host
+  that cannot be resolved, a serial
   port that cannot be created (for example, its native binding fails to load) or opened. The
   server is then stopped, and a later `start()` tries again.
 - **Who handles the failure.** A failure the caller handles in neither way crashes the process,
@@ -253,10 +261,11 @@ serial port, which loads `serialport-rs` and its native addon.
 
 ### `stop() → Promise<void>`
 
-Stops the server. TCP-family: destroys all live sockets and closes the listener. Serial: closes
-the port.
+Stops the server. TCP family: destroys all live sockets and closes the listener. UDP family:
+closes the socket. Serial: closes the port.
 
-- The promise resolves once the listener or the port is fully closed, after the `stop` event; or
+- The promise resolves once the listener, the socket or the port is fully closed, after the
+  `stop` event; or
   at once if the server is not started (never started, already stopped, or its transport closed
   by itself).
 - It never rejects: the caller has nothing to recover, and the server counts as stopped anyway. An
@@ -280,17 +289,18 @@ For example, `start(); stop(); start();` called together opens, closes and opens
 
 Once started, a transport error is emitted as `error` as before; with no `error` listener,
 `EventEmitter` throws it. A transport that closes by itself (for example, a serial adapter
-unplugged) emits `stop`, and the server counts as stopped.
+unplugged) emits `stop`, and the server counts as stopped. A UDP socket stays open after an
+error: the error concerns one datagram, not the socket.
 
 ## Events
 
 The event names are the same on every transport; the `socket_*` events exist only for the
-TCP-family transports (TCP and RTU-over-TCP).
+TCP-family transports (TCP and RTU-over-TCP), since the others have no connections.
 
 | Event               | Transports      | Argument | Fired when                                  |
 | ------------------- | --------------- | -------- | ------------------------------------------- |
-| `start`             | all             | —        | The listener or serial port is ready.       |
-| `stop`              | all             | —        | The listener or serial port is closed, whether by `stop()` or by the transport itself. |
+| `start`             | all             | —        | The listener, UDP socket or serial port is ready. |
+| `stop`              | all             | —        | The listener, UDP socket or serial port is closed, whether by `stop()` or by the transport itself. |
 | `error`             | all             | `Error`  | Transport error. While `start()` or `stop()` is pending, emitted only when listened to (see "Lifecycle"). |
 | `socket_connect`    | TCP-family      | `socket` | A client connected.                         |
 | `socket_disconnect` | TCP-family      | `socket` | A client disconnected.                      |

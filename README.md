@@ -4,7 +4,8 @@
 
 A small Modbus client and server for Node.js, as ES modules, with no runtime dependencies.
 
-- **Transports:** Modbus TCP, Modbus RTU on a serial port, and RTU over TCP.
+- **Transports:** Modbus TCP, Modbus RTU on a serial port, RTU over TCP, Modbus UDP, and RTU over
+  UDP.
 - **Function codes:** 1, 2, 3, 4, 5, 6, 15, 16, and exception responses.
 - **Client:** Promise-based reads and writes, per-request timeout, send pacing, automatic
   reconnect with exponential back-off, and dead-link detection on TCP.
@@ -18,7 +19,7 @@ pnpm add es-modbus
 
 Node.js 20.11 or later is required. The serial port support ships as prebuilt native addons for
 Windows, macOS, Linux (glibc and musl) and Android; it is loaded only when a serial port is first
-used, so TCP works on any platform.
+used, so TCP and UDP work on any platform.
 
 ## Client
 
@@ -39,13 +40,19 @@ await client.write('00001,16', Buffer.from([0xff, 0x00]), 1);
 await client.disconnect();
 ```
 
-Exactly one of `tcp`, `rtu_over_tcp` and `serial` selects the transport. The first two take a
-`host:port` string (the port defaults to `502`, an IPv6 host is written `[::1]:502`), `serial`
-takes the device path:
+Exactly one of `tcp`, `rtu_over_tcp`, `udp`, `rtu_over_udp` and `serial` selects the transport.
+All but `serial` take a `host:port` string (the port defaults to `502`, an IPv6 host is written
+`[::1]:502`), `serial` takes the device path:
 
 ```js
 // RTU over TCP, e.g. a serial-to-Ethernet gateway
 const gateway = new Modbus_Client({ rtu_over_tcp: '192.168.1.20:4001' });
+
+// Modbus UDP
+const udp = new Modbus_Client({ udp: '192.168.1.30:502' });
+
+// RTU over UDP, e.g. a serial device server that replies to a fixed local port
+const device_server = new Modbus_Client({ rtu_over_udp: '192.168.1.40:4001', local: ':4001' });
 
 // RTU on a serial port
 const serial = new Modbus_Client({ serial: 'COM3', baud_rate: 19200, parity: 'even' });
@@ -85,12 +92,14 @@ A range is a start address and a length, in one of two forms:
 
 | Option           | Default | Meaning                                                        |
 | ---------------- | ------- | -------------------------------------------------------------- |
-| `tcp`, `rtu_over_tcp`, `serial` | — | The transport and its target; exactly one is required. |
+| `tcp`, `rtu_over_tcp`, `udp`, `rtu_over_udp`, `serial` | — | The transport and its target; exactly one is required. |
 | `timeout`        | `1000`  | Response timeout per request, ms.                              |
 | `delay`          | `20`    | Minimum gap between frames, ms.                                |
 | `reconnect_time` | `10000` | Initial reconnect delay, ms; `> 0` also connects at once.      |
 | `reconnect_max`  | `60000` | Upper bound of the reconnect delay, ms.                        |
 | `max_timeouts`   | `3`     | TCP: close a link after this many timeouts in a row; `0` = off. |
+| `local`          | —       | UDP: the local `host:port` to bind; the host may be empty.    |
+| `any_source_port` | `false` | UDP: accept replies from the server's address on any port.   |
 | `baud_rate`, `parity`, `data_bits`, `stop_bits` | `9600`, `'none'`, `8`, `1` | Serial line settings. |
 
 An option that does not apply to the chosen transport, such as `baud_rate` on a TCP client,
@@ -126,7 +135,7 @@ await server.start();
 
 The server selects its transport the same way as the client; an empty host, as in `':502'`,
 binds `0.0.0.0`. For RTU on a serial port use e.g. `{ serial: '/dev/ttyUSB0', baud_rate: 19200 }`,
-and for RTU over TCP `{ rtu_over_tcp: ':4001' }`.
+for RTU over TCP `{ rtu_over_tcp: ':4001' }`, and for Modbus UDP `{ udp: ':502' }`.
 
 - **Single-point methods:** `get_coil`, `get_discrete_input` (optional; without it FC 2 reads the
   coils), `get_holding_register`, `get_input_register`, `set_coil`, `set_holding_register`.

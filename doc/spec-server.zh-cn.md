@@ -13,12 +13,14 @@ const server = new Modbus_Server(handler, { tcp: '0.0.0.0:502' });
 await server.start();
 ```
 
-传输选项 `tcp`、`rtu_over_tcp`、`serial` 中恰好一个选定传输方式，它的字符串值就是目标（见
-`spec-protocol.zh-cn.md` 的“传输选项”和“`host:port` 目标”）。没有默认的传输方式。
+传输选项 `tcp`、`rtu_over_tcp`、`udp`、`rtu_over_udp`、`serial` 中恰好一个选定传输方式，它的
+字符串值就是目标（见 `spec-protocol.zh-cn.md` 的“传输选项”和“`host:port` 目标”）。没有默认的
+传输方式。
 
 ```js
 const tcp = new Modbus_Server(handler, { tcp: '0.0.0.0:502' });
 const gateway = new Modbus_Server(handler, { rtu_over_tcp: ':4001' });
+const udp = new Modbus_Server(handler, { udp: ':502' });
 const serial = new Modbus_Server(handler, { serial: 'COM4', baud_rate: 19200 });
 ```
 
@@ -26,10 +28,13 @@ const serial = new Modbus_Server(handler, { serial: 'COM4', baud_rate: 19200 });
 | -------------- | ------------ | --------------------------------------------------------------- |
 | `tcp`          | TCP          | 监听 `host:port`；每个连接使用带 MBAP 的 Modbus TCP 帧格式。主机为空时绑定 `0.0.0.0`。 |
 | `rtu_over_tcp` | RTU-over-TCP | 监听 `host:port`；每个连接使用 RTU 帧（单元 ID + PDU + CRC16）。主机为空时绑定 `0.0.0.0`。 |
+| `udp`          | UDP          | 把 UDP 套接字绑定到 `host:port`；每个数据报携带带 MBAP 的请求。主机为空时绑定 `0.0.0.0`。 |
+| `rtu_over_udp` | RTU-over-UDP | 把 UDP 套接字绑定到 `host:port`；每个对端的数据报携带 RTU 帧。主机为空时绑定 `0.0.0.0`。 |
 | `serial`       | RTU          | 打开该串口设备路径，作为 Modbus RTU 从站应答。不接受串口实例。   |
 
-RTU 服务端就是串行线路上的 Modbus 从站：它没有连接，并以 CRC-16 封装响应。三种传输方式的请求
-处理（单元 ID 路由、`handler`、异常响应）完全相同；只有帧格式和生命周期事件不同。
+RTU 服务端就是串行线路上的 Modbus 从站：它没有连接，并以 CRC-16 封装响应。UDP 家族的服务端也
+没有连接：一个套接字服务所有客户端，每个响应发往其请求的来源地址和端口。各传输方式的请求处理
+（单元 ID 路由、`handler`、异常响应）完全相同；只有帧格式和生命周期事件不同。
 
 ### options
 
@@ -45,10 +50,11 @@ RTU 服务端就是串行线路上的 Modbus 从站：它没有连接，并以 C
 
 不适用于所选传输方式的选项会抛错（见 `spec-protocol.zh-cn.md` 的“传输选项”）：
 
-| 选项 | `tcp` | `rtu_over_tcp` | `serial` |
-| --- | --- | --- | --- |
-| `baud_rate`、`parity`、`data_bits`、`stop_bits` | 抛错 | 抛错 | 适用 |
-| `name`、`silence`、`unit_id` | 适用 | 适用 | 适用 |
+| 选项 | `tcp` | `rtu_over_tcp` | `udp` | `rtu_over_udp` | `serial` |
+| --- | --- | --- | --- | --- | --- |
+| `baud_rate`、`parity`、`data_bits`、`stop_bits` | 抛错 | 抛错 | 抛错 | 抛错 | 适用 |
+| `silence` | 适用 | 适用 | 抛错 | 适用 | 适用 |
+| `name`、`unit_id` | 适用 | 适用 | 适用 | 适用 | 适用 |
 
 串口选项在构造时校验，无效时构造函数抛出异常；串口本身由 `start()` 创建并打开。
 
@@ -61,9 +67,9 @@ RTU 服务端就是串行线路上的 Modbus 从站：它没有连接，并以 C
 
 单元 ID 的行为取决于传输方式（见 `spec-protocol.zh-cn.md` 的“单元 ID”）：
 
-- **TCP。** 每个单元 ID（包括 `0`）都是普通单元。发往被接受单元的请求经 `handler` 处理；发往未被
-  接受单元的请求得到代码为 `0x0B` 的异常响应。
-- **串行总线（RTU、RTU-over-TCP）。** 服务端是共享线路上的一个从站，因此发往未被接受单元 ID 的
+- **MBAP 传输（TCP、UDP）。** 每个单元 ID（包括 `0`）都是普通单元。发往被接受单元的请求经
+  `handler` 处理；发往未被接受单元的请求得到代码为 `0x0B` 的异常响应。
+- **串行总线（RTU 家族）。** 服务端是共享线路上的一个从站，因此发往未被接受单元 ID 的
   请求完全不应答。发往单元 `0` 的请求是广播：如果单元 `0` 被接受（显式接受，或因为接受所有 ID），
   写请求会被执行，读请求会被忽略。无论单元 `0` 是否被接受，广播都不会得到应答。
 
@@ -204,11 +210,11 @@ throw new Modbus_Exception(0x02, 'read-only');
 
 ### `start() → Promise<void>`
 
-开始监听（TCP 系列）或打开串口。首次串口 `start()` 会创建串口，此时才加载 `serialport-rs` 及其原生
-绑定。
+开始监听（TCP 系列）、绑定 UDP 套接字（UDP 家族）或打开串口。首次串口 `start()` 会创建串口，此时
+才加载 `serialport-rs` 及其原生绑定。
 
-- 监听器开始监听或串口打开后兑现，晚于 `start` 事件。
-- 在此之前的第一个错误会使其拒绝：地址已被占用（`EADDRINUSE`）、无法创建串口（例如原生绑定加载
+- 监听器开始监听、套接字绑定或串口打开后兑现，晚于 `start` 事件。
+- 在此之前的第一个错误会使其拒绝：地址已被占用（`EADDRINUSE`）、主机无法解析、无法创建串口（例如原生绑定加载
   失败）或无法打开串口。此后服务端处于停止状态，之后的 `start()` 会重试。
 - **由谁处理失败。** 调用者两种方式都没有处理的失败会让进程崩溃，这与没有监听者的 `error`
   一向的表现相同：
@@ -222,9 +228,9 @@ throw new Modbus_Exception(0x02, 'read-only');
 
 ### `stop() → Promise<void>`
 
-停止服务端。TCP 系列：销毁所有存活的套接字并关闭监听器。串口：关闭端口。
+停止服务端。TCP 系列：销毁所有存活的套接字并关闭监听器。UDP 家族：关闭套接字。串口：关闭端口。
 
-- 监听器或串口完全关闭后兑现，晚于 `stop` 事件；服务端未启动时（从未启动、已经停止，或传输层已自行关闭）立即兑现。
+- 监听器、套接字或串口完全关闭后兑现，晚于 `stop` 事件；服务端未启动时（从未启动、已经停止，或传输层已自行关闭）立即兑现。
 - 从不拒绝：调用者没有什么可补救的，服务端无论如何都视为已停止。关闭时的错误在服务端有 `error`
   监听者时作为 `error` 发出，否则丢弃。
 
@@ -242,16 +248,18 @@ throw new Modbus_Exception(0x02, 'read-only');
 ### 启动之后的错误
 
 启动之后，传输错误照旧作为 `error` 发出；没有 `error` 监听者时由 `EventEmitter` 抛出。传输层自行
-关闭时（例如拔掉串口适配器）发出 `stop`，服务端视为已停止。
+关闭时（例如拔掉串口适配器）发出 `stop`，服务端视为已停止。UDP 套接字出错后保持打开：错误只涉及
+某一个数据报，而不是套接字本身。
 
 ## 事件
 
-所有传输方式的事件名都相同；`socket_*` 事件只存在于 TCP 系列传输（TCP 和 RTU-over-TCP）。
+所有传输方式的事件名都相同；`socket_*` 事件只存在于 TCP 系列传输（TCP 和 RTU-over-TCP），因为其他
+传输方式没有连接。
 
 | 事件                | 传输方式        | 参数     | 触发时机                                    |
 | ------------------- | --------------- | -------- | ------------------------------------------- |
-| `start`             | 全部            | —        | 监听器或串口已就绪。                        |
-| `stop`              | 全部            | —        | 监听器或串口已关闭，无论是由 `stop()` 还是由传输层自身造成。 |
+| `start`             | 全部            | —        | 监听器、UDP 套接字或串口已就绪。            |
+| `stop`              | 全部            | —        | 监听器、UDP 套接字或串口已关闭，无论是由 `stop()` 还是由传输层自身造成。 |
 | `error`             | 全部            | `Error`  | 传输错误。`start()` 或 `stop()` 待决期间，仅在有监听者时发出（见“生命周期”）。 |
 | `socket_connect`    | TCP 系列        | `socket` | 有客户端连接。                              |
 | `socket_disconnect` | TCP 系列        | `socket` | 有客户端断开。                              |
