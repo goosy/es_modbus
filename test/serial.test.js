@@ -1,47 +1,39 @@
 // End-to-end Modbus RTU over a serial link (see design-test.md, "Serial tests").
 //
-// MODBUS_SERIAL_PORTS="<first>,<second>" sets the two ends of the link; when it is unset the
-// suites are skipped. Both ends are serial ports linked like a null-modem cable, or the first is
-// a serial port and the second the TCP end of a transparent serial-to-TCP converter: "host:port"
-// connects to the converter, ":port" listens for it (":port@address" accepts only the converter
-// at that address). Several "host:port" ends separated by "|" form a remote pool: each connection
-// takes the next one. With two serial ports a baud-rate sweep runs first, and the suites run at
-// 9600 baud, or at the first rate that worked when 9600 did not. A link that is set but cannot be
-// used fails the run. MODBUS_CONVERTER_SETTLE_MS sets how long a converter that connects to
-// ":port" is left before it is written to (20 ms by default).
+// MODBUS_SERIAL_PORTS sets the two ends of the link; when it is unset the suites are skipped.
+// "<serial>,<serial>": both ends are serial ports linked like a null-modem cable.
+// "<serial>,<local-udp-port>[,<remote-address>:<remote-port>]": a serial port wired to a
+// transparent serial-to-UDP converter that sends the serial data to the local UDP port; the tests
+// speak RTU-over-UDP there. The converter's address and port are learned from what it sends,
+// unless they are given. With two serial ports a baud-rate sweep runs first, and the suites run
+// at 9600 baud, or at the first rate that worked when 9600 did not. A link that is set but cannot
+// be used fails the run.
 import { describe, test, before, after, beforeEach } from 'node:test';
 import assert from 'node:assert/strict';
-import { once } from 'node:events';
-import { createServer, connect } from 'node:net';
+import { EventEmitter, once } from 'node:events';
+import { createSocket } from 'node:dgram';
 import { SerialPort } from 'serialport-rs';
 import { Modbus_Client } from '../src/ModbusClient.js';
 import { Modbus_Server } from '../src/ModbusServer.js';
-import { sleep, hex, rtu_frame, collect, create_memory_handler } from './helpers.js';
-import {
-	parse_link, parse_settle, take_remote, remote_name, end_name, accepts_peer,
-} from './serial-link.js';
+import { sleep, hex, rtu_frame, collect, create_memory_handler, parse_link } from './helpers.js';
 
 // The default settings of every suite: 9600 8N1, the usual Modbus default
 const DEFAULT_BAUD_RATE = 9600;
 const SWEEP_BAUD_RATES = [1200, 2400, 4800, 9600, 19200, 38400, 57600, 115200];
 // The baud rate of the suites: the default, unless the sweep shows it does not work on the link
 let suite_baud_rate = DEFAULT_BAUD_RATE;
-// How long to wait for a TCP end: a connection to the converter, or the converter connecting.
-// Some converters wait a fixed ~15 s before reconnecting after a connection is closed, whatever
-// their reconnect setting (seen with an InHand IR315), so this leaves room for that.
-const TCP_WAIT_MS = 30000;
-// How long to leave a converter that has just connected to us before writing to it: see
-// DEFAULT_CONVERTER_SETTLE_MS in serial-link.js; set from MODBUS_CONVERTER_SETTLE_MS
-let converter_settle_ms;
+// The bytes the pre-check passes through a converter, each way: a read request no one answers
+const PROBE = rtu_frame('010300000001');
+// How long a raw peer waits for bytes that are due: a converter may hold serial bytes for
+// hundreds of ms before it sends them (seen: about 400 ms a round trip). Bytes that arrive
+// sooner end the wait, so a fast link pays nothing.
+const RESPONSE_WAIT_MS = 1000;
 // A serial port just closed may refuse to re-open for a few tens of ms (seen with a CH340
 // driver), so opening a serial port is retried at this interval up to this limit
 const OPEN_RETRY_INTERVAL_MS = 20;
 const OPEN_RETRY_LIMIT_MS = 500;
 // The pause between stop() and start() in the restart test, for the same driver timing
 const RESTART_PAUSE_MS = 100;
-
-/** The timeout message for a listening end the converter did not connect to. */
-const no_converter = (end) => `the converter${end.from ? ` at ${end.from}` : ''} did not connect to :${end.listen}`;
 
 const with_timeout = (promise, ms, message) => {
 	let timer;
@@ -77,63 +69,61 @@ const close_port = (port) => new Promise((resolve) => {
 });
 const new_port = (path, baud_rate = suite_baud_rate) => new SerialPort({ path, baudRate: baud_rate, autoOpen: false });
 
-/** Opens a raw stream on an end of the link: a serial port, or a TCP socket to or from the converter. */
+/**
+ * The UDP end of the link as a raw stream: a socket bound to the local port, with write() and
+ * `data` events like a serial port. Datagrams go to the end's remote. Until the remote is known
+ * every datagram is taken; then only those from its address, and from its port unless the end's
+ * `any_port`. `source` is the sender of the last datagram taken.
+ */
+class Udp_End extends EventEmitter {
+	source = null;
+	#end;
+	#socket;
+
+	constructor(end) {
+		super();
+		this.#end = end;
+		this.#socket = createSocket('udp4');
+		this.#socket.on('error', () => { });
+		this.#socket.on('message', (bytes, source) => {
+			const { remote } = end;
+			if (remote && (source.address !== remote.host || (!end.any_port && source.port !== remote.port))) return;
+			this.source = source;
+			this.emit('data', bytes);
+		});
+	}
+
+	async open() {
+		// A port in use makes the socket emit `error`, which rejects this
+		const bound = once(this.#socket, 'listening');
+		this.#socket.bind(this.#end.udp);
+		await bound;
+	}
+
+	write(buffer, callback) {
+		const { host, port } = this.#end.remote;
+		this.#socket.send(buffer, port, host, callback);
+	}
+
+	close() {
+		return new Promise((resolve) => this.#socket.close(resolve));
+	}
+}
+
+/** Opens a raw stream on an end of the link: a serial port, or the local UDP port. */
 async function open_end(end, baud_rate = suite_baud_rate) {
 	if (end.serial) {
 		const port = new_port(end.serial, baud_rate);
 		await open_port(port);
 		return port;
 	}
-	if (end.remotes) {
-		const remote = take_remote(end);
-		const socket = connect(remote.port, remote.host);
-		socket.on('error', () => { });
-		try {
-			await with_timeout(once(socket, 'connect'), TCP_WAIT_MS, `no connection to ${remote_name(remote)}`);
-		} catch (error) {
-			// A connection still being attempted would keep the process alive
-			socket.destroy();
-			throw error;
-		}
-		return socket;
-	}
-	// The converter connects to us; once it has, stop accepting so the port is free again. A
-	// connection from another address than the end names is closed, and the wait goes on.
-	const server = createServer();
-	let socket;
-	let on_converter;
-	const converter = new Promise((resolve) => {
-		on_converter = resolve;
-	});
-	server.on('connection', (incoming) => {
-		incoming.on('error', () => { });
-		if (socket || !accepts_peer(end, incoming.remoteAddress)) {
-			incoming.destroy();
-			return;
-		}
-		socket = incoming;
-		on_converter();
-	});
-	server.listen(end.listen);
-	try {
-		await once(server, 'listening');
-		await with_timeout(converter, TCP_WAIT_MS, no_converter(end));
-	} finally {
-		server.close();
-	}
-	// Some converters reset a connection that receives data right after it is made
-	await sleep(converter_settle_ms);
-	return socket;
+	const udp_end = new Udp_End(end);
+	await udp_end.open();
+	return udp_end;
 }
 
 /** Closes a raw stream opened by open_end(). */
-async function close_end(stream) {
-	if (stream instanceof SerialPort) return close_port(stream);
-	if (stream.destroyed) return;
-	const closed = once(stream, 'close');
-	stream.destroy();
-	await closed;
-}
+const close_end = (stream) => (stream instanceof SerialPort ? close_port(stream) : stream.close());
 
 /** Writes on a raw stream and waits until the bytes have left it. */
 async function send(stream, buffer) {
@@ -142,7 +132,7 @@ async function send(stream, buffer) {
 }
 
 /** Writes a request on a raw stream and collects up to `length` response bytes. */
-async function exchange(stream, request, length, ms = 500) {
+async function exchange(stream, request, length, ms = RESPONSE_WAIT_MS) {
 	const response = collect(stream, length, ms);
 	stream.write(typeof request === 'string' ? rtu_frame(request) : request);
 	return response;
@@ -156,12 +146,35 @@ async function start_serial_server(handler, path, options = {}) {
 	return server;
 }
 
-/** Opens both ends of the link once; throws the reason when an end cannot be used. */
-async function check_link(link) {
-	const first = await open_end(link.first);
-	await close_end(first);
-	const second = await open_end(link.second);
-	await close_end(second);
+/** Sends the probe into `from` and checks that it comes out of `to`; throws `message()` when not. */
+async function pass_probe(from, to, message) {
+	const received = collect(to, PROBE.length, RESPONSE_WAIT_MS);
+	await send(from, PROBE);
+	const bytes = await received;
+	if (!bytes.equals(PROBE)) throw new Error(`${message()} (received ${bytes.toString('hex') || 'nothing'})`);
+}
+
+/**
+ * Opens both ends of the link once; throws the reason when an end cannot be used. With a UDP end
+ * the probe goes through the converter each way: first from the serial port, which tells where
+ * the converter sends from (the end's `remote` when none was given, and its `source_port`).
+ */
+async function check_link({ first, second }) {
+	const port = await open_end(first);
+	let peer;
+	try {
+		peer = await open_end(second);
+		if (second.serial) return;
+		const converter = second.remote ? `the converter at ${second.remote.host}` : 'a converter';
+		await pass_probe(port, peer, () => `${first.serial} did not reach UDP port ${second.udp} through ${converter}`);
+		second.source_port = peer.source.port;
+		second.remote ??= { host: peer.source.address, port: peer.source.port };
+		const hint = second.any_port ? '' : '; if it receives on another port than it sends from, give its address and port';
+		await pass_probe(peer, port, () => `${second.remote.host}:${second.remote.port} did not reach ${first.serial}${hint}`);
+	} finally {
+		if (peer) await close_end(peer);
+		await close_end(port);
+	}
 }
 
 /**
@@ -201,7 +214,6 @@ let link = null;
 let link_error = null;
 if (link_spec) {
 	try {
-		converter_settle_ms = parse_settle(process.env.MODBUS_CONVERTER_SETTLE_MS);
 		link = parse_link(link_spec);
 		await check_link(link);
 	} catch (error) {
@@ -218,6 +230,7 @@ if (!link_spec) skip = 'MODBUS_SERIAL_PORTS is not set';
 else if (link_error) skip = 'the serial link cannot be used';
 else if (worked?.length === 0) skip = 'no baud rate worked in the sweep';
 
+const end_name = (end) => end.serial ?? `UDP port ${end.udp}`;
 const first_name = link ? end_name(link.first) : 'first end';
 const second_name = link ? end_name(link.second) : 'second end';
 
@@ -225,7 +238,7 @@ test(link_spec ? `serial link ${link_spec} can be used` : 'serial link can be us
 	if (link_error) assert.fail(link_error);
 });
 
-test('baud-rate sweep', { skip: (!sweep && (skip || 'the link has a TCP end')) }, (t) => {
+test('baud-rate sweep', { skip: (!sweep && (skip || 'the link has a UDP end')) }, (t) => {
 	for (const { baud_rate, error } of sweep) {
 		if (error) t.diagnostic(`${baud_rate} failed: ${error}`);
 	}
@@ -350,7 +363,7 @@ describe(`Modbus RTU server on ${first_name}, raw peer on ${second_name}`, { ski
 
 	test('a frame split across reads is reassembled', async () => {
 		const frame = rtu_frame('010300000001');
-		const response = collect(peer, 7, 500);
+		const response = collect(peer, 7, RESPONSE_WAIT_MS);
 		await send(peer, frame.subarray(0, 3));
 		await sleep(1);
 		await send(peer, frame.subarray(3));
@@ -409,7 +422,7 @@ describe(`Modbus RTU client on ${client_name}, raw slave on ${slave_name}`, { sk
 	 * and writes `reply` in the given parts. Resolves with the request received.
 	 */
 	async function answer(request_length, ...reply_parts) {
-		const request = await collect(slave, request_length, 1000);
+		const request = await collect(slave, request_length, RESPONSE_WAIT_MS);
 		for (const part of reply_parts) await send(slave, part);
 		return request;
 	}
@@ -439,66 +452,59 @@ describe(`Modbus RTU client on ${client_name}, raw slave on ${slave_name}`, { sk
 	});
 });
 
+const CLIENT_OPTIONS = { timeout: 1000, reconnect_time: 0 };
+const serial_client = (path) => new Modbus_Client({ serial: path, baud_rate: suite_baud_rate, ...CLIENT_OPTIONS });
+
 /**
- * Starts the two classes on the link: with two serial ports the server on the first and the
- * client on the second; with a TCP end the class on the serial port is the one whose peer can
- * take the TCP end, the server when the tests connect to the converter (an RTU-over-TCP client
- * connects), the client when the converter connects to the tests (an RTU-over-TCP server listens).
+ * The pairs of the two classes on the link, each `{ title, skip, start_server(handler),
+ * make_client() }`: `start_server` resolves with a running server, `make_client` returns a client
+ * not yet connected. With two serial ports: the server on the first, the client on the second.
+ * With a UDP end the serial port takes each class in turn and its RTU-over-UDP counterpart the
+ * UDP end. An RTU-over-UDP server answers to the port a request came from, so that pair is
+ * skipped for a converter that receives on another port.
  */
-async function start_pair(handler) {
-	const client_options = { timeout: 1000, reconnect_time: 0 };
-	if (link.second.serial) {
-		const server = await start_serial_server(handler, link.first.serial);
-		const client = new Modbus_Client({ serial: link.second.serial, baud_rate: suite_baud_rate, ...client_options });
-		return { server, client };
+function pairs() {
+	if (skip) return [{ title: 'Modbus RTU client <-> server', skip }];
+	const { first, second } = link;
+	if (second.serial) {
+		return [{
+			title: `Modbus RTU client on ${second_name} <-> server on ${first_name}`,
+			start_server: (handler) => start_serial_server(handler, first.serial),
+			make_client: () => serial_client(second.serial),
+		}];
 	}
-	if (link.second.remotes) {
-		const server = await start_serial_server(handler, link.first.serial);
-		const client = new Modbus_Client({ rtu_over_tcp: remote_name(take_remote(link.second)), ...client_options });
-		return { server, client };
-	}
-	const server = new Modbus_Server(handler, { rtu_over_tcp: `:${link.second.listen}` });
-	server.on('error', () => { });
-	server.on('socket_error', () => { });
-	// `socket_connect` comes before the server takes the socket in, so a connection from another
-	// address than the end names is closed here before it can send the server anything
-	let on_converter;
-	const converter = new Promise((resolve) => {
-		on_converter = resolve;
-	});
-	server.on('socket_connect', (socket) => {
-		if (accepts_peer(link.second, socket.remoteAddress)) on_converter();
-		else socket.destroy();
-	});
-	await server.start();
-	try {
-		await with_timeout(converter, TCP_WAIT_MS, no_converter(link.second));
-	} catch (error) {
-		// The caller never gets the server, so stop it here or it keeps the process alive
-		await server.stop();
-		throw error;
-	}
-	const client = new Modbus_Client({ serial: link.first.serial, baud_rate: suite_baud_rate, ...client_options });
-	return { server, client };
+	return [{
+		title: `Modbus RTU server on ${first_name} <-> RTU-over-UDP client on ${second_name}`,
+		start_server: (handler) => start_serial_server(handler, first.serial),
+		make_client: () => new Modbus_Client({
+			rtu_over_udp: `${second.remote.host}:${second.remote.port}`, local: `:${second.udp}`,
+			any_source_port: second.any_port, ...CLIENT_OPTIONS,
+		}),
+	}, {
+		title: `Modbus RTU client on ${first_name} <-> RTU-over-UDP server on ${second_name}`,
+		skip: second.source_port !== second.remote.port
+			&& `the converter sends from port ${second.source_port} and receives on ${second.remote.port}`,
+		start_server: async (handler) => {
+			const server = new Modbus_Server(handler, { rtu_over_udp: `:${second.udp}` });
+			server.on('error', () => { });
+			await server.start();
+			return server;
+		},
+		make_client: () => serial_client(first.serial),
+	}];
 }
 
-function pair_title() {
-	if (!link || link.second.serial) return `Modbus RTU client on ${second_name} <-> server on ${first_name}`;
-	if (link.second.remotes) return `Modbus RTU server on ${first_name} <-> RTU-over-TCP client to ${second_name}`;
-	return `Modbus RTU client on ${first_name} <-> RTU-over-TCP server on ${second_name}`;
-}
-
-describe(pair_title(), { skip }, () => {
+pairs().forEach((pair) => describe(pair.title, { skip: pair.skip }, () => {
 	let memory;
 	let server;
 	let client;
 	before(async () => {
 		memory = create_memory_handler();
-		({ server, client } = await start_pair(memory.handler));
+		server = await pair.start_server(memory.handler);
+		client = pair.make_client();
 		client.on('error', () => { });
-		// Only a serial open is retried; a TCP end must work at once
-		if (client.protocol === 'rtu') await retry_open(() => client.connect());
-		else await client.connect();
+		// A serial port just closed by the suite before may not open at once
+		await retry_open(() => client.connect());
 	});
 	after(async () => {
 		await client?.disconnect();
@@ -527,4 +533,4 @@ describe(pair_title(), { skip }, () => {
 		]);
 		assert.deepEqual(values.map((v) => v.readUInt16BE(0)), [10, 20, 30]);
 	});
-});
+}));

@@ -1,5 +1,5 @@
 // Shared test fixtures: in-memory handler, frame builders, fake peers.
-import { createServer, Socket } from 'node:net';
+import { createServer, Socket, isIP } from 'node:net';
 import { createSocket } from 'node:dgram';
 import { once, EventEmitter } from 'node:events';
 import { Modbus_Client } from '../src/ModbusClient.js';
@@ -126,6 +126,146 @@ export class Fake_Serial_Port extends EventEmitter {
 	write(buffer) {
 		this.written.push(Buffer.from(buffer));
 	}
+}
+
+// A simulated serial line between two fake serial ports, for tests of the timing of the serial
+// paths. Each end is a Fake_Serial_Port by path: Modbus_Client / Modbus_Server get it through
+// `bridge_port_factory`, installed with set_serial_port_factory(bridge_port_factory), and a test
+// can also open it itself as a raw peer. The line passes the bytes written at one end to the
+// other, paced at the character time of the settings an end was opened with (0 when neither
+// was). Line options, one object per direction (`to_a`: bytes delivered to `a`, `to_b`: to `b`):
+//   chunk   the most bytes delivered in one `data` event (default: all bytes of a write
+//           together, once its last byte is on the line).
+//   tamper  (bytes, index) => result, called for each write in this direction (`index` counts
+//           them from 0). Returns the bytes to send, an array of byte Buffers and pauses in ms
+//           (e.g. [head, 20, tail]), null to drop the write, or undefined to send it unchanged.
+// Writes in one direction never overtake each other: a write starts once the previous is on
+// the line.
+
+// The ends of the open bridges by path, for `bridge_port_factory`
+const bridge_ends = new Map();
+
+/** A factory for set_serial_port_factory(): the end of a serial bridge, by path. */
+export async function bridge_port_factory(settings) {
+	const port = bridge_ends.get(settings.path);
+	if (!port) throw new Error(`No serial bridge end for ${settings.path}`);
+	port.settings = settings;
+	return port;
+}
+
+class Bridge_Serial_Port extends Fake_Serial_Port {
+	line = null; // the direction away from this end
+
+	write(buffer) {
+		super.write(buffer);
+		this.line.write(Buffer.from(buffer));
+	}
+}
+
+/** One direction of the line: paces bytes in order and hands them to the port at its end. */
+class Line {
+	#options;
+	#char_time;
+	#port;
+	#queue = []; // { at, bytes }, in delivery order
+	#timer = null;
+	#free_at = 0; // when the last scheduled byte is off the line
+	#writes = 0;
+
+	constructor(options, char_time, port) {
+		this.#options = options;
+		this.#char_time = char_time;
+		this.#port = port;
+	}
+
+	write(bytes) {
+		const { tamper } = this.#options;
+		let result = tamper ? tamper(bytes, this.#writes) : bytes;
+		this.#writes++;
+		if (result === undefined) result = bytes;
+		if (result === null) return;
+		const segments = Array.isArray(result) ? result : [result];
+		const { chunk = Number.POSITIVE_INFINITY } = this.#options;
+		const char_time = this.#char_time();
+		let at = Math.max(performance.now(), this.#free_at);
+		for (const segment of segments) {
+			if (typeof segment === 'number') {
+				at += segment;
+				continue;
+			}
+			for (let i = 0; i < segment.length; i += chunk) {
+				const part = segment.subarray(i, i + chunk);
+				at += part.length * char_time;
+				this.#queue.push({ at, bytes: part });
+			}
+		}
+		this.#free_at = at;
+		this.#pump();
+	}
+
+	#pump() {
+		if (this.#timer || this.#queue.length === 0) return;
+		const wait = Math.max(0, this.#queue[0].at - performance.now());
+		this.#timer = setTimeout(() => {
+			this.#timer = null;
+			// Timers fire on whole ms: deliver everything due within this one
+			const now = performance.now() + 1;
+			while (this.#queue.length > 0 && this.#queue[0].at <= now) {
+				const { bytes } = this.#queue.shift();
+				if (this.#port.isOpen) this.#port.emit('data', bytes);
+			}
+			this.#pump();
+		}, wait);
+	}
+
+	clear() {
+		clearTimeout(this.#timer);
+		this.#timer = null;
+		this.#queue.length = 0;
+	}
+}
+
+/** The time one character takes at the settings a fake serial port was opened with. */
+function serial_char_time(settings) {
+	if (!settings) return 0;
+	const { baudRate, parity, dataBits, stopBits } = settings;
+	return (1 + dataBits + (parity === 'none' ? 0 : 1) + stopBits) * 1000 / baudRate;
+}
+
+/**
+ * Links fake serial ports at `a_path` and `b_path` through a simulated line (see above).
+ * Returns `{ a, b, unplug(), close() }`: `a` and `b` are the two ports; unplug() drops the bytes
+ * on the line and closes both ports, as when the device is gone; close() removes the bridge.
+ */
+export function create_serial_bridge(a_path, b_path, { to_a = {}, to_b = {} } = {}) {
+	const a = new Bridge_Serial_Port(null);
+	const b = new Bridge_Serial_Port(null);
+	const char_time = () => serial_char_time(a.settings ?? b.settings);
+	b.line = new Line(to_a, char_time, a);
+	a.line = new Line(to_b, char_time, b);
+	bridge_ends.set(a_path, a);
+	bridge_ends.set(b_path, b);
+	const clear = () => {
+		a.line.clear();
+		b.line.clear();
+	};
+	return {
+		a,
+		b,
+		unplug() {
+			clear();
+			for (const port of [a, b]) {
+				if (!port.isOpen) continue;
+				port.isOpen = false;
+				port.emit('close');
+			}
+		},
+		close() {
+			clear();
+			bridge_ends.delete(a_path);
+			bridge_ends.delete(b_path);
+		},
+	};
 }
 
 /**
@@ -344,4 +484,25 @@ export function next_datagram(socket, ms = 500) {
 /** Builds a TCP response to a TCP request frame from a PDU body (`unit_id + PDU`). */
 export function reply_to(request, body) {
 	return tcp_frame(request.readUInt16BE(0), body);
+}
+
+/**
+ * Parses MODBUS_SERIAL_PORTS, `<serial>,<serial>` or `<serial>,<local-udp-port>[,<address>:<port>]`,
+ * into `{ first, second }`. The first end is `{ serial: path }`; the second is `{ serial: path }`
+ * or a UDP end `{ udp: port, remote, any_port }`: `remote` the converter as `{ host, port }`, null
+ * until it is learned, and `any_port` true for a given remote, whose datagrams are taken whatever
+ * their source port. Throws on an invalid value.
+ */
+export function parse_link(spec) {
+	const [first, second, remote, ...rest] = spec.split(',');
+	const invalid = (reason) => new Error(`Invalid MODBUS_SERIAL_PORTS "${spec}": ${reason}`);
+	if (!first || !second || rest.length > 0) throw invalid('expected two or three ends');
+	if (!/^\d+$/.test(second)) {
+		if (remote !== undefined) throw invalid('two serial ports take no remote');
+		return { first: { serial: first }, second: { serial: second } };
+	}
+	if (remote === undefined) return { first: { serial: first }, second: { udp: Number(second), remote: null, any_port: false } };
+	const [, host, port] = /^(.*):(\d+)$/.exec(remote) ?? [];
+	if (isIP(host) !== 4) throw invalid(`the remote "${remote}" is not "<IPv4 address>:<port>"`);
+	return { first: { serial: first }, second: { udp: Number(second), remote: { host, port: Number(port) }, any_port: true } };
 }

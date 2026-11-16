@@ -1,50 +1,44 @@
-// Runs the serial tests over every direction of a serial port (see design-test.md, "Serial test
-// runner"): `node test/run-serial.js [--settle <ms>] COMn COMm` or `node test/run-serial.js
-// [--settle <ms>] COMn [:port[@address]] [host:port[,host:port ...]]`. Each run is a `node --test
-// test/serial.test.js` child process with MODBUS_SERIAL_PORTS (and MODBUS_CONVERTER_SETTLE_MS
-// when `--settle` is given) set for it only, started once the previous one has exited.
+// The serial test runner (see design-test.md, "Serial test runner"): `node test/run-serial.js
+// COMn COMm` or `node test/run-serial.js COMn <local-udp-port> [<address>:<port>]`. Each run is a
+// `node --test test/serial.test.js` child process with MODBUS_SERIAL_PORTS set for it only,
+// started once the previous one has exited.
 import { spawnSync } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
-import { parse_runner_args } from './serial-link.js';
+import { parse_link } from './helpers.js';
 
-// Not a constant: it depends on where the file is at run time
-const serial_test = fileURLToPath(new URL('./serial.test.js', import.meta.url));
 const USAGE = `Usage:
-  pnpm test:serial [--settle <ms>] <serial> <serial>
+  pnpm test:serial <serial> <serial>
       two serial ports linked like a null-modem cable; both directions run
-  pnpm test:serial [--settle <ms>] <serial> [:<port>[@<address>]] [<host>:<port>[,<host>:<port> ...]]
-      a serial port wired to a transparent converter: ":<port>" listens for a converter in TCP
-      client mode, "@<address>" accepting only the converter at that IP address; the last
-      argument is the remote pool for a converter in TCP server mode, its "<host>:<port>" ends
-      separated by "," and taken in turn
-Options:
-  --settle <ms>  how long to leave a converter that has just connected to ":<port>" before
-                 writing to it (default 20); a larger value works around a converter that
-                 resets a connection receiving data too soon
+  pnpm test:serial <serial> <local-udp-port> [<address>:<port>]
+      a serial port wired to a transparent serial-to-UDP converter that sends the serial data
+      to <local-udp-port> of this machine. The converter's address and port are learned from
+      what it sends; give them (an IPv4 address) when another converter also sends to that
+      port during the run, or when the converter receives on another port than it sends from.
 Examples:
   pnpm test:serial COM4 COM5
-  pnpm test:serial COM4 :502 192.168.89.2:502,192.168.89.2:503
-  pnpm test:serial --settle 500 COM4 :502@192.168.213.254`;
+  pnpm test:serial COM4 502
+  pnpm test:serial COM4 502 192.168.89.2:4001`;
 
-const options = parse_runner_args(process.argv.slice(2));
-if (!options) {
-	console.error(USAGE);
+const args = process.argv.slice(2);
+let link;
+try {
+	link = parse_link(args.join(','));
+} catch (error) {
+	console.error(`${error.message}\n\n${USAGE}`);
 	process.exit(2);
 }
-
-const settle_env = options.settle === undefined ? {} : { MODBUS_CONVERTER_SETTLE_MS: options.settle };
-const settle_note = options.settle === undefined ? '' : ` MODBUS_CONVERTER_SETTLE_MS=${options.settle}`;
+const runs = link.second.serial ? [args.join(','), [...args].reverse().join(',')] : [args.join(',')];
+const serial_test = fileURLToPath(new URL('./serial.test.js', import.meta.url));
 const results = [];
-for (const spec of options.runs) {
-	console.log(`\n=== MODBUS_SERIAL_PORTS=${spec}${settle_note}\n`);
+for (const spec of runs) {
+	console.log(`\n=== MODBUS_SERIAL_PORTS=${spec}\n`);
 	const { status, error } = spawnSync(process.execPath, ['--test', serial_test], {
 		stdio: 'inherit',
-		env: { ...process.env, MODBUS_SERIAL_PORTS: spec, ...settle_env },
+		env: { ...process.env, MODBUS_SERIAL_PORTS: spec },
 	});
 	if (error) console.error(error.message);
 	results.push({ spec, passed: status === 0 });
 }
-
 console.log('\n=== Summary');
 for (const { spec, passed } of results) console.log(`${passed ? 'pass' : 'FAIL'}  ${spec}`);
 process.exitCode = results.every(({ passed }) => passed) ? 0 : 1;

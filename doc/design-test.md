@@ -21,14 +21,16 @@ needs. A topic split out of [design.md](./design.md).
 ## Layers
 
 `test/util.test.js` covers `src/util.js`; `test/client.test.js` and `test/server.test.js` cover
-each class alone; `test/tcp.test.js`, `test/serial.test.js` and `test/serial-bridge.test.js` run
-the classes end to end over loopback TCP, a serial port pair and a simulated serial line;
+each class alone; `test/tcp.test.js` and `test/serial.test.js` run the classes end to end over loopback TCP and
+a serial port pair; `test/serial-bridge.test.js` checks the timing of the serial paths (bytes
+paced at the baud rate, pauses longer than the line silence, a late response, a device that is
+gone) over a simulated serial line between two fake serial ports;
 `test/udp.test.js` covers the UDP family, each class against a raw UDP peer and the two end to
 end over loopback UDP;
-`test/bundle.test.js` covers the build output `dist/modbus.js` with `native/`. Fixtures live in
-`test/helpers.js` and `test/serial-bridge.js`. The parsing of the serial tests' link and of the
-serial test runner's arguments lives in `test/serial-link.js`, so `test/serial-link.test.js`
-covers it without serial hardware.
+`test/bundle.test.js` covers the build output `dist/modbus.js` with `native/`. Fixtures, the simulated
+serial line (`create_serial_bridge`) among them, live in `test/helpers.js`; its `parse_link()` of `test/helpers.js` parses
+`MODBUS_SERIAL_PORTS` for both the serial tests and the serial test runner. The serial test
+helpers have no tests of their own: a wrong value makes the serial run fail with the reason.
 
 ## Commands
 
@@ -60,78 +62,74 @@ missing or older than any file in `src/`.
 ## Serial tests
 
 The serial tests run over a link whose two ends are set by the environment variable
-`MODBUS_SERIAL_PORTS="<first>,<second>"`. They are off by default, since a machine need not have
-serial ports, virtual or physical: when the variable is unset, the serial suites are skipped.
+`MODBUS_SERIAL_PORTS`. They are off by default, since a machine need not have serial ports,
+virtual or physical: when the variable is unset, the serial suites are skipped.
 
-The variable takes one of five forms. An end containing `:` is a TCP end; any other end is a
-serial device path. The usual way to set it is the runner `pnpm test:serial` (see "Serial test
-runner" below); it can also be set by hand, e.g. to run the serial tests under
-`node --test --experimental-test-coverage`.
+The variable takes one of three forms. The first end is always a serial device path; a second end
+of digits only is a local UDP port, any other a serial device path. The usual way to set it is the
+runner `pnpm test:serial` (see "Serial test runner" below); it can also be set by hand, e.g. to
+run the serial tests under `node --test --experimental-test-coverage`.
 
-| Form                                           | Link                                                                                                      |
-| ---------------------------------------------- | --------------------------------------------------------------------------------------------------------- |
-| `COM11,COM12`                                  | Two serial ports linked like a null-modem cable: a com0com pair, or two physical ports wired together.    |
-| `COM3,192.168.1.10:4001`                       | A serial port wired to a transparent serial-to-TCP converter in TCP server mode; the tests connect to it. |
-| `COM3,192.168.1.10:4001\|192.168.1.10:4002`     | The same, with a remote pool: several `host:port` ends separated by `\|`, taken in turn.                  |
-| `COM3,:4001`                                   | The same, with the converter in TCP client mode; the tests listen on the port and wait for it.            |
-| `COM3,:4001@192.168.1.10`                      | The same, accepting only the converter at that IP address (see "Converter address" below).                |
+| Form                           | Link                                                                                                                                 |
+| ------------------------------ | ------------------------------------------------------------------------------------------------------------------------------------ |
+| `COM11,COM12`                  | Two serial ports linked like a null-modem cable: a com0com pair, or two physical ports wired together.                               |
+| `COM3,502`                     | A serial port wired to a transparent serial-to-UDP converter that sends the serial data to UDP port 502 of the test machine.         |
+| `COM3,502,192.168.1.10:4001`   | The same, naming the converter: datagrams go to that address and port, and only datagrams from that address are taken.               |
 
-- **Transparent converters only.** A TCP end must be a converter that passes bytes through
-  unchanged. A Modbus RTU-to-TCP gateway is not supported: it rewrites the frames, so the tests
-  could not see the bytes on the line. The tests speak RTU-over-TCP on a TCP end.
-- **Converter connections.** A converter in TCP server mode must accept at least 2 Modbus over
-  TCP connections. The suites open and close their own TCP ends, one right after another, and do
-  not wait for a converter to release a connection; a converter that keeps only one connection
-  drops the new one while it still holds the old. For such a converter, give at least 2 remote
-  ends (e.g. different channels of one gateway) as a remote pool.
-- **TCP wait.** Each time the tests open a TCP end, they wait up to 30 s for it: for the
-  connection to the converter, or for the converter to connect to `:port`. A converter in TCP
-  client mode reconnects on its own schedule after a suite closes its connection, and some wait a
-  fixed ~15 s whatever their reconnect setting (seen with an InHand IR315), so a shorter wait would
-  fail every suite after the first. A converter that answers at once costs no extra time.
-- **Converter settle time.** When a converter connects to `:port`, the tests stop listening and
-  leave the connection alone for a settle time before using it: 20 ms by default, the client's
-  default `delay` between two frame writes, so a sound converter is tested at a normal pace. The
-  environment variable `MODBUS_CONVERTER_SETTLE_MS` (set by `pnpm test:serial --settle <ms>`)
-  raises it for a converter with a known defect; a value that is not a non-negative integer fails
-  the pre-check. Some converters reset a connection when data arrives in its first tens of
-  milliseconds (seen with an InHand IR315: a write 50 ms after the connection was reset, one after
-  300 ms was not), so the IR315 is tested with `--settle 500`. The larger value also spares the
-  IR315 from a pre-check that closes a connection at once, which it treats as a failed connection
-  and backs off for its maximum reconnect interval.
-- **Converter address.** Several converters on the LAN may connect to the same port of the test
-  machine, and only one of them is wired to the serial port under test. A listening end
-  `:port@address` names that converter by its IP address (IPv4, or IPv6; a host name is refused):
-  wherever the tests wait for the converter (the pre-check, a raw-stream suite, the
-  `Modbus_Server` of the RTU-over-TCP pair), a connection from any other address is closed at once
-  and the wait goes on, up to the TCP wait. The `Modbus_Server` is given only the named
-  converter: the tests close any other connection on its `socket_connect` event, which comes
-  before the server reads from the socket. An IPv4 peer that the socket reports in its
-  IPv6-mapped form (`::ffff:a.b.c.d`) matches its IPv4 address. Without `@address` the first
-  connection is taken, whatever its address.
-- **Remote pool.** Each time the tests connect to a remote end (the pre-check, a raw-stream suite,
-  the `rtu_over_tcp` target of a `Modbus_Client`), they take the next end of the pool, cycling
-  through it, so two consecutive connections go to different ends. An end the run does not reach
-  is not an error: what is under test is the serial port. A listening end `:port` is always a
-  single one and cannot be in a pool.
+- **Transparent converters only.** The converter must pass bytes through unchanged. A Modbus
+  RTU-to-TCP/UDP gateway is not supported: it rewrites the frames, so the tests could not see the
+  bytes on the line. The tests speak RTU-over-UDP on the UDP end. How the converter packs the
+  serial bytes into datagrams does not matter: RTU-over-UDP delimits the datagrams of one peer as
+  one byte stream (see "Datagrams" in `spec-protocol.md`).
+- **Converter setup.** The converter is set to send the serial data to the local UDP port on the
+  test machine, and its serial side to the serial settings below. The tests bind that port on
+  every local IPv4 address; each suite binds and releases it in turn. UDP has no connection, so a suite never waits for the converter.
+- **Learned remote.** Without a remote, the pre-check learns it: the sender (address and port) of
+  the datagrams that bring the probe from the serial port to the local port. From then on the run
+  sends to that address and port and takes only datagrams from that address and port. A
+  transparent converter sends only when bytes arrive on its serial side, so other converters on
+  the LAN that send to the same port do not get in the way while their serial lines are quiet:
+  only the converter wired to the serial port under test sends the probe (seen with two
+  converters sending to `:502`, whichever was wired to the serial port). A datagram from another
+  converter during the probe makes the pre-check fail, since the bytes received are not the
+  probe; it is never taken for the remote silently.
+- **Given remote.** The remote `<address>:<port>` is an IPv4 address (a host name is refused) and
+  the port the converter receives on. It is needed in two cases: another converter sends to the
+  same port while the run is on, e.g. its serial side is on a busy bus or it sends heartbeat or
+  registration packets; or the converter sends from a source port other than the one it receives
+  on, so the learned port does not reach it. With a given remote, datagrams go to that address
+  and port, and a datagram from that address is taken whatever its source port
+  (`any_source_port` on a `Modbus_Client`).
+- **Response wait.** A raw peer waits up to 1 s for bytes that are due (a response, a request, a
+  probe), the same as the `timeout` of the clients in these suites. A converter may hold serial
+  bytes for hundreds of milliseconds before it sends them as a datagram (seen: about 400 ms a
+  round trip). Bytes that arrive sooner end the wait, so a fast link pays nothing.
 - **Serial settings.** The suites run at 9600 baud, 8 data bits, no parity, 1 stop bit (9600 8N1),
   the usual Modbus default. A converter's serial side must be set to the same.
 - **Baud-rate sweep.** With two serial ports, a sweep runs first: at each of 1200, 2400, 4800,
   9600, 19200, 38400, 57600 and 115200 baud (8N1) it sends a request from the peer and checks the
   response. A rate that fails is not an error, since a port need not support every rate. The sweep
   always tries every rate and, when done, lists all the rates that worked; it passes when at least
-  one worked. When none works, it fails and the other serial suites are not run. With a TCP end
+  one worked. When none works, it fails and the other serial suites are not run. With a UDP end
   there is no sweep, since the converter's rate is fixed.
 - **Suite baud rate with two serial ports.** 9600 is the industry default, so the other serial
   suites use it whenever the rates that worked include it. Only when that list lacks 9600 do they
   run at the first rate in it.
 - **Roles.** With two serial ports, the server side opens the first and the peer (a raw serial
-  port, or `Modbus_Client`) the second. With a TCP end, the library under test is on the serial
-  port in both roles, and the TCP end is its peer: a client, a server or a raw socket, whichever
-  the connection direction allows (`Modbus_Server` only listens; `Modbus_Client` only connects).
-- **Set means required.** Before the serial suites run, a pre-check opens every serial end and
-  connects to (the next end of a remote pool) or waits for the TCP end. When `MODBUS_SERIAL_PORTS` is set and an end cannot be
-  used, the serial suites fail with the reason; they are skipped only when the variable is unset.
+  port, or `Modbus_Client`) the second. With a UDP end, the library under test is on the serial
+  port in both roles, and the UDP end is its peer: a raw socket, an RTU-over-UDP `Modbus_Client`
+  (bound to the local port with `local`) or an RTU-over-UDP `Modbus_Server`. The end-to-end suite
+  of the two classes therefore runs twice, once with each class on the serial port. An
+  RTU-over-UDP server answers to the address and port a request came from, so the run with the
+  server on the UDP end is skipped when the converter sends from another port than the given
+  remote's.
+- **Set means required.** Before the serial suites run, a pre-check opens every end. With a UDP
+  end it also passes a probe (a read request that no one answers) through the converter each way
+  and expects the same bytes within the response wait: first from the serial port to the local UDP port, which
+  also gives the learned remote and the port the converter sends from; then from the UDP end to
+  the serial port. When `MODBUS_SERIAL_PORTS` is set and an end cannot be used or a probe does
+  not arrive, the serial suites fail with the reason; they are skipped only when the variable is
+  unset.
 - **Re-opening a serial port.** A serial port just closed may refuse to re-open for a few tens of
   milliseconds (seen with a CH340 driver: `Access is denied`). Whenever the tests open a serial
   port, whether as a raw stream, through `Modbus_Server.start()` or through a serial
@@ -144,33 +142,25 @@ runner" below); it can also be set by hand, e.g. to run the serial tests under
 
 `pnpm test:serial` (`test/run-serial.js`) runs the serial tests over every direction of a serial
 port in one command. It handles only the serial tests; the other tests run with `pnpm test`.
-It takes one of two forms, and the first argument is always a serial port (no `:`):
+It takes one of two forms, and the first argument is always a serial port:
 
-| Form                                                    | Runs, in order                                                              |
-| ------------------------------------------------------- | --------------------------------------------------------------------------- |
-| `pnpm test:serial COMn COMm`                            | `COMn,COMm`, then the reverse direction `COMm,COMn`                         |
-| `pnpm test:serial COMn [:port] [host:port[,host:port]]` | `COMn,:port` when `:port` is given; then `COMn,<pool>` when a pool is given |
+| Form                                                          | Runs, in order                                       |
+| ------------------------------------------------------------- | ---------------------------------------------------- |
+| `pnpm test:serial COMn COMm`                                  | `COMn,COMm`, then the reverse direction `COMm,COMn`  |
+| `pnpm test:serial COMn <local-udp-port> [<address>:<port>]`   | `COMn,<local-udp-port>[,<address>:<port>]`           |
 
-- `:port` is optional; when given, it comes right after the serial port, and there is only one.
-  It may name its converter as `:port@address` (see "Converter address" above), e.g.
-  `pnpm test:serial COM4 :502@192.168.213.254`.
-- The remote pool is optional and is one argument: one or more remote ends `host:port` separated
-  by `,`, e.g. `192.168.89.2:502,192.168.89.2:503`. It comes last and forms the pool of one run;
-  the runner joins its ends with `|` in `MODBUS_SERIAL_PORTS`. Writing the pool as one argument
-  shows that its ends make up one run, not one run each. At least one of `:port` and the pool
-  must be given; leaving one out tests only the other direction.
-- The two forms cannot be mixed (e.g. `COM4 COM5 :502`): that would need the first serial port
-  wired to another serial port and to a converter at the same time.
-- The option `--settle <ms>` may come before the ends, in either form; it sets
-  `MODBUS_CONVERTER_SETTLE_MS` for every run (see "Converter settle time" above), e.g.
-  `pnpm test:serial --settle 500 COM4 :502`. Without it the tests use their default.
-- Arguments that fit neither form, an end that `MODBUS_SERIAL_PORTS` would refuse (a bad port, an
-  `@address` that is not an IP address), an unknown option, or a `--settle` value that is not a
-  non-negative integer print the usage and exit with code 2; no test runs.
-- Each run is a `node --test test/serial.test.js` child process with `MODBUS_SERIAL_PORTS` (and
-  `MODBUS_CONVERTER_SETTLE_MS` when `--settle` is given) set for it only; the next run starts once it has exited, so every port and connection it held has been
-  released. There is no wait between runs: re-opening a serial port is covered by the open retry
-  above, and the TCP side by the converter requirement. With two serial ports the baud-rate sweep
-  runs in each direction.
+- The arguments are the ends of `MODBUS_SERIAL_PORTS`, one each: `<local-udp-port>` is the UDP
+  port the converter sends to, e.g. `pnpm test:serial COM4 502`, and the optional third argument
+  names the converter (see "Given remote" above), e.g. `pnpm test:serial COM4 502
+  192.168.89.2:4001`.
+- A UDP end is one run: there is no direction to reverse, and both roles of the serial port are
+  covered in it.
+- Arguments that fit neither form, or that `MODBUS_SERIAL_PORTS` would refuse (a remote that is
+  not an IPv4 address with a port), print the reason and the usage and exit with code 2; no test
+  runs. The runner takes no options.
+- Each run is a `node --test test/serial.test.js` child process with `MODBUS_SERIAL_PORTS` set
+  for it only; the next run starts once it has exited, so every port it held has been released.
+  There is no wait between runs: re-opening a serial port is covered by the open retry above.
+  With two serial ports the baud-rate sweep runs in each direction.
 - A failed run does not stop the others. At the end the runner lists each run as `pass` or `FAIL`
   and exits with code 1 when any failed.
