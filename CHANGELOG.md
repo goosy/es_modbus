@@ -1,5 +1,27 @@
 # Changelog
 
+## v0.3.2 - 2026-11-17
+
+### Both
+
+- The package ships TypeScript declarations, `dist/modbus.d.ts`, found through the `types`
+  condition of `exports`. They cover only the public API: the options of each transport, the
+  `handler` methods, the results of `read()` and `write()`, and the event listeners. An option
+  that does not apply to the selected transport is a type error, as it is a run-time error.
+  They use the Node.js types (`Buffer`, `EventEmitter`, `Socket`), so a TypeScript project also
+  needs `@types/node`.
+- The npm package now links to the GitHub repository, its homepage and its issue tracker.
+
+## v0.3.2 - 2026-11-17 (中文)
+
+### 通用
+
+- 包中附带 TypeScript 类型声明 `dist/modbus.d.ts`，通过 `exports` 的 `types` 条件找到。
+  它只覆盖公开 API：各传输方式的选项、`handler` 方法、`read()` 和 `write()` 的结果以及事件监听器。
+  不适用于所选传输方式的选项是类型错误，与运行时报错一致。声明使用 Node.js 的类型
+  （`Buffer`、`EventEmitter`、`Socket`），因此 TypeScript 项目还需要安装 `@types/node`。
+- npm 包现在链接到 GitHub 仓库、主页和问题跟踪页。
+
 ## v0.3.1 - 2026-11-16
 
 ### Both
