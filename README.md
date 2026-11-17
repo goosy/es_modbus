@@ -2,10 +2,13 @@
 
 [中文](./README.zh-cn.md)
 
-A small Modbus client and server for Node.js, as ES modules, with no runtime dependencies.
+Modbus client and server for Node.js over TCP, RTU, RTU over TCP, UDP and RTU over UDP, with no
+runtime dependencies.
 
 - **Transports:** Modbus TCP, Modbus RTU on a serial port, RTU over TCP, Modbus UDP, and RTU over
   UDP.
+- **Serial device servers:** reach RS-485 devices behind a serial-to-Ethernet gateway with RTU
+  over TCP or RTU over UDP; no serial port or native addon is needed on the host.
 - **Function codes:** 1, 2, 3, 4, 5, 6, 15, 16, and exception responses.
 - **Client:** Promise-based reads and writes, per-request timeout, send pacing, automatic
   reconnect with exponential back-off, and dead-link detection on TCP.
@@ -17,7 +20,10 @@ A small Modbus client and server for Node.js, as ES modules, with no runtime dep
 pnpm add es-modbus
 ```
 
-Node.js 20.11 or later is required. The serial port support ships as prebuilt native addons for
+Node.js 20.11 or later is required. es-modbus is an ES module; on Node.js 20.19+ or 22.12+ it
+can also be loaded with `require('es-modbus')`.
+
+The serial port support ships as prebuilt native addons for
 Windows, macOS, Linux (glibc and musl) and Android; it is loaded only when a serial port is first
 used, so TCP and UDP work on any platform.
 

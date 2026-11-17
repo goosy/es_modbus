@@ -2,6 +2,12 @@
   "name": "es-modbus",
   "version": "0.3.1",
   "description": "Modbus TCP, RTU, RTU-over-TCP, UDP and RTU-over-UDP client and server for Node.js",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/goosy/es_modbus.git"
+  },
+  "homepage": "https://github.com/goosy/es_modbus#readme",
+  "bugs": "https://github.com/goosy/es_modbus/issues",
   "type": "module",
   "exports": {
     ".": "./dist/modbus.js"
@@ -33,10 +39,19 @@
   },
   "keywords": [
     "modbus",
-    "modbusTCP",
-    "modbusRTU"
+    "modbus-tcp",
+    "modbus-rtu",
+    "modbus-rtu-over-tcp",
+    "modbus-udp",
+    "modbus-rtu-over-udp",
+    "modbus-client",
+    "modbus-server",
+    "serial",
+    "rs485",
+    "plc",
+    "industrial-automation"
   ],
-  "author": "",
+  "author": "goosy",
   "license": "ISC",
   "packageManager": "pnpm@12.15.0"
 }

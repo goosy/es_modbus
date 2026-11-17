@@ -2,9 +2,11 @@
 
 [English](./README.md)
 
-一个小巧的 Node.js Modbus 客户端与服务端，ES 模块，没有运行时依赖。
+Node.js 的 Modbus 客户端与服务端，支持 TCP、RTU、RTU over TCP、UDP 和 RTU over UDP，没有运行时依赖。
 
 - **传输方式：** Modbus TCP、串口上的 Modbus RTU、RTU over TCP、Modbus UDP，以及 RTU over UDP。
+- **串口服务器：** 通过 RTU over TCP 或 RTU over UDP 访问串口转以太网网关后面的 RS-485 设备；
+  主机上不需要串口，也不需要原生插件。
 - **功能码：** 1、2、3、4、5、6、15、16，以及异常响应。
 - **客户端：** 基于 Promise 的读写、按请求计算的超时、发送节奏控制、指数退避的自动重连，
   以及 TCP 上的死链检测。
@@ -16,7 +18,10 @@
 pnpm add es-modbus
 ```
 
-需要 Node.js 20.11 或更高版本。串口支持以预编译的原生插件提供，覆盖 Windows、macOS、
+需要 Node.js 20.11 或更高版本。es-modbus 是 ES 模块；在 Node.js 20.19+ 或 22.12+ 上也可以用
+`require('es-modbus')` 加载。
+
+串口支持以预编译的原生插件提供，覆盖 Windows、macOS、
 Linux（glibc 与 musl）和 Android；它只在首次使用串口时加载，所以 TCP 和 UDP 在任何平台都能用。
 
 ## 客户端
