@@ -42,6 +42,11 @@ mix. The server works in PDU addresses only.
 - Client-side transaction tracking, per-request timeout, send pacing, and automatic reconnect
   for the TCP family (TCP and RTU-over-TCP) and the UDP family (UDP and RTU-over-UDP).
 - Event emitters on both classes for wire tracing (`send` / `receive`) and lifecycle.
+- TypeScript declarations of the public API, `dist/modbus.d.ts`, found through the `types`
+  condition of `exports`. They declare what `spec-client.md` and `spec-server.md` define and
+  nothing else: an option that does not apply to the selected transport is a type error, as it is
+  a run-time error. They use the Node.js types of `@types/node` (`Buffer`, `EventEmitter`,
+  `Socket`).
 - An automated test suite for the codec, the server and the client (see `design-test.md`).
 
 ### Out of scope
@@ -50,7 +55,6 @@ mix. The server works in PDU addresses only.
   encapsulated transport, etc.). Parsers reject them.
 - ASCII transport.
 - Any persistent data model on the server — storage is entirely the caller's `handler`.
-- TypeScript types (the code documents shapes with JSDoc typedefs).
 
 ## Tools and dependencies
 
@@ -75,6 +79,8 @@ mix. The server works in PDU addresses only.
 - **Tests:** the Node.js built-in test runner (`node:test`). `serialport-rs` is a
   `devDependency`: the build bundles it, and the serial tests use its `SerialPort` for a raw peer
   port.
+- **Types:** TypeScript (`typescript`) and `@types/node`, both `devDependencies` pinned to
+  exact versions; `tsc` type-checks `test/types.ts` against the declarations.
 - **Linter:** ESLint with `@stylistic/eslint-plugin` (`eslint.config.js`), all pinned to exact
   versions in `devDependencies`. ESLint's recommended rules find code problems; `@stylistic`
   normalizes whitespace (tab indent, spacing, quotes, semicolons) without re-wrapping lines, so
@@ -85,17 +91,20 @@ mix. The server works in PDU addresses only.
 | Path                  | Role                                                             |
 | --------------------- | --------------------------------------------------------------- |
 | `src/index.js`        | Public surface: `export { Modbus_Client, Modbus_Server, Modbus_Exception }`. |
+| `src/index.d.ts`      | The declarations of the public surface, written by hand.         |
 | `src/ModbusClient.js` | Client class.                                                   |
 | `src/ModbusServer.js` | Server class.                                                   |
 | `src/util.js`         | Pure protocol codec (frame parsing, CRC, range parsing). No I/O. |
 | `src/serial.js`       | Serial options check, and serial port creation (loads `serialport-rs` on first use). |
-| `build.js`            | The build: bundles `src/index.js` → `dist/modbus.js`, copies `native/`, writes `THIRD_PARTY_LICENSES`. |
+| `build.js`            | The build: bundles `src/index.js` → `dist/modbus.js`, copies `src/index.d.ts` → `dist/modbus.d.ts` and `native/`, writes `THIRD_PARTY_LICENSES`. |
 | `eslint.config.js`    | ESLint and `@stylistic` configuration.                          |
 | `dist/modbus.js`      | Build output (one ES module) and the package `exports` entry.   |
+| `dist/modbus.d.ts`    | Build output: the declarations, the `types` condition of `exports`. |
 | `native/`             | Build output: the `serialport-rs` native addons, found by the bundle at `dist/../native`, and the licenses of their Rust crates. |
 | `THIRD_PARTY_LICENSES` | Build output: the license texts of the bundled packages.       |
 | `test/*.test.js`      | Automated tests (see `design-test.md`).                         |
 | `test/helpers.js`     | Shared test fixtures.                                           |
+| `test/types.ts`       | Type-checked use of the declarations (`test/tsconfig.json`).   |
 
 The build outputs are git-ignored, produced by `pnpm build` / `prepare`, and published through
 `package.json` `files`.
@@ -104,7 +113,8 @@ Commands:
 
 - `pnpm install`
 - `pnpm build` — runs `build.js`; run it before anything that imports `../dist/modbus.js`.
-- `pnpm test` — builds, then runs the automated test suite (`node --test`).
+- `pnpm test` — builds, type-checks `test/types.ts` (`tsc -p test`), then runs the automated
+  test suite (`node --test`).
 - `pnpm test:coverage` — the test suite with a coverage report for `src/`.
 - `pnpm lint` — runs ESLint (`eslint .`); `pnpm lint --fix` applies the fixable rules. It is
   separate from `pnpm test`.

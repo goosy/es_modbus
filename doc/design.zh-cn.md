@@ -60,6 +60,11 @@
   `__dirname` 替换为 `import.meta.dirname`：`serialport-rs` 在 `path.join(__dirname, "..", "native")`
   下查找原生模块，而 ES 模块没有 `__dirname`。因此打包产物在 `dist/../native`（即包根目录）处找到
   它们。打包代码中只有这一处 `__dirname`，替换不会影响其他代码。
+- 把 `src/index.d.ts` 复制为 `dist/modbus.d.ts`。类型声明是手写的，不由源码的 JSDoc 生成：生成的声明
+  会把类的内部成员声明为公开，并把大多数选项和结果标为 `any`（issue#yz87dmsf）。它只覆盖 spec 定义的
+  内容，并随 spec 一起变更。每种传输方式的选项是联合类型中的一个成员，其中其他传输方式的键和不适用于
+  该传输方式的选项被标为 `never`（`Exclusive`），因此放错的选项无法通过编译，正如它在构造时抛错。
+  事件作为 `@types/node` 中泛型 `EventEmitter` 的类型参数，所以监听函数能得到其事件参数的类型。
 - 用 `serialport-rs` 的 `native/` 中受支持平台的原生模块替换 `native/`：每个 Rust 目标三元组一个
   `<目标>/serialport-rs.node`，由它的加载器按平台、架构、libc 和 ARM 版本选择。`build.js` 中的
   `NATIVE_TARGETS` 列出这些三元组，与 `spec.zh-cn.md` 的“串口支持的平台”一致。同时复制

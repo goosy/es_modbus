@@ -73,6 +73,14 @@ file; so far [design-test.md](./design-test.md), the test suite.
   native addon under `path.join(__dirname, "..", "native")`, and an ES module has no
   `__dirname`. The bundle therefore finds the addons at `dist/../native`, the package root.
   `__dirname` appears only there in the bundled code, so the replacement touches nothing else.
+- Copies `src/index.d.ts` to `dist/modbus.d.ts`. The declarations are written by hand, not
+  generated from the JSDoc of the source: generated ones would declare the internal members of
+  the classes as public, and type most options and results as `any` (issue#yz87dmsf). They cover
+  only what the spec defines, and change with it. Each transport's options are one member of a
+  union, in which the transport keys and options that do not apply to that transport are typed
+  `never` (`Exclusive`), so a misplaced option fails to compile as it fails at construction.
+  The events are the type argument of the generic `EventEmitter` of `@types/node`, so a
+  listener gets the types of its event's arguments.
 - Replaces `native/` with the addons of the supported platforms from `serialport-rs`'s
   `native/`, one `<target>/serialport-rs.node` per Rust target triple, which its loader picks by
   platform, architecture, libc and ARM version. `NATIVE_TARGETS` in `build.js` lists the triples,

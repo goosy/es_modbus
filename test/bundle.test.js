@@ -45,9 +45,11 @@ describe('build output dist/modbus.js', { skip }, () => {
 		assert.equal(typeof bundle.Modbus_Server, 'function');
 	});
 
-	test('package.json exports points at the bundle', async () => {
+	test('package.json exports points at the bundle and its declarations', async () => {
 		const pkg = JSON.parse(await readFile(new URL('../package.json', import.meta.url), 'utf8'));
-		assert.equal(pkg.exports['.'], './dist/modbus.js');
+		assert.deepEqual(pkg.exports['.'], { types: './dist/modbus.d.ts', default: './dist/modbus.js' });
+		const declarations = await readFile(new URL('dist/modbus.d.ts', root_url), 'utf8');
+		assert.equal(declarations, await readFile(new URL('index.d.ts', src_url), 'utf8'));
 	});
 
 	test('serialport-rs is bundled without its parsers, not imported from outside', async () => {

@@ -19,7 +19,7 @@ pnpm add es-modbus
 ```
 
 需要 Node.js 20.11 或更高版本。es-modbus 是 ES 模块；在 Node.js 20.19+ 或 22.12+ 上也可以用
-`require('es-modbus')` 加载。
+`require('es-modbus')` 加载。包内附带 TypeScript 类型声明。
 
 串口支持以预编译的原生插件提供，覆盖 Windows、macOS、
 Linux（glibc 与 musl）和 Android；它只在首次使用串口时加载，所以 TCP 和 UDP 在任何平台都能用。

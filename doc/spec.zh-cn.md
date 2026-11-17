@@ -38,6 +38,9 @@
 - 客户端的事务跟踪、单请求超时、发送节流，以及 TCP 家族（TCP 和 RTU-over-TCP）与 UDP 家族
   （UDP 和 RTU-over-UDP）的自动重连。
 - 两个类都提供事件发射器，用于线路跟踪（`send` / `receive`）和生命周期通知。
+- 公共 API 的 TypeScript 类型声明 `dist/modbus.d.ts`，通过 `exports` 的 `types` 条件找到。它只声明
+  `spec-client.zh-cn.md` 和 `spec-server.zh-cn.md` 定义的内容：不适用于所选传输方式的选项是类型错误，
+  正如它是运行时错误。声明使用 `@types/node` 中的 Node.js 类型（`Buffer`、`EventEmitter`、`Socket`）。
 - 覆盖编解码、服务端和客户端的自动化测试套件（见 `design-test.zh-cn.md`）。
 
 ### 范围之外
@@ -45,7 +48,6 @@
 - 上述列表以外的功能码（诊断 `0x08`、文件记录访问、FIFO、封装传输等）。解析器会拒绝它们。
 - ASCII 传输。
 - 服务端上的任何持久化数据模型 — 存储完全由调用者的 `handler` 负责。
-- TypeScript 类型（代码用 JSDoc typedef 描述数据形状）。
 
 ## 工具与依赖
 
@@ -66,6 +68,8 @@
   无需插件）。
 - **测试：** Node.js 内置测试运行器（`node:test`）。`serialport-rs` 列在 `devDependencies` 中：
   构建时打包它，串口测试用它的 `SerialPort` 作为原始对端串口。
+- **类型：** TypeScript（`typescript`）和 `@types/node`，均列在 `devDependencies` 中并锁定精确版本；
+  `tsc` 用声明对 `test/types.ts` 做类型检查。
 - **代码检查：** ESLint 加 `@stylistic/eslint-plugin`（`eslint.config.js`），均在 `devDependencies`
   中锁定精确版本。ESLint 推荐规则负责发现代码问题；`@stylistic` 只统一空白（Tab 缩进、空格、引号、
   分号），不重新折行，因此手工排版的表格保持原样。不使用会重排代码的格式化工具（Prettier、Biome）。
@@ -75,17 +79,20 @@
 | 路径                  | 作用                                                             |
 | --------------------- | --------------------------------------------------------------- |
 | `src/index.js`        | 公共接口：`export { Modbus_Client, Modbus_Server, Modbus_Exception }`。 |
+| `src/index.d.ts`      | 公共接口的类型声明，手工编写。                                   |
 | `src/ModbusClient.js` | 客户端类。                                                       |
 | `src/ModbusServer.js` | 服务端类。                                                       |
 | `src/util.js`         | 纯协议编解码（帧解析、CRC、区间解析）。无 I/O。                  |
 | `src/serial.js`       | 串口选项校验，以及串口创建（首次使用时才加载 `serialport-rs`）。 |
-| `build.js`            | 构建：将 `src/index.js` 打包为 `dist/modbus.js`，复制 `native/`，生成 `THIRD_PARTY_LICENSES`。 |
+| `build.js`            | 构建：将 `src/index.js` 打包为 `dist/modbus.js`，把 `src/index.d.ts` 复制为 `dist/modbus.d.ts`，复制 `native/`，生成 `THIRD_PARTY_LICENSES`。 |
 | `eslint.config.js`    | ESLint 与 `@stylistic` 配置。                                    |
 | `dist/modbus.js`      | 构建产物（单个 ES 模块），也是包 `exports` 的入口。              |
+| `dist/modbus.d.ts`    | 构建产物：类型声明，即 `exports` 的 `types` 条件。              |
 | `native/`             | 构建产物：`serialport-rs` 的原生模块（打包产物在 `dist/../native` 处查找它们）及其 Rust crate 的许可证。 |
 | `THIRD_PARTY_LICENSES` | 构建产物：被打包的包的许可证文本。                              |
 | `test/*.test.js`      | 自动化测试（见 `design-test.zh-cn.md`）。                        |
 | `test/helpers.js`     | 共享的测试夹具。                                                 |
+| `test/types.ts`       | 对类型声明的用法做类型检查（`test/tsconfig.json`）。            |
 
 构建产物已被 git 忽略，由 `pnpm build` / `prepare` 生成，并通过 `package.json` 的 `files` 发布。
 
@@ -93,7 +100,8 @@
 
 - `pnpm install`
 - `pnpm build` — 运行 `build.js`；在导入 `../dist/modbus.js` 的任何操作之前运行。
-- `pnpm test` — 先构建，再运行自动化测试套件（`node --test`）。
+- `pnpm test` — 先构建，再对 `test/types.ts` 做类型检查（`tsc -p test`），然后运行自动化测试套件
+  （`node --test`）。
 - `pnpm test:coverage` — 运行测试套件并输出 `src/` 的覆盖率报告。
 - `pnpm lint` — 运行 ESLint（`eslint .`）；`pnpm lint --fix` 应用可自动修复的规则。它与 `pnpm test`
   相互独立。

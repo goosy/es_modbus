@@ -1,6 +1,7 @@
 // Builds the package: bundles src/index.js, with the serialport-rs JavaScript, into
-// dist/modbus.js; copies the serialport-rs native addons of the supported platforms to native/;
-// and writes the licenses of the bundled packages to THIRD_PARTY_LICENSES.
+// dist/modbus.js, next to its declarations dist/modbus.d.ts; copies the serialport-rs native
+// addons of the supported platforms to native/; and writes the licenses of the bundled packages
+// to THIRD_PARTY_LICENSES.
 import { build } from 'rolldown';
 import { cp, readdir, readFile, rm, writeFile } from 'node:fs/promises';
 import { createRequire } from 'node:module';
@@ -20,7 +21,8 @@ const NATIVE_TARGETS = [
 ];
 
 /**
- * Bundles src/index.js into dist/modbus.js as a single ES module; returns the bundled module IDs.
+ * Bundles src/index.js into dist/modbus.js as a single ES module, and copies the declarations to
+ * dist/modbus.d.ts; returns the bundled module IDs.
  */
 async function bundle() {
 	await rm(join(root, 'dist'), { recursive: true, force: true });
@@ -33,6 +35,8 @@ async function bundle() {
 		// One file; the serial code stays lazy behind its dynamic import()
 		output: { file: join(root, 'dist/modbus.js'), format: 'es', codeSplitting: false },
 	});
+	// The hand-written declarations of the public API, found by the `types` condition of `exports`
+	await cp(join(root, 'src/index.d.ts'), join(root, 'dist/modbus.d.ts'));
 	return chunk.moduleIds;
 }
 

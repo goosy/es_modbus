@@ -21,7 +21,7 @@ pnpm add es-modbus
 ```
 
 Node.js 20.11 or later is required. es-modbus is an ES module; on Node.js 20.19+ or 22.12+ it
-can also be loaded with `require('es-modbus')`.
+can also be loaded with `require('es-modbus')`. TypeScript declarations are included.
 
 The serial port support ships as prebuilt native addons for
 Windows, macOS, Linux (glibc and musl) and Android; it is loaded only when a serial port is first

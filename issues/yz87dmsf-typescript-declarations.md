@@ -1,9 +1,9 @@
 ---
 id: yz87dmsf
 opened: 2026-11-17T08:32:27.364Z
-closed:
+closed: 2026-11-17T08:42:49.752Z
 title: Ship hand-written TypeScript declarations with the package
-status: accepted      # open | accepted | fixed | rejected | wontfix
+status: fixed         # open | accepted | fixed | rejected | wontfix
 labels: []
 remote:
 ---

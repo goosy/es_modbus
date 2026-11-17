@@ -14,6 +14,7 @@
 - 代码尚未满足规格之处，测试仍然陈述规格要求的行为，并标记为 `{ todo }`，这样套件能显示缺少什么，
   而不会失败；修复后移除该标记。
 - 不需要额外的测试依赖：套件使用 Node.js 内置的运行器（`node:test`、`node:assert/strict`）。
+  类型检查使用类型声明本来就需要的 `typescript`。
 - 除构建产物测试外，测试直接从 `src/` 导入，因此源码测试无需构建。
 
 ## 分层
@@ -23,7 +24,9 @@
 `test/serial-bridge.test.js` 在两个伪串口之间的模拟串行线路上检查串口路径的时序（按波特率逐字节到达、
 超过线路静默时间的停顿、迟到的应答、设备掉线）；`test/udp.test.js` 覆盖 UDP 家族，既让每个类
 单独面对一个原始 UDP 对端，也通过回环 UDP 对两个类做端到端测试；`test/bundle.test.js` 覆盖构建产物 `dist/modbus.js`
-及 `native/`。夹具（包括模拟串行线路 `create_serial_bridge`）都位于 `test/helpers.js`；其中的 `parse_link()`
+及 `native/` 和 `dist/modbus.d.ts`；`test/types.ts` 从不运行，只由 `tsc -p test` 对照发布的类型声明做
+类型检查，通过 `exports` 以 `es-modbus` 导入：它像 README 那样调用 API，并用 `@ts-expect-error`
+标出声明必须拒绝的误用（没有传输方式、两个传输方式、不适用的选项）。夹具（包括模拟串行线路 `create_serial_bridge`）都位于 `test/helpers.js`；其中的 `parse_link()`
 为串口测试和串口测试启动脚本解析 `MODBUS_SERIAL_PORTS`。串口测试的辅助代码不另设测试：取值不合法时，
 串口测试运行失败并注明原因。
 
@@ -31,7 +34,7 @@
 
 | 命令                 | 作用                                                                  |
 | -------------------- | --------------------------------------------------------------------- |
-| `pnpm test`          | 先运行 `pnpm build`，再用 `node --test` 运行所有 `test/**/*.test.js`。 |
+| `pnpm test`          | 先运行 `pnpm build` 和 `tsc -p test`，再用 `node --test` 运行所有 `test/**/*.test.js`。 |
 | `pnpm test:coverage` | 同上，并输出仅限 `src/**` 的内置覆盖率报告。                          |
 
 也可以直接运行 `node --test`；此时若 `dist/modbus.js` 不存在，或比 `src/` 中任一文件旧，构建产物测试

@@ -15,7 +15,7 @@ needs. A topic split out of [design.md](./design.md).
   marked `{ todo }`, so the suite shows what is missing without failing; the mark is removed once
   it is fixed.
 - No extra test dependency: the suite uses the Node.js built-in runner (`node:test`,
-  `node:assert/strict`).
+  `node:assert/strict`). The type check uses the `typescript` the declarations need anyway.
 - Tests import from `src/` directly, except the bundle test, so the source tests need no build.
 
 ## Layers
@@ -27,7 +27,11 @@ paced at the baud rate, pauses longer than the line silence, a late response, a 
 gone) over a simulated serial line between two fake serial ports;
 `test/udp.test.js` covers the UDP family, each class against a raw UDP peer and the two end to
 end over loopback UDP;
-`test/bundle.test.js` covers the build output `dist/modbus.js` with `native/`. Fixtures, the simulated
+`test/bundle.test.js` covers the build output `dist/modbus.js` with `native/` and
+`dist/modbus.d.ts`; `test/types.ts` is never run, only type-checked by `tsc -p test` against
+the published declarations, imported as `es-modbus` through `exports`: it calls the API as the
+README does, and marks with `@ts-expect-error` the misuses the declarations must reject (no
+transport, two transports, an option that does not apply). Fixtures, the simulated
 serial line (`create_serial_bridge`) among them, live in `test/helpers.js`; its `parse_link()` of `test/helpers.js` parses
 `MODBUS_SERIAL_PORTS` for both the serial tests and the serial test runner. The serial test
 helpers have no tests of their own: a wrong value makes the serial run fail with the reason.
@@ -36,7 +40,7 @@ helpers have no tests of their own: a wrong value makes the serial run fail with
 
 | Command              | What it does                                                          |
 | -------------------- | --------------------------------------------------------------------- |
-| `pnpm test`          | Runs `pnpm build`, then every `test/**/*.test.js` with `node --test`. |
+| `pnpm test`          | Runs `pnpm build`, `tsc -p test`, then every `test/**/*.test.js` with `node --test`. |
 | `pnpm test:coverage` | Same, with the built-in coverage report limited to `src/**`.         |
 
 Running `node --test` directly also works; the bundle test is then skipped when `dist/modbus.js` is
