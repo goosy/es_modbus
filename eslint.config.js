@@ -26,6 +26,8 @@ export default [
 			'@stylistic/max-statements-per-line': ['error', { max: 2 }],
 			// Continuation lines of binary expressions are left to the author.
 			'@stylistic/indent-binary-ops': 'off',
+			// Line breaks inside lists are left to the author, so hand-laid tables keep their layout.
+			'@stylistic/list-style': 'off',
 			// Use template literals instead of concatenating strings with values.
 			'prefer-template': 'error',
 			// One variable per declaration.
