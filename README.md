@@ -7,12 +7,28 @@ runtime dependencies.
 
 - **Transports:** Modbus TCP, Modbus RTU on a serial port, RTU over TCP, Modbus UDP, and RTU over
   UDP.
-- **Serial device servers:** reach RS-485 devices behind a serial-to-Ethernet gateway with RTU
-  over TCP or RTU over UDP; no serial port or native addon is needed on the host.
 - **Function codes:** 1, 2, 3, 4, 5, 6, 15, 16, and exception responses.
 - **Client:** Promise-based reads and writes, per-request timeout, send pacing, automatic
   reconnect with exponential back-off, and dead-link detection on TCP.
 - **Server:** one instance can serve several unit IDs; the data stays in your own `handler`.
+
+## When to use es-modbus
+
+- **Devices behind a serial device server.** RTU over TCP and RTU over UDP reach RS-485 devices
+  through a serial-to-Ethernet converter, with no serial port or native addon on the host. On
+  UDP the client can bind a fixed local port (`local`) for a converter that sends to a fixed
+  destination, and accept replies from another source port (`any_source_port`).
+- **Links that split or merge frames.** Frames are delimited by their length and CRC, not by
+  timing: a frame split across reads or datagrams is joined, frames that arrive together are
+  split, and after corrupt bytes the receiver resynchronizes on the next valid frame. This holds
+  behind USB serial adapters with millisecond latency, and behind converters that pack serial
+  bytes into packets by their own timing.
+- **Installs without a build toolchain.** There are no runtime dependencies. The serial support
+  ships as prebuilt addons, loaded only when a serial port is first used, so TCP and UDP need no
+  native code at all.
+- **Both sides in one package.** A simulator, a test bench or a protocol gateway can use the
+  client and the server together; the server answers several unit IDs from your own data, and
+  its batch methods write a multi-register value in one step.
 
 ## Installation
 
